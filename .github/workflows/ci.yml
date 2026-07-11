@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install backend dependencies
+        run: uv sync
+      - name: Run backend tests
+        run: uv run pytest
+
+  overlay-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: overlay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: overlay/package-lock.json
+      - name: Install overlay dependencies
+        run: npm ci
+      - name: Typecheck overlay
+        run: npm run typecheck
+      - name: Build overlay web assets
+        run: npm run build
+
+  overlay-windows-package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: overlay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: overlay/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install overlay dependencies
+        run: npm ci
+      - name: Build Windows installer
+        run: npm run tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: questmate-overlay-windows
+          path: overlay/src-tauri/target/release/bundle/

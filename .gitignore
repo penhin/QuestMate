@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.agents/
+skills-lock.json
+
+overlay/.env
+overlay/node_modules/
+overlay/dist/
+overlay/src-tauri/target/
