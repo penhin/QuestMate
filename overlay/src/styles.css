@@ -658,24 +658,6 @@ a:focus-visible {
   font-weight: 800;
 }
 
-.readonly-field {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 8px;
-  background: #f8fafc;
-  padding: 9px 11px;
-  color: #425364;
-  font-size: 13px;
-}
-
-.readonly-field strong {
-  color: #182027;
-  font-size: 13px;
-}
-
 .field-stack input {
   width: 100%;
   min-width: 0;
@@ -695,6 +677,91 @@ a:focus-visible {
 .field-stack input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
+}
+
+.custom-select {
+  position: relative;
+}
+
+.custom-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid rgba(37, 99, 235, 0.2);
+  border-radius: 8px;
+  color: #172026;
+  background: #f8fbff;
+  padding: 0 11px;
+  font-size: 13px;
+  font-weight: 850;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease,
+    box-shadow 0.14s ease,
+    transform 0.14s ease;
+}
+
+.custom-select-trigger:hover,
+.custom-select-trigger.open {
+  border-color: rgba(37, 99, 235, 0.42);
+  background: #eef4ff;
+}
+
+.custom-select-trigger .ui-icon {
+  width: 15px;
+  height: 15px;
+  color: #425364;
+  transition: transform 0.14s ease;
+}
+
+.custom-select-trigger.open .ui-icon {
+  transform: rotate(180deg);
+}
+
+.custom-select-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 5px;
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+  animation: section-in 0.12s ease-out;
+}
+
+.custom-select-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  color: #334155;
+  background: transparent;
+  padding: 0 9px;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.custom-select-menu button:hover,
+.custom-select-menu button.selected {
+  color: #172026;
+  background: #eef4ff;
+}
+
+.select-check {
+  color: #2563eb;
+  font-weight: 950;
 }
 
 .field-stack input.invalid {

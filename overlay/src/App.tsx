@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   DEFAULT_AI_MODEL,
+  DEFAULT_DEEPSEEK_MODEL,
   type AiSettings,
   askQuestMate,
   checkBackend,
@@ -143,7 +144,7 @@ const COPY = {
   },
 } satisfies Record<Language, Copy>;
 
-type IconName = "settings" | "history" | "activity" | "minimize" | "api";
+type IconName = "settings" | "history" | "activity" | "minimize" | "api" | "chevron";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: keyof Copy; icon: IconName }> = [
   { id: "preferences", label: "preferences", icon: "settings" },
@@ -169,6 +170,7 @@ export default function App() {
   const [apiSaved, setApiSaved] = useState(false);
   const [apiError, setApiError] = useState("");
   const [shakePanel, setShakePanel] = useState(false);
+  const [providerOpen, setProviderOpen] = useState(false);
   const text = COPY[language];
 
   const detectedLabel = useMemo(() => {
@@ -247,6 +249,30 @@ export default function App() {
   function openApiSettings() {
     setSettingsOpen(true);
     setSettingsTab("api");
+  }
+
+  function changeProvider(provider: AiSettings["provider"]) {
+    setLocalAiSettings((current) => ({
+      ...current,
+      provider,
+      model:
+        current.model === DEFAULT_AI_MODEL || current.model === DEFAULT_DEEPSEEK_MODEL
+          ? provider === "deepseek"
+            ? DEFAULT_DEEPSEEK_MODEL
+            : DEFAULT_AI_MODEL
+          : current.model,
+      baseUrl:
+        current.baseUrl === "" ||
+        current.baseUrl === "https://api.anthropic.com" ||
+        current.baseUrl === "https://api.deepseek.com"
+          ? provider === "deepseek"
+            ? "https://api.deepseek.com"
+            : ""
+          : current.baseUrl,
+    }));
+    setApiSaved(false);
+    setApiError("");
+    setProviderOpen(false);
   }
 
   async function submit(event?: FormEvent) {
@@ -406,9 +432,44 @@ export default function App() {
                 <div className="section-heading">
                   <h2>{text.apiSettings}</h2>
                 </div>
-                <div className="readonly-field">
+                <div className="field-stack provider-field">
                   <span>{text.aiProvider}</span>
-                  <strong>Anthropic</strong>
+                  <div
+                    className="custom-select"
+                    onBlur={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setProviderOpen(false);
+                      }
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className={providerOpen ? "custom-select-trigger open" : "custom-select-trigger"}
+                      onClick={() => setProviderOpen((open) => !open)}
+                      aria-haspopup="listbox"
+                      aria-expanded={providerOpen}
+                    >
+                      <span>{providerLabel(aiSettings.provider)}</span>
+                      <Icon name="chevron" />
+                    </button>
+                    {providerOpen && (
+                      <div className="custom-select-menu" role="listbox">
+                        {(["anthropic", "deepseek"] as const).map((provider) => (
+                          <button
+                            key={provider}
+                            type="button"
+                            className={aiSettings.provider === provider ? "selected" : ""}
+                            onClick={() => changeProvider(provider)}
+                            role="option"
+                            aria-selected={aiSettings.provider === provider}
+                          >
+                            <span>{providerLabel(provider)}</span>
+                            {aiSettings.provider === provider && <span className="select-check">✓</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <label className="field-stack">
                   <span>
@@ -422,7 +483,7 @@ export default function App() {
                       setApiSaved(false);
                       setApiError("");
                     }}
-                    placeholder="sk-ant-..."
+                    placeholder={aiSettings.provider === "deepseek" ? "sk-..." : "sk-ant-..."}
                     type="password"
                     required
                     spellCheck={false}
@@ -440,7 +501,7 @@ export default function App() {
                       setApiSaved(false);
                       setApiError("");
                     }}
-                    placeholder={DEFAULT_AI_MODEL}
+                    placeholder={aiSettings.provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_AI_MODEL}
                     required
                     spellCheck={false}
                   />
@@ -453,7 +514,9 @@ export default function App() {
                       setLocalAiSettings((current) => ({ ...current, baseUrl: event.target.value }));
                       setApiSaved(false);
                     }}
-                    placeholder="https://api.anthropic.com"
+                    placeholder={
+                      aiSettings.provider === "deepseek" ? "https://api.deepseek.com" : "https://api.anthropic.com"
+                    }
                     inputMode="url"
                     spellCheck={false}
                   />
@@ -589,6 +652,7 @@ function Icon({ name }: { name: IconName }) {
     activity: ["M22 12h-4l-3 8-6-16-3 8H2"],
     minimize: ["M6 12h12"],
     api: ["M4 12h4", "M16 12h4", "M9 7l-4 5 4 5", "M15 7l4 5-4 5", "M11 18l2-12"],
+    chevron: ["M6 9l6 6 6-6"],
   };
 
   return (
@@ -598,6 +662,10 @@ function Icon({ name }: { name: IconName }) {
       ))}
     </svg>
   );
+}
+
+function providerLabel(provider: AiSettings["provider"]) {
+  return provider === "deepseek" ? "DeepSeek" : "Anthropic";
 }
 
 function GameField(props: {

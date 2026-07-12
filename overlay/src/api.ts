@@ -12,33 +12,27 @@ export type ChatResponse = {
 };
 
 export type AiSettings = {
-  provider: "anthropic";
+  provider: "anthropic" | "deepseek";
   apiKey: string;
   model: string;
   baseUrl: string;
 };
 
-const API_BASE_URL_STORAGE_KEY = "questmate.apiBaseUrl";
 export const DEFAULT_API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
 const AI_SETTINGS_STORAGE_KEY = "questmate.aiSettings";
 export const DEFAULT_AI_MODEL = "claude-sonnet-4-5";
+export const DEFAULT_DEEPSEEK_MODEL = "deepseek-chat";
 
 export function normalizeApiBaseUrl(value: string): string {
   return value.trim().replace(/\/+$/, "");
 }
 
 export function getApiBaseUrl(): string {
-  if (typeof window === "undefined") {
-    return DEFAULT_API_BASE_URL;
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("questmate.apiBaseUrl");
   }
 
-  return normalizeApiBaseUrl(localStorage.getItem(API_BASE_URL_STORAGE_KEY) ?? DEFAULT_API_BASE_URL);
-}
-
-export function setApiBaseUrl(value: string): string {
-  const normalized = normalizeApiBaseUrl(value) || DEFAULT_API_BASE_URL;
-  localStorage.setItem(API_BASE_URL_STORAGE_KEY, normalized);
-  return normalized;
+  return normalizeApiBaseUrl(DEFAULT_API_BASE_URL);
 }
 
 export function getAiSettings(): AiSettings {
@@ -49,9 +43,9 @@ export function getAiSettings(): AiSettings {
   try {
     const stored = JSON.parse(localStorage.getItem(AI_SETTINGS_STORAGE_KEY) ?? "{}") as Partial<AiSettings>;
     return {
-      provider: "anthropic",
+      provider: stored.provider === "deepseek" ? "deepseek" : "anthropic",
       apiKey: stored.apiKey ?? "",
-      model: stored.model ?? DEFAULT_AI_MODEL,
+      model: stored.model ?? (stored.provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_AI_MODEL),
       baseUrl: stored.baseUrl ?? "",
     };
   } catch {
@@ -61,9 +55,9 @@ export function getAiSettings(): AiSettings {
 
 export function setAiSettings(settings: AiSettings): AiSettings {
   const normalized = {
-    provider: "anthropic" as const,
+    provider: settings.provider,
     apiKey: settings.apiKey.trim(),
-    model: settings.model.trim() || DEFAULT_AI_MODEL,
+    model: settings.model.trim() || (settings.provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_AI_MODEL),
     baseUrl: normalizeApiBaseUrl(settings.baseUrl),
   };
   localStorage.setItem(AI_SETTINGS_STORAGE_KEY, JSON.stringify(normalized));

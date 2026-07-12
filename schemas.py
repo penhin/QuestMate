@@ -11,6 +11,9 @@ class Source(BaseModel):
     url: HttpUrl
     snippet: str | None = None
     score: float | None = Field(default=None, ge=0)
+    source_type: Literal["official", "wiki", "community", "web"] = "web"
+    trust_score: float = Field(default=0.5, ge=0, le=1)
+    trust_label: str = "普通"
 
 
 class ChatRequest(BaseModel):
@@ -18,7 +21,7 @@ class ChatRequest(BaseModel):
     game: str = Field(min_length=1, max_length=120)
     session_id: UUID | None = None
     stream: bool = False
-    ai_provider: Literal["anthropic"] = "anthropic"
+    ai_provider: Literal["anthropic", "deepseek"] = "anthropic"
     ai_api_key: str | None = Field(default=None, max_length=400)
     ai_model: str | None = Field(default=None, max_length=120)
     ai_base_url: str | None = Field(default=None, max_length=300)
