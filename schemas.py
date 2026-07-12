@@ -16,6 +16,17 @@ class Source(BaseModel):
     trust_label: str = "普通"
 
 
+class PlannedSearchQuery(BaseModel):
+    source_type: Literal["official", "wiki", "community", "web"] = "web"
+    query: str = Field(min_length=1, max_length=240)
+
+
+class SearchPlan(BaseModel):
+    intent: str = Field(default="general", max_length=80)
+    queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=4)
+    missing_info: list[str] = Field(default_factory=list, max_length=4)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     game: str = Field(min_length=1, max_length=120)

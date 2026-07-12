@@ -3,6 +3,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 import main
+from config import Settings
+from model_providers import OpenAICompatibleProvider, create_model_provider
 from schemas import ChatRequest, FeedbackRating, FeedbackRequest
 from search import TavilySearchProvider
 
@@ -11,7 +13,7 @@ client = TestClient(main.app)
 
 
 class EmptySearchProvider:
-    async def search(self, query: str, game: str, max_results: int | None = None):
+    async def search(self, query: str, game: str, max_results: int | None = None, plan=None):
         return []
 
 
@@ -71,9 +73,13 @@ def test_feedback_schema() -> None:
 
 
 class FakeSearchClient:
+    def __init__(self):
+        self.queries = []
+
     def search(self, **kwargs):
         query = kwargs["query"]
-        if "官方" in query:
+        self.queries.append(query)
+        if "official" in query:
             return {
                 "results": [
                     {
@@ -84,12 +90,12 @@ class FakeSearchClient:
                     }
                 ]
             }
-        if "wiki" in query:
+        if "site:fandom.com" in query:
             return {
                 "results": [
                     {
-                        "title": "Wiki guide",
-                        "url": "https://example.com/wiki",
+                        "title": "Fandom guide",
+                        "url": "https://eldenring.fandom.com/wiki/Malenia",
                         "content": "Wiki answer",
                         "score": 0.9,
                     }
@@ -98,11 +104,27 @@ class FakeSearchClient:
         return {"results": []}
 
 
-async def test_search_routes_add_source_trust() -> None:
-    provider = TavilySearchProvider(client=FakeSearchClient())
+async def test_search_routes_use_global_sources_and_trust() -> None:
+    client = FakeSearchClient()
+    provider = TavilySearchProvider(client=client)
 
     sources = await provider.search("新手先打哪里？", "Elden Ring", max_results=5)
 
-    assert [source.source_type for source in sources] == ["wiki", "official"]
+    assert any(query.startswith("site:fandom.com Elden Ring") for query in client.queries)
+    assert [source.source_type for source in sources] == ["wiki"]
     assert sources[0].trust_label == "百科"
-    assert sources[1].trust_label == "官方"
+
+
+def test_deepseek_uses_openai_compatible_provider() -> None:
+    request = ChatRequest(
+        game="Elden Ring",
+        question="新手先打哪里？",
+        ai_provider="deepseek",
+        ai_api_key="test-key",
+        ai_model="deepseek-chat",
+        ai_base_url="https://api.deepseek.com",
+    )
+
+    provider = create_model_provider(request=request, settings=Settings())
+
+    assert isinstance(provider, OpenAICompatibleProvider)
