@@ -100,6 +100,9 @@ class InMemoryConversationStore:
     async def get_recent_messages(self, session_id: UUID, limit: int = 8) -> list[SessionMessage]:
         return self._messages.get(session_id, [])[-limit:]
 
+    async def session_exists(self, session_id: UUID) -> bool:
+        return session_id in self._messages
+
     async def list_sessions(self) -> SessionsResponse:
         summaries = []
         for session_id, messages in self._messages.items():
@@ -167,7 +170,6 @@ class PostgresConversationStore:
             return await self.fallback.save_chat(request, response)
 
         now = datetime.now(timezone.utc)
-        title = response.title or self._fallback_title_from_question(request.question)
         async with self.database.sessionmaker() as session:
             async with session.begin():
                 existing = await session.execute(
@@ -176,6 +178,7 @@ class PostgresConversationStore:
                     )
                 )
                 if existing.scalar_one_or_none() is None:
+                    title = response.title or self._fallback_title_from_question(request.question)
                     await session.execute(
                         insert(conversation_sessions).values(
                             session_id=str(response.session_id),
@@ -194,8 +197,8 @@ class PostgresConversationStore:
                         )
                     ).scalar_one_or_none()
                     values = {"updated_at": now}
-                    if not current:
-                        values["title"] = title
+                    if response.title and not current:
+                        values["title"] = response.title
                     await session.execute(
                         update(conversation_sessions)
                         .where(conversation_sessions.c.session_id == str(response.session_id))
@@ -274,6 +277,19 @@ class PostgresConversationStore:
                 for row in rows
             ]
             return list(reversed(messages))
+
+    async def session_exists(self, session_id: UUID) -> bool:
+        await self.init_schema()
+        if self._using_fallback:
+            return await self.fallback.session_exists(session_id)
+
+        async with self.database.sessionmaker() as session:
+            existing = await session.execute(
+                select(conversation_sessions.c.session_id).where(
+                    conversation_sessions.c.session_id == str(session_id)
+                )
+            )
+            return existing.scalar_one_or_none() is not None
 
     async def list_sessions(self) -> SessionsResponse:
         await self.init_schema()

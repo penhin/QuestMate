@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-import re
 from typing import Any, Protocol
 
 from tavily import TavilyClient
 
 from config import Settings, get_settings
+from query_tokens import question_relevance_tokens, relevance_tokens
 from schemas import PlannedSearchQuery, SearchPlan, Source
 
 
@@ -162,16 +162,14 @@ class TavilySearchProvider:
             str(item.get(field) or "")
             for field in ("title", "url", "content")
         ).lower()
-        tokens = TavilySearchProvider._relevance_tokens(game) + TavilySearchProvider._relevance_tokens(question)
+        game_tokens = relevance_tokens(game)
+        question_tokens = question_relevance_tokens(question)
 
-        if not tokens:
+        has_game_match = not game_tokens or any(token in text for token in game_tokens)
+        if not has_game_match:
+            return False
+
+        if not question_tokens:
             return True
 
-        return any(token in text for token in tokens)
-
-    @staticmethod
-    def _relevance_tokens(value: str) -> list[str]:
-        normalized = value.lower().strip()
-        tokens = [normalized] if len(normalized) >= 3 else []
-        tokens.extend(re.findall(r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}", normalized))
-        return list(dict.fromkeys(tokens))
+        return any(token in text for token in question_tokens)

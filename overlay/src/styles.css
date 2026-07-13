@@ -263,7 +263,6 @@ a:focus-visible {
 }
 
 .icon-button:active,
-.game-control button:active,
 .secondary-action:active,
 .primary-action:active,
 .submit:active:not(:disabled),
@@ -303,8 +302,7 @@ a:focus-visible {
 
 .game-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 7px;
+  grid-template-columns: minmax(0, 1fr);
   min-width: 0;
   align-items: end;
 }
@@ -330,9 +328,13 @@ a:focus-visible {
   outline: none;
 }
 
+.game-combobox {
+  position: relative;
+}
+
 .game-control input {
   height: 34px;
-  padding: 7px 9px;
+  padding: 7px 34px 7px 9px;
 }
 
 .game-control input:focus,
@@ -341,7 +343,41 @@ a:focus-visible {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
 }
 
-.game-control button,
+.game-combobox-toggle {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  color: #425364;
+  background: transparent;
+  transition:
+    color 0.14s ease,
+    transform 0.14s ease;
+}
+
+.game-combobox-toggle:hover {
+  color: #2563eb;
+}
+
+.game-combobox-toggle .ui-icon {
+  width: 15px;
+  height: 15px;
+  transition: transform 0.14s ease;
+}
+
+.game-combobox-toggle.open .ui-icon {
+  transform: rotate(180deg);
+}
+
+.game-options {
+  top: calc(100% + 5px);
+}
+
 .secondary-action {
   height: 34px;
   border: 1px solid rgba(15, 23, 42, 0.13);
@@ -359,7 +395,6 @@ a:focus-visible {
     transform 0.14s ease;
 }
 
-.game-control button:hover,
 .secondary-action:hover {
   border-color: #0f766e;
   color: #0f766e;
@@ -663,16 +698,22 @@ a:focus-visible {
   border-radius: 8px;
   background: #ffffff;
   padding: 8px;
+  animation: session-row-in 0.16s ease-out;
   transition:
     border-color 0.14s ease,
     background 0.14s ease,
-    box-shadow 0.14s ease;
+    box-shadow 0.14s ease,
+    transform 0.14s ease;
 }
 
 .session-row:hover,
 .session-row.active {
   border-color: rgba(37, 99, 235, 0.28);
   background: #f8fbff;
+}
+
+.session-row:hover {
+  transform: translateY(-1px);
 }
 
 .session-row.active {
@@ -696,6 +737,16 @@ a:focus-visible {
 .session-new-row .ui-icon {
   width: 18px;
   height: 18px;
+  transition: transform 0.16s ease;
+}
+
+.session-new-row:hover .ui-icon {
+  transform: rotate(90deg) scale(1.05);
+}
+
+.session-draft {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: #f8fbff;
 }
 
 .session-open {
@@ -754,13 +805,7 @@ a:focus-visible {
   color: #2563eb;
 }
 
-.session-edit {
-  display: grid;
-  grid-column: 1 / -1;
-  gap: 8px;
-}
-
-.session-edit input {
+.session-title-input {
   width: 100%;
   height: 34px;
   border: 1px solid rgba(15, 23, 42, 0.15);
@@ -769,9 +814,11 @@ a:focus-visible {
   background: #f8fafc;
   padding: 0 10px;
   outline: none;
+  font-size: 13px;
+  font-weight: 850;
 }
 
-.session-edit input:focus {
+.session-title-input:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
 }
@@ -1059,6 +1106,18 @@ a:focus-visible {
   from {
     opacity: 0;
     transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes session-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
   }
 
   to {

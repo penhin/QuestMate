@@ -44,6 +44,7 @@ class ChatResponse(BaseModel):
     answer: str
     sources: list[Source] = Field(default_factory=list)
     title: str | None = None
+    is_new: bool = False
 
 
 class SessionMessage(BaseModel):

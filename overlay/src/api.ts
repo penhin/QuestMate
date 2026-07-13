@@ -10,6 +10,7 @@ export type ChatResponse = {
   answer: string;
   sources: Source[];
   title?: string | null;
+  is_new: boolean;
 };
 
 export type SessionMessage = {

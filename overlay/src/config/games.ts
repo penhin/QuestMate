@@ -12,6 +12,8 @@ export const GAME_PROCESS_MAP: Record<string, string> = {
   "starrail.exe": "Honkai: Star Rail",
 };
 
+export const GAME_NAMES = Array.from(new Set(Object.values(GAME_PROCESS_MAP))).sort((a, b) => a.localeCompare(b));
+
 export function detectGameFromProcess(processName?: string | null): string {
   if (!processName) {
     return "";

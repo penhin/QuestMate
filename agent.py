@@ -41,16 +41,18 @@ class QuestAgent:
     async def run(self, request: ChatRequest) -> ChatResponse:
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
+        is_new_session = not await conversation_store.session_exists(session_id)
         history = await conversation_store.get_recent_messages(session_id, limit=8)
         state = await self.graph.ainvoke(
             {"request": request, "history": history, "search_plan": SearchPlan(), "sources": [], "answer": ""}
         )
-        title = await self.llm.summarize_title(request=request, answer=state["answer"])
+        title = await self.llm.summarize_title(request=request, answer=state["answer"]) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
             answer=state["answer"],
             sources=state["sources"],
             title=title,
+            is_new=is_new_session,
         )
         await conversation_store.save_chat(request, response)
         return response

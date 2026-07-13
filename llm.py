@@ -4,6 +4,7 @@ from pydantic import ValidationError
 
 from config import Settings, get_settings
 from model_providers import ModelProvider, create_model_provider
+from query_tokens import is_query_entity_token, relevance_tokens
 from schemas import ChatRequest, PlannedSearchQuery, SearchPlan, SessionMessage, Source
 
 
@@ -57,36 +58,61 @@ class GuideLLM:
     async def summarize_title(self, *, request: ChatRequest, answer: str) -> str:
         provider = self._provider or create_model_provider(request=request, settings=self.settings)
         if provider is None:
-            return self._fallback_title(request.question)
+            return self._fallback_title(request.game, request.question)
 
         try:
             title = await provider.complete(
                 max_tokens=32,
                 temperature=0,
-                system="Summarize this game guide chat as a short session title. Return only the title.",
-                user=f"Game: {request.game}\nQuestion: {request.question}\nAnswer:\n{answer[:1200]}",
+                system=(
+                    "Generate a short game guide session title. "
+                    "The fixed format is: {game}, {short question summary}. "
+                    "Compress the question summary to 4-10 Chinese characters or 2-5 English words. "
+                    "Return only the title."
+                ),
+                user=f"Game: {request.game}\nFirst question: {request.question}",
             )
-            return self._clean_title(title, fallback=request.question)
+            return self._clean_title(title, fallback=self._fallback_title(request.game, request.question), game=request.game)
         except Exception:
-            return self._fallback_title(request.question)
+            return self._fallback_title(request.game, request.question)
 
     @staticmethod
     def _fallback_answer(*, game: str, question: str, sources: list[Source]) -> str:
-        source_note = f"已检索到 {len(sources)} 个来源。" if sources else "当前未配置 Anthropic/Tavily API key，返回骨架占位回答。"
-        return f"关于《{game}》的问题：{question}\n\n{source_note}"
+        if not sources:
+            return (
+                f"关于《{game}》的问题：{question}\n\n"
+                "我没有找到能直接回答这个问题的有效资料。可以换成更具体的问题，比如地点、Boss 名、道具名或任务名。"
+            )
+
+        if not GuideLLM._has_question_specific_sources(question=question, sources=sources):
+            return (
+                f"关于《{game}》的问题：{question}\n\n"
+                "我找到了一些游戏资料，但它们没有直接覆盖这个问题。请补充更具体的名称或场景，我再继续查。"
+            )
+
+        return (
+            f"关于《{game}》的问题：{question}\n\n"
+            "我找到了相关资料，但当前没有可用模型来整理完整答案。你可以先查看下方来源。"
+        )
 
     @classmethod
-    def _clean_title(cls, title: str, *, fallback: str) -> str:
+    def _clean_title(cls, title: str, *, fallback: str, game: str | None = None) -> str:
         cleaned = title.strip().strip("\"'“”‘’")
         if not cleaned:
-            return cls._fallback_title(fallback)
+            return fallback
+        game_name = (game or "").strip()
+        if game_name:
+            separator = "，" if "，" in cleaned and "," not in cleaned else ","
+            if separator in cleaned:
+                cleaned = cleaned.split(separator, 1)[1].strip()
+            return f"{game_name}, {cleaned or fallback.split(',', 1)[-1].strip()}"[:40]
         return cleaned[:40]
 
     @staticmethod
-    def _fallback_title(question: str) -> str:
-        return question.strip()[:28] or "未命名会话"
+    def _fallback_title(game: str, question: str) -> str:
+        summary = question.strip()[:16] or "未命名"
+        return f"{game.strip() or '游戏'}, {summary}"
 
-    @staticmethod
     @staticmethod
     def _planner_user_prompt(*, request: ChatRequest, history: list[SessionMessage]) -> str:
         context = GuideLLM._history_context(history)
@@ -122,6 +148,26 @@ class GuideLLM:
         )
 
     @staticmethod
+    def _has_question_specific_sources(*, question: str, sources: list[Source]) -> bool:
+        tokens = [
+            token
+            for token in GuideLLM._question_tokens(question)
+            if is_query_entity_token(token)
+        ]
+        if not tokens:
+            return False
+
+        source_text = " ".join(
+            f"{source.title} {source.url} {source.snippet or ''}".lower()
+            for source in sources
+        )
+        return any(token in source_text for token in tokens)
+
+    @staticmethod
+    def _question_tokens(question: str) -> list[str]:
+        return relevance_tokens(question)
+
+    @staticmethod
     def _search_planner_system_prompt() -> str:
         return (
             "You plan web searches for a game guide assistant. "
@@ -132,9 +178,7 @@ class GuideLLM:
             "Use wiki for facts, locations, NPCs, bosses, items, and quest steps. "
             "Use community for strategies, builds, timing, and player tactics. "
             "Use official only for patches, versions, events, outages, or balance changes. "
-            "For boss strategy, include boss aliases, weakness, phase, dodge timing, and recommended build terms. "
-            "Example: for Elden Ring 女武神怎么打, query wiki 'Malenia Blade of Miquella boss weakness phase 2' "
-            "and community 'Malenia strategy recommended build dodge timing'."
+            "For boss strategy, include boss aliases, weakness, phase, dodge timing, and recommended build terms."
         )
 
     @classmethod

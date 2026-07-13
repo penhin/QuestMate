@@ -8,7 +8,8 @@ import main
 from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
 from agent import QuestAgent
-from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, SearchPlan
+from llm import GuideLLM
+from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, SearchPlan, Source
 from search import TavilySearchProvider
 from storage import InMemoryConversationStore
 
@@ -58,6 +59,7 @@ def test_chat_endpoint_returns_fallback_answer_without_sources(monkeypatch) -> N
     assert body["session_id"]
     assert "Elden Ring" in body["answer"]
     assert body["sources"] == []
+    assert body["is_new"] is True
 
 
 def test_cors_allows_tauri_dev_origin() -> None:
@@ -129,7 +131,7 @@ class FakeSearchClient:
                     {
                         "title": "Fandom guide",
                         "url": "https://eldenring.fandom.com/wiki/Malenia",
-                        "content": "Wiki answer",
+                        "content": "新手先打哪里 wiki answer",
                         "score": 0.9,
                     }
                 ]
@@ -162,6 +164,37 @@ def test_search_filters_unrelated_game_results() -> None:
     )
 
 
+def test_search_filters_generic_game_page_when_question_does_not_match() -> None:
+    item = {
+        "title": "Elden Ring Wiki - Fextralife",
+        "url": "https://eldenring.wiki.fextralife.com/Elden+Ring+Wiki",
+        "content": "General Elden Ring wiki guide and game information.",
+    }
+
+    assert not TavilySearchProvider._is_relevant_result(
+        item=item,
+        game="Elden Ring",
+        question="随便测试一下",
+    )
+
+
+def test_fallback_answer_handles_generic_sources() -> None:
+    answer = GuideLLM._fallback_answer(
+        game="Elden Ring",
+        question="随便测试一下",
+        sources=[
+            Source(
+                title="Elden Ring Wiki - Fextralife",
+                url="https://eldenring.wiki.fextralife.com/Elden+Ring+Wiki",
+                snippet="General Elden Ring wiki guide.",
+            )
+        ],
+    )
+
+    assert "没有直接覆盖这个问题" in answer
+    assert "已检索到" not in answer
+
+
 def test_deepseek_uses_openai_compatible_provider() -> None:
     request = ChatRequest(
         game="Elden Ring",
@@ -181,6 +214,7 @@ class ContextCapturingLLM:
     def __init__(self):
         self.plan_history = []
         self.answer_history = []
+        self.title_calls = 0
 
     async def plan_search(self, *, request, history):
         self.plan_history = history
@@ -191,6 +225,7 @@ class ContextCapturingLLM:
         return "带上下文回答"
 
     async def summarize_title(self, *, request, answer):
+        self.title_calls += 1
         return "上下文会话"
 
 
@@ -205,7 +240,21 @@ async def test_agent_passes_recent_history_to_llm(monkeypatch) -> None:
     llm = ContextCapturingLLM()
     agent = QuestAgent(search_provider=EmptySearchProvider(), llm=llm)
 
-    await agent.run(ChatRequest(game="Elden Ring", question="钥匙在哪？", session_id=session_id))
+    response = await agent.run(ChatRequest(game="Elden Ring", question="钥匙在哪？", session_id=session_id))
 
     assert [message.role for message in llm.plan_history] == ["user", "assistant"]
     assert llm.answer_history[0].content == "女武神怎么打？"
+    assert llm.title_calls == 0
+    assert response.is_new is False
+
+
+def test_session_title_fallback_uses_game_and_first_question() -> None:
+    title = GuideLLM._fallback_title("Elden Ring", "女武神怎么打？需要什么装备？")
+
+    assert title == "Elden Ring, 女武神怎么打？需要什么装备？"
+
+
+def test_session_title_cleaner_enforces_game_prefix() -> None:
+    title = GuideLLM._clean_title("女武神打法", fallback="Elden Ring, 女武神怎么打？", game="Elden Ring")
+
+    assert title == "Elden Ring, 女武神打法"

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_AI_MODEL,
   DEFAULT_DEEPSEEK_MODEL,
@@ -14,6 +14,7 @@ import {
   type ChatResponse,
   type SessionSummary,
 } from "./api";
+import { GAME_NAMES } from "./config/games";
 import { getActiveGame, setOverlayMode, type ActiveGame, type OverlayMode } from "./tauri";
 
 type Message = {
@@ -23,7 +24,7 @@ type Message = {
 };
 
 type Language = "zh" | "en";
-type SettingsTab = "preferences" | "api" | "session" | "process";
+type SettingsTab = "preferences" | "api" | "session";
 
 type Copy = {
   open: string;
@@ -49,7 +50,6 @@ type Copy = {
   resetApi: string;
   apiSaved: string;
   notDetected: string;
-  detectGame: string;
   sessionManagement: string;
   clearSession: string;
   newSession: string;
@@ -57,7 +57,6 @@ type Copy = {
   deleteSession: string;
   saveSession: string;
   cancelEdit: string;
-  processDetection: string;
   activeWindow: string;
   language: string;
   game: string;
@@ -95,7 +94,6 @@ const COPY = {
     resetApi: "清空",
     apiSaved: "已保存",
     notDetected: "未识别",
-    detectGame: "识别",
     sessionManagement: "会话",
     clearSession: "清空当前会话",
     newSession: "新会话",
@@ -103,7 +101,6 @@ const COPY = {
     deleteSession: "删除",
     saveSession: "保存",
     cancelEdit: "取消",
-    processDetection: "进程",
     activeWindow: "当前窗口",
     language: "语言",
     game: "游戏",
@@ -139,7 +136,6 @@ const COPY = {
     resetApi: "Clear",
     apiSaved: "Saved",
     notDetected: "Not detected",
-    detectGame: "Detect",
     sessionManagement: "Session",
     clearSession: "Clear session",
     newSession: "New chat",
@@ -147,7 +143,6 @@ const COPY = {
     deleteSession: "Delete",
     saveSession: "Save",
     cancelEdit: "Cancel",
-    processDetection: "Process",
     activeWindow: "Active window",
     language: "Language",
     game: "Game",
@@ -161,13 +156,12 @@ const COPY = {
   },
 } satisfies Record<Language, Copy>;
 
-type IconName = "settings" | "sliders" | "history" | "activity" | "minimize" | "api" | "chevron" | "plus";
+type IconName = "settings" | "sliders" | "history" | "minimize" | "api" | "chevron" | "plus";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: keyof Copy; icon: IconName }> = [
   { id: "preferences", label: "preferences", icon: "sliders" },
   { id: "api", label: "apiSettings", icon: "api" },
   { id: "session", label: "sessionManagement", icon: "history" },
-  { id: "process", label: "processDetection", icon: "activity" },
 ];
 
 export default function App() {
@@ -180,6 +174,7 @@ export default function App() {
   const [game, setGame] = useState("");
   const [question, setQuestion] = useState("");
   const [sessionId, setSessionId] = useState<string>();
+  const [draftSession, setDraftSession] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [editingSessionId, setEditingSessionId] = useState<string>();
@@ -191,6 +186,8 @@ export default function App() {
   const [apiError, setApiError] = useState("");
   const [shakePanel, setShakePanel] = useState(false);
   const [providerOpen, setProviderOpen] = useState(false);
+  const [gameOpen, setGameOpen] = useState(false);
+  const manualGameOverrideRef = useRef(false);
   const text = COPY[language];
 
   const detectedLabel = useMemo(() => {
@@ -207,6 +204,12 @@ export default function App() {
     void checkBackend().then(setBackendOnline);
     void refreshActiveGame();
     void refreshSessions();
+
+    const activeGameTimer = window.setInterval(() => {
+      void refreshActiveGame();
+    }, 5000);
+
+    return () => window.clearInterval(activeGameTimer);
   }, []);
 
   useEffect(() => {
@@ -218,9 +221,14 @@ export default function App() {
   async function refreshActiveGame() {
     const value = await getActiveGame();
     setActiveGame(value);
-    if (value.detectedGame) {
+    if (value.detectedGame && !manualGameOverrideRef.current) {
       setGame(value.detectedGame);
     }
+  }
+
+  function changeGame(value: string) {
+    manualGameOverrideRef.current = Boolean(value.trim());
+    setGame(value);
   }
 
   async function switchMode(nextMode: OverlayMode) {
@@ -238,6 +246,8 @@ export default function App() {
     setMessages([]);
     setSessionId(undefined);
     setError("");
+    setDraftSession(true);
+    setSettingsTab("session");
   }
 
   async function refreshSessions() {
@@ -253,6 +263,7 @@ export default function App() {
     try {
       const session = await getSession(nextSessionId);
       setSessionId(session.session_id);
+      setDraftSession(false);
       setMessages(
         session.messages
           .filter((message) => message.role === "user" || message.role === "assistant")
@@ -288,12 +299,25 @@ export default function App() {
     }
   }
 
+  function startSessionEdit(targetSessionId: string, title: string) {
+    setEditingSessionId(targetSessionId);
+    setEditingTitle(title);
+  }
+
+  function cancelSessionEdit() {
+    setEditingSessionId(undefined);
+    setEditingTitle("");
+  }
+
   async function removeSession(targetSessionId: string) {
     try {
       await deleteQuestSession(targetSessionId);
       setSessions((current) => current.filter((session) => session.session_id !== targetSessionId));
       if (sessionId === targetSessionId) {
-        clearSession();
+        setMessages([]);
+        setSessionId(undefined);
+        setError("");
+        setDraftSession(false);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : text.requestFailed;
@@ -386,15 +410,17 @@ export default function App() {
       });
       setSessionId(response.session_id);
       setSessions((current) => {
+        const existing = current.find((session) => session.session_id === response.session_id);
         const summary = {
           session_id: response.session_id,
-          title: response.title || trimmedQuestion.slice(0, 28),
-          message_count: (current.find((session) => session.session_id === response.session_id)?.message_count ?? 0) + 2,
+          title: response.title || existing?.title || trimmedQuestion.slice(0, 28),
+          message_count: (existing?.message_count ?? 0) + 2,
           updated_at: new Date().toISOString(),
         };
         const withoutCurrent = current.filter((session) => session.session_id !== response.session_id);
         return [summary, ...withoutCurrent];
       });
+      setDraftSession(false);
       setMessages((current) => [
         ...current,
         {
@@ -650,33 +676,54 @@ export default function App() {
                     >
                       <Icon name="plus" />
                     </button>
+                    {draftSession && (
+                      <div className="session-row session-draft active">
+                        <button type="button" className="session-open" onClick={clearSession}>
+                          <strong>{text.newSession}</strong>
+                          <span>{formatMessageCount(0, language)}</span>
+                        </button>
+                      </div>
+                    )}
                     {sessions.map((session) => (
                       <div
                         key={session.session_id}
                         className={session.session_id === sessionId ? "session-row active" : "session-row"}
+                        onBlur={(event) => {
+                          if (editingSessionId !== session.session_id) {
+                            return;
+                          }
+                          const nextTarget = event.relatedTarget;
+                          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+                            cancelSessionEdit();
+                          }
+                        }}
                       >
                         {editingSessionId === session.session_id ? (
-                          <div className="session-edit">
+                          <>
                             <input
+                              className="session-title-input"
                               value={editingTitle}
                               onChange={(event) => setEditingTitle(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.preventDefault();
+                                  void saveSessionTitle(session.session_id);
+                                }
+                                if (event.key === "Escape") {
+                                  cancelSessionEdit();
+                                }
+                              }}
                               autoFocus
                             />
                             <div className="session-actions">
                               <button type="button" onClick={() => void saveSessionTitle(session.session_id)}>
                                 {text.saveSession}
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingSessionId(undefined);
-                                  setEditingTitle("");
-                                }}
-                              >
+                              <button type="button" onClick={cancelSessionEdit}>
                                 {text.cancelEdit}
                               </button>
                             </div>
-                          </div>
+                          </>
                         ) : (
                           <>
                             <button
@@ -685,15 +732,12 @@ export default function App() {
                               onClick={() => void openSession(session.session_id)}
                             >
                               <strong>{session.title}</strong>
-                              <span>{session.message_count} · {session.session_id.slice(0, 8)}</span>
+                              <span>{formatMessageCount(session.message_count, language)}</span>
                             </button>
                             <div className="session-actions">
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setEditingSessionId(session.session_id);
-                                  setEditingTitle(session.title);
-                                }}
+                                onClick={() => startSessionEdit(session.session_id, session.title)}
                               >
                                 {text.editSession}
                               </button>
@@ -710,26 +754,6 @@ export default function App() {
               </section>
             )}
 
-            {settingsTab === "process" && (
-              <section className="settings-section">
-                <div className="section-heading">
-                  <h2>{text.processDetection}</h2>
-                  <p title={activeGame?.windowTitle ?? ""}>
-                    {text.activeWindow}: {detectedLabel}
-                  </p>
-                </div>
-                <GameField
-                  game={game}
-                  label={text.game}
-                  placeholder={text.gamePlaceholder}
-                  detectLabel={text.detectGame}
-                  windowTitle={activeGame?.windowTitle ?? ""}
-                  onGameChange={setGame}
-                  onDetect={() => void refreshActiveGame()}
-                />
-              </section>
-            )}
-
           </div>
         </section>
       ) : (
@@ -743,10 +767,10 @@ export default function App() {
               game={game}
               label={text.game}
               placeholder={text.gamePlaceholder}
-              detectLabel={text.detectGame}
               windowTitle={activeGame?.windowTitle ?? ""}
-              onGameChange={setGame}
-              onDetect={() => void refreshActiveGame()}
+              onGameChange={changeGame}
+              open={gameOpen}
+              onOpenChange={setGameOpen}
             />
           </section>
 
@@ -811,7 +835,6 @@ function Icon({ name }: { name: IconName }) {
     ],
     sliders: ["M4 6h10", "M18 6h2", "M4 12h2", "M10 12h10", "M4 18h12", "M20 18h0", "M14 4v4", "M6 10v4", "M16 16v4"],
     history: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5", "M12 7v5l3 2"],
-    activity: ["M22 12h-4l-3 8-6-16-3 8H2"],
     minimize: ["M6 12h12"],
     api: ["M4 12h4", "M16 12h4", "M9 7l-4 5 4 5", "M15 7l4 5-4 5", "M11 18l2-12"],
     chevron: ["M6 9l6 6 6-6"],
@@ -831,29 +854,77 @@ function providerLabel(provider: AiSettings["provider"]) {
   return provider === "deepseek" ? "DeepSeek" : "Anthropic";
 }
 
+function formatMessageCount(count: number, language: Language) {
+  return language === "zh" ? `${count} 条消息` : `${count} messages`;
+}
+
 function GameField(props: {
   game: string;
   label: string;
   placeholder: string;
-  detectLabel: string;
   windowTitle: string;
   onGameChange: (value: string) => void;
-  onDetect: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
+  const options = GAME_NAMES.filter((name) => name.toLowerCase().includes(props.game.trim().toLowerCase()));
+
   return (
-    <div className="game-control">
+    <div
+      className="game-control"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          props.onOpenChange(false);
+        }
+      }}
+    >
       <label>
         <span>{props.label}</span>
-        <input
-          value={props.game}
-          onChange={(event) => props.onGameChange(event.target.value)}
-          placeholder={props.placeholder}
-          title={props.windowTitle}
-        />
+        <div className="game-combobox">
+          <input
+            value={props.game}
+            onChange={(event) => {
+              props.onGameChange(event.target.value);
+              props.onOpenChange(true);
+            }}
+            onFocus={() => props.onOpenChange(true)}
+            placeholder={props.placeholder}
+            title={props.windowTitle}
+            role="combobox"
+            aria-expanded={props.open}
+            aria-controls="questmate-game-options"
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            className={props.open ? "game-combobox-toggle open" : "game-combobox-toggle"}
+            onClick={() => props.onOpenChange(!props.open)}
+            aria-label={props.label}
+          >
+            <Icon name="chevron" />
+          </button>
+          {props.open && options.length > 0 && (
+            <div className="custom-select-menu game-options" id="questmate-game-options" role="listbox">
+              {options.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={props.game === name ? "selected" : ""}
+                  onClick={() => {
+                    props.onGameChange(name);
+                    props.onOpenChange(false);
+                  }}
+                  role="option"
+                  aria-selected={props.game === name}
+                >
+                  <span>{name}</span>
+                  {props.game === name && <span className="select-check">✓</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </label>
-      <button type="button" onClick={props.onDetect}>
-        {props.detectLabel}
-      </button>
     </div>
   );
 }
