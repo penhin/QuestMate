@@ -4,7 +4,7 @@ from pydantic import ValidationError
 
 from config import Settings, get_settings
 from model_providers import ModelProvider, create_model_provider
-from schemas import ChatRequest, PlannedSearchQuery, SearchPlan, Source
+from schemas import ChatRequest, PlannedSearchQuery, SearchPlan, SessionMessage, Source
 
 
 class GuideLLM:
@@ -12,7 +12,7 @@ class GuideLLM:
         self.settings = settings or get_settings()
         self._provider = provider
 
-    async def plan_search(self, *, request: ChatRequest) -> SearchPlan:
+    async def plan_search(self, *, request: ChatRequest, history: list[SessionMessage] | None = None) -> SearchPlan:
         provider = self._provider or create_model_provider(request=request, settings=self.settings)
         if provider is None:
             return self._fallback_search_plan(question=request.question)
@@ -22,37 +22,82 @@ class GuideLLM:
                 max_tokens=700,
                 temperature=0,
                 system=self._search_planner_system_prompt(),
-                user=f"Game: {request.game}\nQuestion: {request.question}",
+                user=self._planner_user_prompt(request=request, history=history or []),
                 json_mode=True,
             )
             return self._parse_search_plan(content, fallback_question=request.question)
         except Exception:
             return self._fallback_search_plan(question=request.question)
 
-    async def answer(self, *, request: ChatRequest, sources: list[Source]) -> str:
+    async def answer(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        history: list[SessionMessage] | None = None,
+    ) -> str:
         provider = self._provider or create_model_provider(request=request, settings=self.settings)
         if provider is None:
             return self._fallback_answer(game=request.game, question=request.question, sources=sources)
 
         return await provider.complete(
-            max_tokens=1200,
+            max_tokens=2400,
             temperature=0.2,
             system=(
                 "You are QuestMate, a precise game guide assistant. "
-                "Answer in Chinese. Use only provided sources when sources are available. "
-                "Prefer higher-credibility sources when sources disagree. "
-                "Call out uncertainty and include concise citations by source title."
+                "Answer in Chinese with practical, actionable steps. "
+                "Use relevant provided sources first, ignore clearly unrelated sources, and prefer higher-credibility "
+                "sources when sources disagree. If sources are weak or incomplete, still give a useful general answer "
+                "from game knowledge, but clearly mark the unsupported parts as uncertain. "
+                "Do not answer with only a refusal unless the question is impossible to understand."
             ),
-            user=self._answer_user_prompt(request=request, sources=sources),
+            user=self._answer_user_prompt(request=request, sources=sources, history=history or []),
         )
+
+    async def summarize_title(self, *, request: ChatRequest, answer: str) -> str:
+        provider = self._provider or create_model_provider(request=request, settings=self.settings)
+        if provider is None:
+            return self._fallback_title(request.question)
+
+        try:
+            title = await provider.complete(
+                max_tokens=32,
+                temperature=0,
+                system="Summarize this game guide chat as a short session title. Return only the title.",
+                user=f"Game: {request.game}\nQuestion: {request.question}\nAnswer:\n{answer[:1200]}",
+            )
+            return self._clean_title(title, fallback=request.question)
+        except Exception:
+            return self._fallback_title(request.question)
 
     @staticmethod
     def _fallback_answer(*, game: str, question: str, sources: list[Source]) -> str:
         source_note = f"已检索到 {len(sources)} 个来源。" if sources else "当前未配置 Anthropic/Tavily API key，返回骨架占位回答。"
         return f"关于《{game}》的问题：{question}\n\n{source_note}"
 
+    @classmethod
+    def _clean_title(cls, title: str, *, fallback: str) -> str:
+        cleaned = title.strip().strip("\"'“”‘’")
+        if not cleaned:
+            return cls._fallback_title(fallback)
+        return cleaned[:40]
+
     @staticmethod
-    def _answer_user_prompt(*, request: ChatRequest, sources: list[Source]) -> str:
+    def _fallback_title(question: str) -> str:
+        return question.strip()[:28] or "未命名会话"
+
+    @staticmethod
+    @staticmethod
+    def _planner_user_prompt(*, request: ChatRequest, history: list[SessionMessage]) -> str:
+        context = GuideLLM._history_context(history)
+        return (
+            f"Game: {request.game}\n"
+            f"Recent conversation:\n{context or 'No prior messages.'}\n\n"
+            f"Current question: {request.question}"
+        )
+
+    @staticmethod
+    def _answer_user_prompt(*, request: ChatRequest, sources: list[Source], history: list[SessionMessage]) -> str:
         source_context = "\n".join(
             (
                 f"- {source.title}: {source.url}\n"
@@ -63,8 +108,17 @@ class GuideLLM:
         )
         return (
             f"Game: {request.game}\n"
-            f"Question: {request.question}\n\n"
+            f"Recent conversation:\n{GuideLLM._history_context(history) or 'No prior messages.'}\n\n"
+            f"Current question: {request.question}\n\n"
             f"Sources:\n{source_context or 'No sources were found.'}"
+        )
+
+    @staticmethod
+    def _history_context(history: list[SessionMessage]) -> str:
+        return "\n".join(
+            f"{message.role}: {message.content[:600]}"
+            for message in history[-8:]
+            if message.content.strip()
         )
 
     @staticmethod
@@ -75,7 +129,12 @@ class GuideLLM:
             "queries must contain 2 to 4 objects with source_type and query. "
             "source_type must be one of official, wiki, community, web. "
             "Use English keywords when useful, keep named entities exact, and do not include site: filters. "
-            "Prefer wiki for facts, official for patches or current status, community for strategies/builds, web as fallback."
+            "Use wiki for facts, locations, NPCs, bosses, items, and quest steps. "
+            "Use community for strategies, builds, timing, and player tactics. "
+            "Use official only for patches, versions, events, outages, or balance changes. "
+            "For boss strategy, include boss aliases, weakness, phase, dodge timing, and recommended build terms. "
+            "Example: for Elden Ring 女武神怎么打, query wiki 'Malenia Blade of Miquella boss weakness phase 2' "
+            "and community 'Malenia strategy recommended build dodge timing'."
         )
 
     @classmethod

@@ -644,6 +644,138 @@ a:focus-visible {
   padding-top: 12px;
 }
 
+.session-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid rgba(15, 23, 42, 0.09);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+  transition:
+    border-color 0.14s ease,
+    background 0.14s ease,
+    box-shadow 0.14s ease;
+}
+
+.session-row:hover,
+.session-row.active {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: #f8fbff;
+}
+
+.session-row.active {
+  box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.session-new-row {
+  display: grid;
+  width: 100%;
+  min-height: 48px;
+  place-items: center;
+  color: #2563eb;
+  background: #f8fbff;
+}
+
+.session-new-row:hover {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: #eef4ff;
+}
+
+.session-new-row .ui-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.session-open {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 0;
+  color: #182027;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.session-open strong {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-open span {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.session-actions button {
+  height: 28px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 7px;
+  color: #425364;
+  background: #ffffff;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+  transition:
+    border-color 0.14s ease,
+    color 0.14s ease,
+    background 0.14s ease,
+    transform 0.14s ease;
+}
+
+.session-actions button:hover {
+  border-color: #2563eb;
+  color: #2563eb;
+}
+
+.session-edit {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 8px;
+}
+
+.session-edit input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid rgba(15, 23, 42, 0.15);
+  border-radius: 8px;
+  color: #182027;
+  background: #f8fafc;
+  padding: 0 10px;
+  outline: none;
+}
+
+.session-edit input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.13);
+}
+
 .field-stack {
   display: grid;
   gap: 6px;

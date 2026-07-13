@@ -5,9 +5,14 @@ import {
   type AiSettings,
   askQuestMate,
   checkBackend,
+  deleteSession as deleteQuestSession,
   getAiSettings,
+  getSession,
+  listSessions,
+  renameSession,
   setAiSettings,
   type ChatResponse,
+  type SessionSummary,
 } from "./api";
 import { getActiveGame, setOverlayMode, type ActiveGame, type OverlayMode } from "./tauri";
 
@@ -47,7 +52,11 @@ type Copy = {
   detectGame: string;
   sessionManagement: string;
   clearSession: string;
-  sessionEmpty: string;
+  newSession: string;
+  editSession: string;
+  deleteSession: string;
+  saveSession: string;
+  cancelEdit: string;
   processDetection: string;
   activeWindow: string;
   language: string;
@@ -89,7 +98,11 @@ const COPY = {
     detectGame: "识别",
     sessionManagement: "会话",
     clearSession: "清空当前会话",
-    sessionEmpty: "暂无会话",
+    newSession: "新会话",
+    editSession: "改名",
+    deleteSession: "删除",
+    saveSession: "保存",
+    cancelEdit: "取消",
     processDetection: "进程",
     activeWindow: "当前窗口",
     language: "语言",
@@ -129,7 +142,11 @@ const COPY = {
     detectGame: "Detect",
     sessionManagement: "Session",
     clearSession: "Clear session",
-    sessionEmpty: "No session yet",
+    newSession: "New chat",
+    editSession: "Rename",
+    deleteSession: "Delete",
+    saveSession: "Save",
+    cancelEdit: "Cancel",
     processDetection: "Process",
     activeWindow: "Active window",
     language: "Language",
@@ -144,10 +161,10 @@ const COPY = {
   },
 } satisfies Record<Language, Copy>;
 
-type IconName = "settings" | "history" | "activity" | "minimize" | "api" | "chevron";
+type IconName = "settings" | "sliders" | "history" | "activity" | "minimize" | "api" | "chevron" | "plus";
 
 const SETTINGS_TABS: Array<{ id: SettingsTab; label: keyof Copy; icon: IconName }> = [
-  { id: "preferences", label: "preferences", icon: "settings" },
+  { id: "preferences", label: "preferences", icon: "sliders" },
   { id: "api", label: "apiSettings", icon: "api" },
   { id: "session", label: "sessionManagement", icon: "history" },
   { id: "process", label: "processDetection", icon: "activity" },
@@ -164,6 +181,9 @@ export default function App() {
   const [question, setQuestion] = useState("");
   const [sessionId, setSessionId] = useState<string>();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [editingSessionId, setEditingSessionId] = useState<string>();
+  const [editingTitle, setEditingTitle] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [aiSettings, setLocalAiSettings] = useState<AiSettings>(() => getAiSettings());
@@ -186,7 +206,14 @@ export default function App() {
   useEffect(() => {
     void checkBackend().then(setBackendOnline);
     void refreshActiveGame();
+    void refreshSessions();
   }, []);
+
+  useEffect(() => {
+    if (settingsOpen && settingsTab === "session") {
+      void refreshSessions();
+    }
+  }, [settingsOpen, settingsTab]);
 
   async function refreshActiveGame() {
     const value = await getActiveGame();
@@ -211,6 +238,67 @@ export default function App() {
     setMessages([]);
     setSessionId(undefined);
     setError("");
+  }
+
+  async function refreshSessions() {
+    try {
+      const nextSessions = await listSessions();
+      setSessions(nextSessions);
+    } catch {
+      setSessions([]);
+    }
+  }
+
+  async function openSession(nextSessionId: string) {
+    try {
+      const session = await getSession(nextSessionId);
+      setSessionId(session.session_id);
+      setMessages(
+        session.messages
+          .filter((message) => message.role === "user" || message.role === "assistant")
+          .map((message) => ({
+            role: message.role,
+            content: message.content,
+            sources: message.sources,
+          })),
+      );
+      setError("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : text.requestFailed;
+      setError(message);
+    }
+  }
+
+  async function saveSessionTitle(targetSessionId: string) {
+    const title = editingTitle.trim();
+    if (!title) {
+      return;
+    }
+
+    try {
+      const updated = await renameSession(targetSessionId, title);
+      setSessions((current) =>
+        current.map((session) => (session.session_id === targetSessionId ? updated : session)),
+      );
+      setEditingSessionId(undefined);
+      setEditingTitle("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : text.requestFailed;
+      setError(message);
+    }
+  }
+
+  async function removeSession(targetSessionId: string) {
+    try {
+      await deleteQuestSession(targetSessionId);
+      setSessions((current) => current.filter((session) => session.session_id !== targetSessionId));
+      if (sessionId === targetSessionId) {
+        clearSession();
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : text.requestFailed;
+      setError(message);
+    }
   }
 
   function saveApiSettings() {
@@ -297,6 +385,16 @@ export default function App() {
         aiSettings,
       });
       setSessionId(response.session_id);
+      setSessions((current) => {
+        const summary = {
+          session_id: response.session_id,
+          title: response.title || trimmedQuestion.slice(0, 28),
+          message_count: (current.find((session) => session.session_id === response.session_id)?.message_count ?? 0) + 2,
+          updated_at: new Date().toISOString(),
+        };
+        const withoutCurrent = current.filter((session) => session.session_id !== response.session_id);
+        return [summary, ...withoutCurrent];
+      });
       setMessages((current) => [
         ...current,
         {
@@ -541,11 +639,74 @@ export default function App() {
               <section className="settings-section">
                 <div className="section-heading">
                   <h2>{text.sessionManagement}</h2>
-                  <p>{sessionId ?? text.sessionEmpty}</p>
                 </div>
-                <button type="button" className="secondary-action" onClick={clearSession}>
-                  {text.clearSession}
-                </button>
+                <div className="session-panel">
+                  <div className="session-list">
+                    <button
+                      type="button"
+                      className="session-row session-new-row"
+                      onClick={clearSession}
+                      aria-label={text.newSession}
+                    >
+                      <Icon name="plus" />
+                    </button>
+                    {sessions.map((session) => (
+                      <div
+                        key={session.session_id}
+                        className={session.session_id === sessionId ? "session-row active" : "session-row"}
+                      >
+                        {editingSessionId === session.session_id ? (
+                          <div className="session-edit">
+                            <input
+                              value={editingTitle}
+                              onChange={(event) => setEditingTitle(event.target.value)}
+                              autoFocus
+                            />
+                            <div className="session-actions">
+                              <button type="button" onClick={() => void saveSessionTitle(session.session_id)}>
+                                {text.saveSession}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSessionId(undefined);
+                                  setEditingTitle("");
+                                }}
+                              >
+                                {text.cancelEdit}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              className="session-open"
+                              onClick={() => void openSession(session.session_id)}
+                            >
+                              <strong>{session.title}</strong>
+                              <span>{session.message_count} · {session.session_id.slice(0, 8)}</span>
+                            </button>
+                            <div className="session-actions">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSessionId(session.session_id);
+                                  setEditingTitle(session.title);
+                                }}
+                              >
+                                {text.editSession}
+                              </button>
+                              <button type="button" onClick={() => void removeSession(session.session_id)}>
+                                {text.deleteSession}
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </section>
             )}
 
@@ -648,11 +809,13 @@ function Icon({ name }: { name: IconName }) {
       "M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z",
       "M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.57V21a2 2 0 0 1-4 0v-.09A1.7 1.7 0 0 0 8.96 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.57-1H3a2 2 0 0 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.96a1.7 1.7 0 0 0-.34-1.87l-.06-.06A2 2 0 1 1 7.03 4.2l.06.06A1.7 1.7 0 0 0 8.96 4.6 1.7 1.7 0 0 0 10 3.03V3a2 2 0 0 1 4 0v.09a1.7 1.7 0 0 0 1.04 1.51 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87A1.7 1.7 0 0 0 20.97 10H21a2 2 0 0 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z",
     ],
+    sliders: ["M4 6h10", "M18 6h2", "M4 12h2", "M10 12h10", "M4 18h12", "M20 18h0", "M14 4v4", "M6 10v4", "M16 16v4"],
     history: ["M3 12a9 9 0 1 0 3-6.7", "M3 4v5h5", "M12 7v5l3 2"],
     activity: ["M22 12h-4l-3 8-6-16-3 8H2"],
     minimize: ["M6 12h12"],
     api: ["M4 12h4", "M16 12h4", "M9 7l-4 5 4 5", "M15 7l4 5-4 5", "M11 18l2-12"],
     chevron: ["M6 9l6 6 6-6"],
+    plus: ["M12 5v14", "M5 12h14"],
   };
 
   return (

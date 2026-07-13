@@ -43,6 +43,7 @@ class ChatResponse(BaseModel):
     session_id: UUID
     answer: str
     sources: list[Source] = Field(default_factory=list)
+    title: str | None = None
 
 
 class SessionMessage(BaseModel):
@@ -55,6 +56,21 @@ class SessionMessage(BaseModel):
 class SessionResponse(BaseModel):
     session_id: UUID
     messages: list[SessionMessage] = Field(default_factory=list)
+
+
+class SessionSummary(BaseModel):
+    session_id: UUID
+    title: str
+    message_count: int = 0
+    updated_at: datetime | None = None
+
+
+class SessionsResponse(BaseModel):
+    sessions: list[SessionSummary] = Field(default_factory=list)
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
 
 
 class FeedbackRating(str, Enum):

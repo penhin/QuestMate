@@ -4,13 +4,14 @@ from uuid import uuid4
 from langgraph.graph import END, StateGraph
 
 from llm import GuideLLM
-from schemas import ChatRequest, ChatResponse, SearchPlan, Source
+from schemas import ChatRequest, ChatResponse, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
 
 
 class QuestAgentState(TypedDict):
     request: ChatRequest
+    history: list[SessionMessage]
     search_plan: SearchPlan
     sources: list[Source]
     answer: str
@@ -38,20 +39,25 @@ class QuestAgent:
         return graph.compile()
 
     async def run(self, request: ChatRequest) -> ChatResponse:
+        session_id = request.session_id or uuid4()
+        request = request.model_copy(update={"session_id": session_id})
+        history = await conversation_store.get_recent_messages(session_id, limit=8)
         state = await self.graph.ainvoke(
-            {"request": request, "search_plan": SearchPlan(), "sources": [], "answer": ""}
+            {"request": request, "history": history, "search_plan": SearchPlan(), "sources": [], "answer": ""}
         )
+        title = await self.llm.summarize_title(request=request, answer=state["answer"])
         response = ChatResponse(
-            session_id=request.session_id or uuid4(),
+            session_id=session_id,
             answer=state["answer"],
             sources=state["sources"],
+            title=title,
         )
         await conversation_store.save_chat(request, response)
         return response
 
     async def _plan(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        search_plan = await self.llm.plan_search(request=request)
+        search_plan = await self.llm.plan_search(request=request, history=state["history"])
         return {**state, "search_plan": search_plan}
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
@@ -61,7 +67,7 @@ class QuestAgent:
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        answer = await self.llm.answer(request=request, sources=state["sources"])
+        answer = await self.llm.answer(request=request, sources=state["sources"], history=state["history"])
         return {**state, "answer": answer}
 
 

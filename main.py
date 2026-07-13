@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import Depends, FastAPI
@@ -7,7 +8,16 @@ from fastapi.responses import StreamingResponse
 
 from agent import QuestAgent, quest_agent
 from config import Settings, get_settings
-from schemas import ChatRequest, ChatResponse, FeedbackRequest, FeedbackResponse, SessionResponse
+from schemas import (
+    ChatRequest,
+    ChatResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    RenameSessionRequest,
+    SessionResponse,
+    SessionSummary,
+    SessionsResponse,
+)
 from storage import conversation_store
 from uuid import UUID
 
@@ -15,7 +25,12 @@ logger = structlog.get_logger()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="QuestMate", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        await conversation_store.init_schema()
+        yield
+
+    app = FastAPI(title="QuestMate", version="0.1.0", lifespan=lifespan)
     settings = get_settings()
 
     app.add_middleware(
@@ -46,6 +61,18 @@ def create_app() -> FastAPI:
     @app.get("/api/sessions/{session_id}", response_model=SessionResponse)
     async def get_session(session_id: UUID) -> SessionResponse:
         return await conversation_store.get_session(session_id)
+
+    @app.get("/api/sessions", response_model=SessionsResponse)
+    async def list_sessions() -> SessionsResponse:
+        return await conversation_store.list_sessions()
+
+    @app.patch("/api/sessions/{session_id}", response_model=SessionSummary)
+    async def rename_session(session_id: UUID, request: RenameSessionRequest) -> SessionSummary:
+        return await conversation_store.rename_session(session_id, request.title)
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: UUID) -> None:
+        await conversation_store.delete_session(session_id)
 
     @app.post("/api/feedback", response_model=FeedbackResponse)
     async def feedback(request: FeedbackRequest) -> FeedbackResponse:

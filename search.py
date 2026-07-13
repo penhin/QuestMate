@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Any, Protocol
 
 from tavily import TavilyClient
@@ -99,6 +100,8 @@ class TavilySearchProvider:
                 url = item.get("url")
                 if not url:
                     continue
+                if not self._is_relevant_result(item=item, game=game, question=query):
+                    continue
 
                 raw_score = float(item.get("score") or 0)
                 weighted_score = raw_score * 0.7 + search_source.trust_score * 0.3
@@ -152,3 +155,23 @@ class TavilySearchProvider:
                     return built
 
         return built
+
+    @staticmethod
+    def _is_relevant_result(*, item: dict[str, Any], game: str, question: str) -> bool:
+        text = " ".join(
+            str(item.get(field) or "")
+            for field in ("title", "url", "content")
+        ).lower()
+        tokens = TavilySearchProvider._relevance_tokens(game) + TavilySearchProvider._relevance_tokens(question)
+
+        if not tokens:
+            return True
+
+        return any(token in text for token in tokens)
+
+    @staticmethod
+    def _relevance_tokens(value: str) -> list[str]:
+        normalized = value.lower().strip()
+        tokens = [normalized] if len(normalized) >= 3 else []
+        tokens.extend(re.findall(r"[a-z0-9]{3,}|[\u4e00-\u9fff]{2,}", normalized))
+        return list(dict.fromkeys(tokens))

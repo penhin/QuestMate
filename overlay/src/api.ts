@@ -9,6 +9,26 @@ export type ChatResponse = {
   session_id: string;
   answer: string;
   sources: Source[];
+  title?: string | null;
+};
+
+export type SessionMessage = {
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+  sources: Source[];
+};
+
+export type SessionSummary = {
+  session_id: string;
+  title: string;
+  message_count: number;
+  updated_at?: string | null;
+};
+
+export type SessionResponse = {
+  session_id: string;
+  messages: SessionMessage[];
 };
 
 export type AiSettings = {
@@ -100,5 +120,52 @@ export async function checkBackend(): Promise<boolean> {
     return response.ok;
   } catch {
     return false;
+  }
+}
+
+export async function listSessions(): Promise<SessionSummary[]> {
+  const response = await fetch(`${getApiBaseUrl()}/api/sessions`);
+
+  if (!response.ok) {
+    throw new Error(`QuestMate sessions request failed with status ${response.status}`);
+  }
+
+  const body = (await response.json()) as { sessions: SessionSummary[] };
+  return body.sessions;
+}
+
+export async function getSession(sessionId: string): Promise<SessionResponse> {
+  const response = await fetch(`${getApiBaseUrl()}/api/sessions/${sessionId}`);
+
+  if (!response.ok) {
+    throw new Error(`QuestMate session request failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SessionResponse>;
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<SessionSummary> {
+  const response = await fetch(`${getApiBaseUrl()}/api/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ title }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`QuestMate session rename failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<SessionSummary>;
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${getApiBaseUrl()}/api/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    throw new Error(`QuestMate session delete failed with status ${response.status}`);
   }
 }
