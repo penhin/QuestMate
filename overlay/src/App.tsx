@@ -3,7 +3,6 @@ import {
   DEFAULT_AI_MODEL,
   DEFAULT_DEEPSEEK_MODEL,
   type AiSettings,
-  askQuestMate,
   checkBackend,
   deleteSession as deleteQuestSession,
   getAiSettings,
@@ -11,6 +10,7 @@ import {
   listSessions,
   renameSession,
   setAiSettings,
+  streamQuestMate,
   type ChatResponse,
   type SessionSummary,
 } from "./api";
@@ -20,6 +20,7 @@ import { getActiveGame, setOverlayMode, type ActiveGame, type OverlayMode } from
 type Message = {
   role: "user" | "assistant";
   content: string;
+  status?: boolean;
   sources?: ChatResponse["sources"];
 };
 
@@ -398,16 +399,53 @@ export default function App() {
 
     setError("");
     setLoading(true);
-    setMessages((current) => [...current, { role: "user", content: trimmedQuestion }]);
+    setMessages((current) => [
+      ...current,
+      { role: "user", content: trimmedQuestion },
+      { role: "assistant", content: formatAgentStatus("准备查询"), status: true },
+    ]);
     setQuestion("");
 
     try {
-      const response = await askQuestMate({
-        game: trimmedGame,
-        question: trimmedQuestion,
-        sessionId,
-        aiSettings,
-      });
+      let answerStarted = false;
+      let finalResponse: ChatResponse | undefined;
+      await streamQuestMate(
+        {
+          game: trimmedGame,
+          question: trimmedQuestion,
+          sessionId,
+          aiSettings,
+        },
+        {
+          onStatus: (status) => {
+            if (answerStarted) {
+              return;
+            }
+            setMessages((current) =>
+              updateLastAssistantMessage(current, { content: formatAgentStatus(status), status: true }),
+            );
+          },
+          onChunk: (chunk) => {
+            const wasAnswerStarted = answerStarted;
+            answerStarted = true;
+            setMessages((current) => {
+              const lastAssistant = current[current.length - 1];
+              const content =
+                wasAnswerStarted && lastAssistant?.role === "assistant"
+                  ? lastAssistant.content + chunk
+                  : chunk;
+              return updateLastAssistantMessage(current, { content, status: false });
+            });
+          },
+          onDone: (response) => {
+            finalResponse = response;
+          },
+        },
+      );
+      const response = finalResponse;
+      if (!response) {
+        throw new Error(text.requestFailed);
+      }
       setSessionId(response.session_id);
       setSessions((current) => {
         const existing = current.find((session) => session.session_id === response.session_id);
@@ -421,17 +459,13 @@ export default function App() {
         return [summary, ...withoutCurrent];
       });
       setDraftSession(false);
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content: response.answer,
-          sources: response.sources,
-        },
-      ]);
+      setMessages((current) => {
+        return updateLastAssistantMessage(current, { content: response.answer, sources: response.sources, status: false });
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : text.requestFailed;
       setError(message);
+      setMessages((current) => updateLastAssistantMessage(current, { content: message, status: false }));
     } finally {
       setLoading(false);
     }
@@ -777,7 +811,10 @@ export default function App() {
           <section className="messages" aria-live="polite">
             {messages.length > 0 &&
               messages.map((message, index) => (
-                <article key={`${message.role}-${index}`} className={`message ${message.role}`}>
+                <article
+                  key={`${message.role}-${index}`}
+                  className={`message ${message.role}${message.status ? " status" : ""}`}
+                >
                   <p>{message.content}</p>
                   {message.sources && message.sources.length > 0 && (
                     <div className="sources">
@@ -856,6 +893,16 @@ function providerLabel(provider: AiSettings["provider"]) {
 
 function formatMessageCount(count: number, language: Language) {
   return language === "zh" ? `${count} 条消息` : `${count} messages`;
+}
+
+function updateLastAssistantMessage(messages: Message[], patch: Partial<Message>) {
+  return messages.map((message, index) =>
+    index === messages.length - 1 && message.role === "assistant" ? { ...message, ...patch } : message,
+  );
+}
+
+function formatAgentStatus(status: string) {
+  return `${status}...`;
 }
 
 function GameField(props: {

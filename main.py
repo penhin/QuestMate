@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import json
 
 import structlog
 from fastapi import Depends, FastAPI
@@ -49,8 +50,17 @@ def create_app() -> FastAPI:
     async def chat(request: ChatRequest, agent: QuestAgent = Depends(lambda: quest_agent)):
         if request.stream:
             async def events() -> AsyncIterator[str]:
-                response = await agent.run(request)
-                yield f"data: {response.model_dump_json()}\n\n"
+                try:
+                    async for event_type, payload in agent.stream(request):
+                        if event_type == "done" and isinstance(payload, ChatResponse):
+                            body = payload.model_dump(mode="json")
+                        else:
+                            body = {"value": payload}
+                        yield f"event: {event_type}\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
+                except Exception as exc:
+                    logger.exception("chat.stream_failed")
+                    body = {"message": str(exc)}
+                    yield f"event: error\ndata: {json.dumps(body, ensure_ascii=False)}\n\n"
 
             return StreamingResponse(events(), media_type="text/event-stream")
 

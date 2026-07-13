@@ -115,6 +115,101 @@ export async function askQuestMate(input: {
   return response.json() as Promise<ChatResponse>;
 }
 
+export async function streamQuestMate(
+  input: {
+    game: string;
+    question: string;
+    sessionId?: string;
+    aiSettings?: AiSettings;
+  },
+  handlers: {
+    onStatus?: (status: string) => void;
+    onChunk: (chunk: string) => void;
+    onDone: (response: ChatResponse) => void;
+  },
+): Promise<void> {
+  const response = await fetch(`${getApiBaseUrl()}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify({
+      game: input.game,
+      question: input.question,
+      session_id: input.sessionId,
+      stream: true,
+      ai_provider: input.aiSettings?.provider ?? "anthropic",
+      ai_api_key: input.aiSettings?.apiKey || undefined,
+      ai_model: input.aiSettings?.model || undefined,
+      ai_base_url: input.aiSettings?.baseUrl || undefined,
+    }),
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`QuestMate API request failed with status ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const eventBlock of events) {
+      handleStreamEvent(eventBlock, handlers);
+    }
+  }
+
+  if (buffer.trim()) {
+    handleStreamEvent(buffer, handlers);
+  }
+}
+
+function handleStreamEvent(
+  eventBlock: string,
+  handlers: {
+    onStatus?: (status: string) => void;
+    onChunk: (chunk: string) => void;
+    onDone: (response: ChatResponse) => void;
+  },
+) {
+  const event = eventBlock
+    .split("\n")
+    .find((line) => line.startsWith("event:"))
+    ?.replace("event:", "")
+    .trim();
+  const data = eventBlock
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.replace("data:", "").trim())
+    .join("\n");
+
+  if (!event || !data) {
+    return;
+  }
+
+  const payload = JSON.parse(data) as { value?: string; message?: string } | ChatResponse;
+  if (event === "status" && "value" in payload && typeof payload.value === "string") {
+    handlers.onStatus?.(payload.value);
+  }
+  if (event === "chunk" && "value" in payload && typeof payload.value === "string") {
+    handlers.onChunk(payload.value);
+  }
+  if (event === "done") {
+    handlers.onDone(payload as ChatResponse);
+  }
+  if (event === "error") {
+    throw new Error("message" in payload && payload.message ? payload.message : "QuestMate stream failed");
+  }
+}
+
 export async function checkBackend(): Promise<boolean> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/health`);

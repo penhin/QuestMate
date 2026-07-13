@@ -441,6 +441,21 @@ a:focus-visible {
   background: #f3f6f8;
 }
 
+.message.assistant.status {
+  width: fit-content;
+  max-width: 180px;
+  min-width: 0;
+  color: #425364;
+  background: #f8fafc;
+  padding: 8px 10px;
+}
+
+.message.assistant.status p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sources {
   display: grid;
   gap: 6px;
