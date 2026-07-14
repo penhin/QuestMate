@@ -5,7 +5,7 @@ from uuid import uuid4
 from langgraph.graph import END, StateGraph
 
 from llm import GuideLLM
-from schemas import ChatRequest, ChatResponse, SearchPlan, SessionMessage, Source
+from schemas import ChatRequest, ChatResponse, GameResolution, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
 
@@ -16,6 +16,7 @@ AgentStreamEvent = tuple[Literal["status", "chunk", "done"], str | ChatResponse]
 class QuestAgentState(TypedDict):
     request: ChatRequest
     history: list[SessionMessage]
+    game_resolution: GameResolution
     search_plan: SearchPlan
     sources: list[Source]
     answer: str
@@ -33,10 +34,12 @@ class QuestAgent:
 
     def _build_graph(self):
         graph = StateGraph(QuestAgentState)
+        graph.add_node("resolve_game", self._resolve_game)
         graph.add_node("plan", self._plan)
         graph.add_node("search", self._search)
         graph.add_node("answer", self._answer)
-        graph.set_entry_point("plan")
+        graph.set_entry_point("resolve_game")
+        graph.add_edge("resolve_game", "plan")
         graph.add_edge("plan", "search")
         graph.add_edge("search", "answer")
         graph.add_edge("answer", END)
@@ -47,14 +50,35 @@ class QuestAgent:
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
         history = await conversation_store.get_recent_messages(session_id, limit=8)
+        game_resolution = self._confirmed_resolution_from_request(request) or await self.search_provider.resolve_game(
+            request.game,
+            question=request.question,
+        )
+        if self._needs_game_confirmation(game_resolution):
+            return ChatResponse(
+                session_id=session_id,
+                answer="我还不能确定你要查的是哪一款游戏。请选择一个候选游戏，或选择“都不是”。",
+                sources=[],
+                is_new=is_new_session,
+                needs_game_confirmation=True,
+                game_candidates=game_resolution.candidates,
+            )
         state = await self.graph.ainvoke(
-            {"request": request, "history": history, "search_plan": SearchPlan(), "sources": [], "answer": ""}
+            {
+                "request": request,
+                "history": history,
+                "game_resolution": game_resolution,
+                "search_plan": SearchPlan(),
+                "sources": [],
+                "answer": "",
+            }
         )
         answer = await self.llm.improve_answer(
             request=request,
             sources=state["sources"],
             answer=state["answer"],
             plan=state["search_plan"],
+            game_resolution=state["game_resolution"],
             history=history,
         )
         title = await self.llm.summarize_title(request=request, answer=answer) if is_new_session else None
@@ -74,16 +98,46 @@ class QuestAgent:
         is_new_session = not await conversation_store.session_exists(session_id)
         history = await conversation_store.get_recent_messages(session_id, limit=8)
 
+        yield ("status", "确认游戏：查平台页和资料库")
+        game_resolution = self._confirmed_resolution_from_request(request) or await self.search_provider.resolve_game(
+            request.game,
+            question=request.question,
+        )
+
+        yield ("status", self._status_for_game_resolution(game_resolution))
+        if self._needs_game_confirmation(game_resolution):
+            response = ChatResponse(
+                session_id=session_id,
+                answer="我还不能确定你要查的是哪一款游戏。请选择一个候选游戏，或选择“都不是”。",
+                sources=[],
+                title=None,
+                is_new=is_new_session,
+                needs_game_confirmation=True,
+                game_candidates=game_resolution.candidates,
+            )
+            yield ("done", response)
+            return
         yield ("status", self._status_for_plan_start(request.question))
-        search_plan = await self.llm.plan_search(request=request, history=history)
+        search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
 
         yield ("status", self._status_for_search(search_plan))
-        sources = await self.search_provider.search(request.question, request.game, plan=search_plan)
+        sources = await self.search_provider.search(
+            request.question,
+            request.game,
+            plan=search_plan,
+            game_resolution=game_resolution,
+        )
 
         yield ("status", self._status_for_sources(sources))
         yield ("status", "整理答案：保留来源，核对版本")
         chunks: list[str] = []
-        async for chunk in self.llm.stream_answer(request=request, sources=sources, plan=search_plan, history=history):
+        async for chunk in self.llm.stream_answer(
+            request=request,
+            sources=sources,
+            plan=search_plan,
+            game_resolution=game_resolution,
+            history=history,
+        ):
             chunks.append(chunk)
             yield ("chunk", chunk)
 
@@ -93,6 +147,7 @@ class QuestAgent:
             sources=sources,
             answer=answer,
             plan=search_plan,
+            game_resolution=game_resolution,
             history=history,
         )
         if improved_answer != answer:
@@ -110,12 +165,29 @@ class QuestAgent:
 
     async def _plan(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        search_plan = await self.llm.plan_search(request=request, history=state["history"])
+        search_plan = await self.llm.plan_search(
+            request=request,
+            history=state["history"],
+            game_resolution=state["game_resolution"],
+        )
         return {**state, "search_plan": search_plan}
+
+    async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
+        request = state["request"]
+        existing = state.get("game_resolution")
+        if existing and (existing.is_confirmed or existing.candidates):
+            return state
+        game_resolution = await self.search_provider.resolve_game(request.game, question=request.question)
+        return {**state, "game_resolution": game_resolution}
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        sources = await self.search_provider.search(request.question, request.game, plan=state["search_plan"])
+        sources = await self.search_provider.search(
+            request.question,
+            request.game,
+            plan=state["search_plan"],
+            game_resolution=state["game_resolution"],
+        )
         return {**state, "sources": sources}
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
@@ -124,6 +196,7 @@ class QuestAgent:
             request=request,
             sources=state["sources"],
             plan=state["search_plan"],
+            game_resolution=state["game_resolution"],
             history=state["history"],
         )
         return {**state, "answer": answer}
@@ -134,6 +207,8 @@ class QuestAgent:
             return "理解问题：先查版本变化"
         if any(token in question for token in ("怎么打", "打不过", "弱点", "Boss", "boss")):
             return "理解问题：查弱点和打法"
+        if any(token in question for token in ("有什么用", "有啥用", "作用", "用途", "用来", "怎么用")):
+            return "理解问题：查物品用途"
         if any(token in question for token in ("在哪", "哪里", "获得", "获取", "钥匙", "位置")):
             return "理解问题：查位置和获取方式"
         if any(token in question for token in ("任务", "支线", "下一步", "NPC", "npc")):
@@ -147,6 +222,7 @@ class QuestAgent:
         labels = {
             "boss_strategy": "类型：Boss 打法；查弱点/阶段/社区打法",
             "item_location": "类型：物品位置；查地点/条件/路线",
+            "item_usage": "类型：物品用途；查效果/用法/交互对象",
             "quest_step": "类型：任务步骤；查 NPC/触发/顺序",
             "game_mechanic": "类型：游戏机制；查开启条件/触发方式",
             "build": "类型：配装；查数值/装备/版本",
@@ -154,6 +230,38 @@ class QuestAgent:
             "lore": "类型：剧情背景；查事实和解释",
         }
         return labels.get(search_plan.intent, "类型：通用问题；筛选相关来源")
+
+    @staticmethod
+    def _status_for_game_resolution(game_resolution: GameResolution) -> str:
+        if game_resolution.is_confirmed:
+            entries = len(game_resolution.platform_urls) + len(game_resolution.database_domains)
+            if entries:
+                return f"确认游戏：找到 {entries} 个入口"
+            return "确认游戏：名称已匹配，继续检索"
+        return "确认游戏：资料入口不足，谨慎回答"
+
+    @staticmethod
+    def _needs_game_confirmation(game_resolution: GameResolution) -> bool:
+        return (
+            game_resolution.ambiguous
+            or (not game_resolution.is_confirmed and bool(game_resolution.candidates))
+            or len(game_resolution.candidates) > 1
+        )
+
+    @staticmethod
+    def _confirmed_resolution_from_request(request: ChatRequest) -> GameResolution | None:
+        if request.metadata.get("confirmed_game") is not True:
+            return None
+        aliases = request.metadata.get("game_aliases")
+        database_domains = request.metadata.get("database_domains")
+        return GameResolution(
+            input_name=request.game,
+            confirmed_name=request.game,
+            aliases=aliases if isinstance(aliases, list) else [],
+            database_domains=database_domains if isinstance(database_domains, list) else [],
+            confidence=1,
+            ambiguous=False,
+        )
 
     @staticmethod
     def _status_for_sources(sources: list[Source]) -> str:

@@ -21,9 +21,35 @@ class PlannedSearchQuery(BaseModel):
     query: str = Field(min_length=1, max_length=240)
 
 
+class GameCandidate(BaseModel):
+    name: str
+    aliases: list[str] = Field(default_factory=list, max_length=6)
+    tags: list[str] = Field(default_factory=list, max_length=5)
+    platform_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
+    database_domains: list[str] = Field(default_factory=list, max_length=4)
+    confidence: float = Field(default=0, ge=0, le=1)
+
+
+class GameResolution(BaseModel):
+    input_name: str = ""
+    confirmed_name: str = ""
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+    platform_urls: list[HttpUrl] = Field(default_factory=list, max_length=6)
+    official_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
+    database_domains: list[str] = Field(default_factory=list, max_length=8)
+    candidates: list[GameCandidate] = Field(default_factory=list, max_length=6)
+    confidence: float = Field(default=0, ge=0, le=1)
+    ambiguous: bool = False
+
+    @property
+    def is_confirmed(self) -> bool:
+        return self.confidence >= 0.55 and bool(self.confirmed_name or self.aliases or self.platform_urls or self.database_domains)
+
+
 SearchIntent = Literal[
     "boss_strategy",
     "item_location",
+    "item_usage",
     "quest_step",
     "game_mechanic",
     "build",
@@ -58,6 +84,8 @@ class ChatResponse(BaseModel):
     sources: list[Source] = Field(default_factory=list)
     title: str | None = None
     is_new: bool = False
+    needs_game_confirmation: bool = False
+    game_candidates: list[GameCandidate] = Field(default_factory=list)
 
 
 class SessionMessage(BaseModel):

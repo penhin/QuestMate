@@ -10,7 +10,7 @@ from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
 from agent import QuestAgent
 from llm import GuideLLM
-from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, SearchPlan, SessionMessage, Source
+from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
 from search import TavilySearchProvider
 from storage import InMemoryConversationStore
 
@@ -27,7 +27,41 @@ def isolated_conversation_store(monkeypatch):
 
 
 class EmptySearchProvider:
-    async def search(self, query: str, game: str, max_results: int | None = None, plan=None):
+    async def resolve_game(self, game: str, question: str | None = None):
+        return GameResolution(input_name=game, confirmed_name=game, confidence=0.8)
+
+    async def search(self, query: str, game: str, max_results: int | None = None, plan=None, game_resolution=None):
+        return []
+
+
+class AmbiguousGameSearchProvider:
+    def __init__(self):
+        self.search_called = False
+
+    async def resolve_game(self, game: str, question: str | None = None):
+        return GameResolution(
+            input_name=game,
+            confirmed_name="",
+            confidence=0.45,
+            ambiguous=True,
+            candidates=[
+                {
+                    "name": "Afterwards",
+                    "tags": ["解谜"],
+                    "platform_urls": ["https://store.steampowered.com/app/1/Afterwards/"],
+                    "confidence": 0.72,
+                },
+                {
+                    "name": "Afterwards Survival",
+                    "tags": ["生存"],
+                    "platform_urls": ["https://example.com/afterwards-survival"],
+                    "confidence": 0.66,
+                },
+            ],
+        )
+
+    async def search(self, query: str, game: str, max_results: int | None = None, plan=None, game_resolution=None):
+        self.search_called = True
         return []
 
 
@@ -203,6 +237,67 @@ class DatabaseDiscoverySearchClient:
         return {"results": []}
 
 
+class SteamAliasSearchClient:
+    def __init__(self):
+        self.queries = []
+
+    def search(self, **kwargs):
+        query = kwargs["query"]
+        self.queries.append(query)
+        if query == "逃出从此以后 Steam":
+            return {
+                "results": [
+                    {
+                        "title": "Afterwards on Steam",
+                        "url": "https://store.steampowered.com/app/123456/Afterwards/",
+                        "content": "逃出从此以后 is a puzzle game on Steam.",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        if "Afterwards" in query and "loaded dice" in query:
+            return {
+                "results": [
+                    {
+                        "title": "Loaded Dice | Afterwards Wiki",
+                        "url": "https://afterwards.fandom.com/wiki/Loaded_Dice",
+                        "content": "Afterwards loaded dice item use effect puzzle interaction.",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        return {"results": []}
+
+
+class DuplicateGameCandidateSearchClient:
+    def search(self, **kwargs):
+        query = kwargs["query"]
+        if "Steam" in query:
+            return {
+                "results": [
+                    {
+                        "title": "逃出从此以后",
+                        "url": "https://store.steampowered.com/app/1/Escape_from_Ever_After/",
+                        "content": "逃出从此以后 RPG 冒险 动作",
+                        "score": 0.9,
+                    },
+                    {
+                        "title": "在Steam 上购买逃出从此以后立省25%",
+                        "url": "https://store.steampowered.com/app/1/Escape_from_Ever_After/",
+                        "content": "逃出从此以后 RPG 冒险",
+                        "score": 0.88,
+                    },
+                    {
+                        "title": "逃出从此以后 - 所有游戏",
+                        "url": "https://store.steampowered.com/app/1/Escape_from_Ever_After/",
+                        "content": "逃出从此以后 RPG 冒险 动作",
+                        "score": 0.85,
+                    },
+                ]
+            }
+        return {"results": []}
+
+
 async def test_search_routes_use_global_sources_and_trust() -> None:
     client = FakeSearchClient()
     provider = TavilySearchProvider(client=client)
@@ -261,6 +356,44 @@ async def test_search_discovers_specific_wiki_database_for_niche_games() -> None
     assert any(query.startswith("site:lookoutside.fandom.com") for query in client.queries)
     assert sources
     assert "lookoutside.fandom.com" in str(sources[0].url)
+
+
+async def test_search_uses_steam_alias_for_official_chinese_titles() -> None:
+    client = SteamAliasSearchClient()
+    provider = TavilySearchProvider(client=client)
+    plan = SearchPlan(
+        intent="item_usage",
+        aliases=["loaded dice"],
+        queries=[{"source_type": "wiki", "query": "loaded dice item use effect"}],
+    )
+
+    sources = await provider.search("灌铅骰子有什么用？", "逃出从此以后", max_results=5, plan=plan)
+
+    assert any(query == "逃出从此以后 Steam" for query in client.queries)
+    assert any("Afterwards" in query and "loaded dice" in query for query in client.queries)
+    assert sources
+    assert "afterwards.fandom.com" in str(sources[0].url)
+
+
+async def test_search_resolves_game_before_question_search() -> None:
+    client = SteamAliasSearchClient()
+    provider = TavilySearchProvider(client=client)
+
+    resolution = await provider.resolve_game("逃出从此以后", question="灌铅骰子作用")
+
+    assert resolution.is_confirmed
+    assert resolution.confirmed_name == "Afterwards"
+    assert "Afterwards" in resolution.aliases
+    assert resolution.platform_urls
+
+
+async def test_game_resolution_deduplicates_store_marketing_candidates() -> None:
+    provider = TavilySearchProvider(client=DuplicateGameCandidateSearchClient())
+
+    resolution = await provider.resolve_game("逃出从此以后", question="灌铅骰子作用")
+
+    assert [candidate.name for candidate in resolution.candidates] == ["逃出从此以后"]
+    assert resolution.candidates[0].tags == ["RPG", "冒险", "动作"]
 
 
 def test_search_filters_unrelated_game_results() -> None:
@@ -488,6 +621,7 @@ def test_prompts_mark_untrusted_data_and_protect_secrets() -> None:
 def test_answer_shapes_are_intent_specific() -> None:
     assert "危险招式怎么躲" in GuideLLM._answer_shape_for_intent("boss_strategy")
     assert "替代获取方式" in GuideLLM._answer_shape_for_intent("item_location")
+    assert "这个物品有什么用" in GuideLLM._answer_shape_for_intent("item_usage")
     assert "分支情况" in GuideLLM._answer_shape_for_intent("quest_step")
     assert "开启条件" in GuideLLM._answer_shape_for_intent("game_mechanic")
     assert "游戏机制类问题" in GuideLLM._answer_shape_for_intent("game_mechanic")
@@ -501,6 +635,7 @@ def test_answer_shapes_are_intent_specific() -> None:
         for intent in (
             "boss_strategy",
             "item_location",
+            "item_usage",
             "quest_step",
             "game_mechanic",
             "build",
@@ -538,6 +673,72 @@ def test_answer_revision_checks_patch_and_lore_sections() -> None:
         sources=[source],
         plan=SearchPlan(intent="patch"),
     )
+
+
+def test_answer_revision_blocks_unsourced_specific_guessing() -> None:
+    answer = (
+        "由于没有找到确凿来源，以下是基于常规设计的合理推断：\n"
+        "1) 直接答案：这个物品通常用来改变机关数值。\n"
+        "2) 具体步骤：先找到材料，然后到某个区域交互，最后获得奖励。"
+    )
+
+    assert GuideLLM._answer_needs_revision(
+        request=ChatRequest(game="逃出从此以后", question="灌铅骰子有什么用？"),
+        answer=answer,
+        sources=[],
+        plan=SearchPlan(intent="item_usage"),
+    )
+
+
+def test_conservative_answer_blocks_unsourced_item_usage() -> None:
+    request = ChatRequest(game="逃出从此以后", question="灌铅骰子作用")
+    plan = SearchPlan(intent="item_usage")
+
+    assert GuideLLM._should_return_conservative_answer(request=request, sources=[], plan=plan)
+    answer = GuideLLM._conservative_answer(request=request, sources=[])
+
+    assert "不会按同类游戏套路推测" in answer
+    assert "具体作用或步骤" in answer
+
+
+def test_context_confirmation_answer_is_plain() -> None:
+    request = ChatRequest(game="逃出从此以后", question="你知道我说的游戏是什么吗")
+
+    answer = GuideLLM._context_confirmation_answer(request=request)
+
+    assert "《逃出从此以后》" in answer
+    assert "请放心" not in answer
+    assert "当然知道" not in answer
+
+
+def test_unconfirmed_game_resolution_blocks_gameplay_answer() -> None:
+    request = ChatRequest(game="冷门重名游戏", question="这个道具有什么用？")
+    resolution = GameResolution(input_name="冷门重名游戏", confirmed_name="", confidence=0.2, ambiguous=True)
+
+    assert GuideLLM._should_return_conservative_answer(
+        request=request,
+        sources=[],
+        plan=SearchPlan(intent="item_usage"),
+        game_resolution=resolution,
+    )
+    answer = GuideLLM._conservative_answer(request=request, sources=[], game_resolution=resolution)
+
+    assert "还没有可靠确认" in answer
+    assert "Steam/itch.io 链接" in answer
+
+
+def test_evidence_check_uses_planned_aliases() -> None:
+    request = ChatRequest(game="逃出从此以后", question="灌铅骰子作用")
+    plan = SearchPlan(intent="item_usage", aliases=["loaded dice"])
+    sources = [
+        Source(
+            title="Loaded Dice | Afterwards Wiki",
+            url="https://afterwards.fandom.com/wiki/Loaded_Dice",
+            snippet="Loaded dice item use effect puzzle interaction.",
+        )
+    ]
+
+    assert not GuideLLM._should_return_conservative_answer(request=request, sources=sources, plan=plan)
     assert GuideLLM._answer_needs_revision(
         request=ChatRequest(game="Elden Ring", question="玛莉卡背景是什么？"),
         answer="玛莉卡是重要角色，剧情很复杂。",
@@ -575,12 +776,15 @@ def test_search_planner_sanitizes_aliases() -> None:
 def test_fallback_search_plan_uses_intent_specific_queries() -> None:
     boss_plan = GuideLLM._fallback_search_plan(question="女武神怎么打？")
     item_plan = GuideLLM._fallback_search_plan(question="石剑钥匙在哪里获得？")
+    usage_plan = GuideLLM._fallback_search_plan(question="灌铅骰子有什么用？")
     mechanic_plan = GuideLLM._fallback_search_plan(question="如何开启亲亲模式？")
 
     assert boss_plan.intent == "boss_strategy"
     assert any("dodge timing" in query.query for query in boss_plan.queries)
     assert item_plan.intent == "item_location"
     assert any("merchant" in query.query or "location" in query.query for query in item_plan.queries)
+    assert usage_plan.intent == "item_usage"
+    assert any("effect" in query.query or "what does" in query.query for query in usage_plan.queries)
     assert mechanic_plan.intent == "game_mechanic"
     assert any("unlock" in query.query or "trigger" in query.query for query in mechanic_plan.queries)
 
@@ -626,17 +830,19 @@ class ContextCapturingLLM:
     def __init__(self):
         self.plan_history = []
         self.answer_history = []
+        self.plan_game_resolution = None
         self.title_calls = 0
 
-    async def plan_search(self, *, request, history):
+    async def plan_search(self, *, request, history, game_resolution=None):
         self.plan_history = history
+        self.plan_game_resolution = game_resolution
         return SearchPlan()
 
-    async def answer(self, *, request, sources, plan, history):
+    async def answer(self, *, request, sources, plan, history, game_resolution=None):
         self.answer_history = history
         return "带上下文回答"
 
-    async def improve_answer(self, *, request, sources, answer, plan, history):
+    async def improve_answer(self, *, request, sources, answer, plan, history, game_resolution=None):
         return answer
 
     async def summarize_title(self, *, request, answer):
@@ -659,14 +865,30 @@ async def test_agent_passes_recent_history_to_llm(monkeypatch) -> None:
 
     assert [message.role for message in llm.plan_history] == ["user", "assistant"]
     assert llm.answer_history[0].content == "女武神怎么打？"
+    assert llm.plan_game_resolution.is_confirmed
     assert llm.title_calls == 0
     assert response.is_new is False
 
 
+async def test_agent_returns_game_candidates_before_searching_question(monkeypatch) -> None:
+    store = InMemoryConversationStore()
+    monkeypatch.setattr(agent_module, "conversation_store", store)
+    search_provider = AmbiguousGameSearchProvider()
+    agent = QuestAgent(search_provider=search_provider)
+
+    response = await agent.run(ChatRequest(game="Afterwards", question="灌铅骰子作用"))
+
+    assert response.needs_game_confirmation is True
+    assert [candidate.name for candidate in response.game_candidates] == ["Afterwards", "Afterwards Survival"]
+    assert search_provider.search_called is False
+
+
 def test_agent_status_messages_explain_current_work() -> None:
     assert QuestAgent._status_for_plan_start("女武神怎么打？") == "理解问题：查弱点和打法"
+    assert QuestAgent._status_for_plan_start("灌铅骰子有什么用？") == "理解问题：查物品用途"
     assert QuestAgent._status_for_plan_start("如何开启亲亲模式？") == "理解问题：查开启条件"
     assert QuestAgent._status_for_search(SearchPlan(intent="item_location")) == "类型：物品位置；查地点/条件/路线"
+    assert QuestAgent._status_for_search(SearchPlan(intent="item_usage")) == "类型：物品用途；查效果/用法/交互对象"
     assert QuestAgent._status_for_search(SearchPlan(intent="game_mechanic")) == "类型：游戏机制；查开启条件/触发方式"
     assert QuestAgent._status_for_sources([]) == "来源筛选：未找到强相关资料"
 

@@ -5,12 +5,23 @@ export type Source = {
   score?: number | null;
 };
 
+export type GameCandidate = {
+  name: string;
+  aliases: string[];
+  tags: string[];
+  platform_urls: string[];
+  database_domains: string[];
+  confidence: number;
+};
+
 export type ChatResponse = {
   session_id: string;
   answer: string;
   sources: Source[];
   title?: string | null;
   is_new: boolean;
+  needs_game_confirmation?: boolean;
+  game_candidates?: GameCandidate[];
 };
 
 export type SessionMessage = {
@@ -90,6 +101,7 @@ export async function askQuestMate(input: {
   question: string;
   sessionId?: string;
   aiSettings?: AiSettings;
+  metadata?: Record<string, unknown>;
 }): Promise<ChatResponse> {
   const response = await fetch(`${getApiBaseUrl()}/api/chat`, {
     method: "POST",
@@ -105,6 +117,7 @@ export async function askQuestMate(input: {
       ai_api_key: input.aiSettings?.apiKey || undefined,
       ai_model: input.aiSettings?.model || undefined,
       ai_base_url: input.aiSettings?.baseUrl || undefined,
+      metadata: input.metadata ?? {},
     }),
   });
 
@@ -121,6 +134,7 @@ export async function streamQuestMate(
     question: string;
     sessionId?: string;
     aiSettings?: AiSettings;
+    metadata?: Record<string, unknown>;
   },
   handlers: {
     onStatus?: (status: string) => void;
@@ -143,6 +157,7 @@ export async function streamQuestMate(
       ai_api_key: input.aiSettings?.apiKey || undefined,
       ai_model: input.aiSettings?.model || undefined,
       ai_base_url: input.aiSettings?.baseUrl || undefined,
+      metadata: input.metadata ?? {},
     }),
   });
 

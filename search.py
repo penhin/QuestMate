@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 from typing import Any, Protocol
@@ -6,7 +7,11 @@ from tavily import TavilyClient
 
 from config import Settings, get_settings
 from query_tokens import question_relevance_tokens, relevance_tokens
-from schemas import PlannedSearchQuery, SearchPlan, Source
+from schemas import GameCandidate, GameResolution, PlannedSearchQuery, SearchPlan, Source
+
+
+def re_split_title(value: str) -> list[str]:
+    return re.split(r"\s[-|:：]\s|[（）()【】\[\]]", value)
 
 
 @dataclass(frozen=True)
@@ -19,12 +24,16 @@ class SearchSource:
 
 
 class SearchProvider(Protocol):
+    async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
+        ...
+
     async def search(
         self,
         query: str,
         game: str,
         max_results: int | None = None,
         plan: SearchPlan | None = None,
+        game_resolution: GameResolution | None = None,
     ) -> list[Source]:
         ...
 
@@ -102,17 +111,26 @@ class TavilySearchProvider:
         game: str,
         max_results: int | None = None,
         plan: SearchPlan | None = None,
+        game_resolution: GameResolution | None = None,
     ) -> list[Source]:
         if self._client is None:
             return []
 
+        game_resolution = game_resolution or await self.resolve_game(game=game, question=query)
         total_results = max_results or self.settings.search_max_results
         per_query_results = min(4, max(2, total_results))
         strict_sources_by_url: dict[str, Source] = {}
         relaxed_sources_by_url: dict[str, Source] = {}
-        search_queries = self._build_search_queries(game=game, question=query, plan=plan)
+        search_queries = self._build_search_queries(
+            game=game,
+            question=query,
+            plan=plan,
+            database_domains=tuple(game_resolution.database_domains),
+            game_aliases=tuple(game_resolution.aliases),
+        )
         intent = (plan.intent if plan else "general") or "general"
         aliases = list((plan.aliases if plan else [])[:6])
+        game_aliases = list(game_resolution.aliases)
         min_strict_results = min(3, total_results)
 
         self._collect_sources(
@@ -121,19 +139,24 @@ class TavilySearchProvider:
             game=game,
             query=query,
             aliases=aliases,
+            game_aliases=game_aliases,
             intent=intent,
             strict_sources_by_url=strict_sources_by_url,
             relaxed_sources_by_url=relaxed_sources_by_url,
         )
 
         if len(strict_sources_by_url) < min_strict_results and intent != "patch":
-            database_domains = self._discover_database_domains(game=game)
-            if database_domains:
+            database_domains = tuple(game_resolution.database_domains) or self._discover_database_domains(
+                game=game,
+                game_aliases=game_aliases,
+            )
+            if database_domains or game_aliases:
                 database_queries = self._build_search_queries(
                     game=game,
                     question=query,
                     plan=plan,
                     database_domains=database_domains,
+                    game_aliases=tuple(game_aliases),
                 )
                 self._collect_sources(
                     search_queries=database_queries,
@@ -141,6 +164,7 @@ class TavilySearchProvider:
                     game=game,
                     query=query,
                     aliases=aliases,
+                    game_aliases=game_aliases,
                     intent=intent,
                     strict_sources_by_url=strict_sources_by_url,
                     relaxed_sources_by_url=relaxed_sources_by_url,
@@ -163,6 +187,37 @@ class TavilySearchProvider:
             min_strict_results=min_strict_results,
         )
 
+    async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
+        if self._client is None:
+            return GameResolution(input_name=game, confirmed_name=game, confidence=0)
+
+        candidates = list(self._discover_game_candidates(game=game))
+        aliases = list(self._discover_game_aliases(game=game))
+        for candidate in candidates:
+            for alias in [candidate.name, *candidate.aliases]:
+                if alias.lower() != game.lower() and alias not in aliases:
+                    aliases.append(alias)
+        database_domains = list(self._discover_database_domains(game=game, game_aliases=aliases))
+        platform_urls = list(self._discover_platform_urls(game=game, game_aliases=aliases))
+        confirmed_name = candidates[0].name if candidates else (aliases[0] if aliases else game)
+        confidence = self._resolution_confidence(
+            game=game,
+            aliases=aliases,
+            platform_urls=platform_urls,
+            database_domains=database_domains,
+        )
+        ambiguous = len(candidates) > 1 and candidates[0].confidence - candidates[1].confidence < 0.2
+        return GameResolution(
+            input_name=game,
+            confirmed_name=confirmed_name,
+            aliases=aliases,
+            platform_urls=platform_urls,
+            database_domains=database_domains,
+            candidates=candidates,
+            confidence=confidence,
+            ambiguous=ambiguous,
+        )
+
     def _collect_sources(
         self,
         *,
@@ -171,6 +226,7 @@ class TavilySearchProvider:
         game: str,
         query: str,
         aliases: list[str],
+        game_aliases: list[str],
         intent: str,
         strict_sources_by_url: dict[str, Source],
         relaxed_sources_by_url: dict[str, Source],
@@ -190,6 +246,7 @@ class TavilySearchProvider:
                 relevance_score = self._result_relevance_score(
                     item=item,
                     game=game,
+                    game_aliases=game_aliases,
                     question=search_context,
                 )
                 if relevance_score <= 0:
@@ -227,6 +284,7 @@ class TavilySearchProvider:
                 if self._is_high_quality_source(
                     item=item,
                     game=game,
+                    game_aliases=game_aliases,
                     question=search_context,
                     source_type=search_source.source_type,
                 ):
@@ -234,11 +292,12 @@ class TavilySearchProvider:
                     if current is None or (source.score or 0) > (current.score or 0):
                         strict_sources_by_url[source_key] = source
 
-    def _discover_database_domains(self, *, game: str) -> tuple[str, ...]:
-        candidates = (
-            f"{game} fandom wiki",
-            f"{game} wiki.gg wiki",
-            f"{game} official wiki",
+    def _discover_database_domains(self, *, game: str, game_aliases: list[str] | None = None) -> tuple[str, ...]:
+        game_names = [game, *(game_aliases or [])]
+        candidates = tuple(
+            f"{game_name} {suffix}"
+            for game_name in game_names[:3]
+            for suffix in ("fandom wiki", "wiki.gg wiki", "official wiki")
         )
         domains: list[str] = []
         for query in candidates:
@@ -254,7 +313,7 @@ class TavilySearchProvider:
                 if not self._is_supported_database_domain(domain):
                     continue
                 text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
-                if not any(token in text for token in relevance_tokens(game)):
+                if not self._matches_game_text(text=text, game=game, game_aliases=game_aliases or []):
                     continue
                 if domain not in domains:
                     domains.append(domain)
@@ -271,6 +330,226 @@ class TavilySearchProvider:
             or domain == "wiki.gg"
         )
 
+    def _discover_game_aliases(self, *, game: str) -> tuple[str, ...]:
+        candidates = (
+            f"{game} Steam",
+            f"{game} Steam official",
+            f"{game} itch.io",
+            f"{game} GOG",
+            f"{game} game English title",
+        )
+        aliases: list[str] = []
+        for query in candidates:
+            result = self._client.search(
+                query=query,
+                max_results=3,
+                include_answer=False,
+                include_raw_content=False,
+            )
+            for item in result.get("results", []):
+                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
+                if not self._matches_game_text(text=text, game=game, game_aliases=[]):
+                    continue
+                title = str(item.get("title") or "")
+                for alias in self._title_alias_candidates(title):
+                    if alias.lower() != game.lower() and alias not in aliases:
+                        aliases.append(alias)
+                    if len(aliases) >= 4:
+                        return tuple(aliases)
+        return tuple(aliases)
+
+    def _discover_platform_urls(self, *, game: str, game_aliases: list[str] | None = None) -> tuple[str, ...]:
+        game_names = [game, *(game_aliases or [])]
+        candidates = tuple(
+            f"{game_name} {platform}"
+            for game_name in game_names[:3]
+            for platform in ("Steam", "itch.io", "GOG", "Epic Games")
+        )
+        urls: list[str] = []
+        for query in candidates:
+            result = self._client.search(
+                query=query,
+                max_results=3,
+                include_answer=False,
+                include_raw_content=False,
+            )
+            for item in result.get("results", []):
+                url = str(item.get("url") or "")
+                domain = urlparse(url).netloc.lower()
+                if not self._is_supported_platform_domain(domain):
+                    continue
+                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
+                if not self._matches_game_text(text=text, game=game, game_aliases=game_aliases or []):
+                    continue
+                if url not in urls:
+                    urls.append(url)
+                if len(urls) >= 6:
+                    return tuple(urls)
+        return tuple(urls)
+
+    def _discover_game_candidates(self, *, game: str) -> tuple[GameCandidate, ...]:
+        queries = (
+            f"{game} Steam",
+            f"{game} itch.io game",
+            f"{game} GOG game",
+            f"{game} Epic Games",
+        )
+        candidates_by_name: dict[str, GameCandidate] = {}
+        for query in queries:
+            result = self._client.search(
+                query=query,
+                max_results=4,
+                include_answer=False,
+                include_raw_content=False,
+            )
+            for item in result.get("results", []):
+                url = str(item.get("url") or "")
+                domain = urlparse(url).netloc.lower()
+                if not self._is_supported_platform_domain(domain):
+                    continue
+                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
+                if not self._matches_game_text(text=text, game=game, game_aliases=[]):
+                    continue
+                title = str(item.get("title") or url)
+                if self._is_low_value_game_candidate(title=title, url=url):
+                    continue
+                aliases = list(self._title_alias_candidates(title))
+                name = aliases[0] if aliases else title[:80]
+                canonical_key = self._candidate_key(name=name, url=url)
+                tags = self._infer_game_tags(text)
+                raw_score = float(item.get("score") or 0.5)
+                confidence = min(1.0, 0.45 + raw_score * 0.35 + (0.15 if aliases else 0) + (0.05 if tags else 0))
+                existing = candidates_by_name.get(canonical_key)
+                platform_urls = [url]
+                if existing:
+                    platform_urls = list(dict.fromkeys([*map(str, existing.platform_urls), url]))
+                    confidence = max(existing.confidence, confidence)
+                    tags = list(dict.fromkeys([*existing.tags, *tags]))[:5]
+                    aliases = list(dict.fromkeys([*existing.aliases, *aliases]))[:6]
+                    name = existing.name if len(existing.name) <= len(name) else name
+                candidates_by_name[canonical_key] = GameCandidate(
+                    name=name,
+                    aliases=[alias for alias in aliases if alias != name][:6],
+                    tags=tags,
+                    platform_urls=platform_urls[:4],
+                    confidence=confidence,
+                )
+        return tuple(
+            sorted(candidates_by_name.values(), key=lambda candidate: candidate.confidence, reverse=True)[:6]
+        )
+
+    @staticmethod
+    def _infer_game_tags(text: str) -> list[str]:
+        tag_rules = (
+            ("RPG", ("rpg", "role-playing", "角色扮演")),
+            ("生存", ("survival", "生存")),
+            ("恐怖", ("horror", "恐怖")),
+            ("解谜", ("puzzle", "解谜", "谜题")),
+            ("冒险", ("adventure", "冒险")),
+            ("动作", ("action", "动作")),
+            ("模拟", ("simulation", "simulator", "模拟")),
+            ("策略", ("strategy", "策略")),
+            ("视觉小说", ("visual novel", "视觉小说")),
+            ("独立游戏", ("indie", "独立")),
+        )
+        tags: list[str] = []
+        for tag, keywords in tag_rules:
+            if any(keyword in text for keyword in keywords):
+                tags.append(tag)
+        return tags[:5]
+
+    @staticmethod
+    def _is_low_value_game_candidate(*, title: str, url: str) -> bool:
+        lowered = f"{title} {url}".lower()
+        low_value_patterns = (
+            "所有游戏",
+            "全部游戏",
+            "购买",
+            "立省",
+            "省",
+            "折扣",
+            "特惠",
+            "sale",
+            "bundle",
+            "合集",
+            "collection",
+            "steam 上购买",
+            "on sale",
+        )
+        return any(pattern in lowered for pattern in low_value_patterns)
+
+    @staticmethod
+    def _candidate_key(*, name: str, url: str) -> str:
+        parsed = urlparse(url)
+        if "steampowered.com" in parsed.netloc:
+            parts = [part for part in parsed.path.split("/") if part]
+            if len(parts) >= 2 and parts[0] == "app":
+                return f"steam:{parts[1]}"
+        if "gog.com" in parsed.netloc:
+            parts = [part for part in parsed.path.split("/") if part]
+            if parts:
+                return f"gog:{parts[-1]}"
+        if "itch.io" in parsed.netloc:
+            return f"itch:{parsed.netloc}{parsed.path.rstrip('/')}"
+        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", name.lower())
+        return normalized or url
+
+    @staticmethod
+    def _is_supported_platform_domain(domain: str) -> bool:
+        return any(
+            value in domain
+            for value in (
+                "store.steampowered.com",
+                "steamcommunity.com",
+                "itch.io",
+                "gog.com",
+                "epicgames.com",
+            )
+        )
+
+    @staticmethod
+    def _resolution_confidence(
+        *,
+        game: str,
+        aliases: list[str],
+        platform_urls: list[str],
+        database_domains: list[str],
+    ) -> float:
+        score = 0.25
+        if aliases:
+            score += 0.25
+        if platform_urls:
+            score += 0.35
+        if database_domains:
+            score += 0.25
+        if not relevance_tokens(game):
+            score -= 0.2
+        return max(0, min(1, score))
+
+    @staticmethod
+    def _title_alias_candidates(title: str) -> tuple[str, ...]:
+        cleaned = title.strip()
+        for marker in (" on Steam", " Steam", "在 Steam 上", "Steam 上的", " - Steam", " | Steam"):
+            cleaned = cleaned.replace(marker, "")
+        cleaned = re.sub(r"^在\s*steam\s*上购买", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"立省\s*\d+%.*$", "", cleaned)
+        cleaned = re.sub(r"\s*-\s*\d+%.*$", "", cleaned)
+        cleaned = re.sub(r"\s*所有游戏.*$", "", cleaned)
+        cleaned = " ".join(cleaned.split()).strip(" -|:：")
+        candidates = [cleaned] if 3 <= len(cleaned) <= 80 else []
+        ascii_parts = [
+            part.strip(" -|:：")
+            for part in re_split_title(cleaned)
+            if any(char.isascii() and char.isalpha() for char in part) and 3 <= len(part.strip()) <= 80
+        ]
+        candidates.extend(ascii_parts)
+        return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+
+    @staticmethod
+    def _matches_game_text(*, text: str, game: str, game_aliases: list[str]) -> bool:
+        game_tokens = relevance_tokens(" ".join([game, *game_aliases]))
+        return not game_tokens or any(token in text for token in game_tokens)
+
     def _build_search_queries(
         self,
         *,
@@ -278,6 +557,7 @@ class TavilySearchProvider:
         question: str,
         plan: SearchPlan | None,
         database_domains: tuple[str, ...] = (),
+        game_aliases: tuple[str, ...] = (),
     ) -> list[tuple[str, SearchSource]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
         aliases = list((plan.aliases if plan else [])[:3])
@@ -292,6 +572,10 @@ class TavilySearchProvider:
             if source.source_type == "wiki":
                 candidates.extend(f"site:{domain} {game} {query}" for domain in database_domains)
             candidates.extend(f"site:{domain} {game} {query}" for domain in source.domains)
+            for game_alias in game_aliases[:3]:
+                if game_alias.lower() != game.lower():
+                    candidates.extend(f"site:{domain} {game_alias} {query}" for domain in source.domains)
+                    candidates.extend(template.format(game=game_alias, query=query) for template in source.query_templates)
             candidates.extend(template.format(game=game, query=query) for template in source.query_templates)
             if not candidates:
                 candidates.append(f"{game} {query}")
@@ -315,7 +599,13 @@ class TavilySearchProvider:
         return TavilySearchProvider._result_relevance_score(item=item, game=game, question=question) > 0
 
     @staticmethod
-    def _result_relevance_score(*, item: dict[str, Any], game: str, question: str) -> float:
+    def _result_relevance_score(
+        *,
+        item: dict[str, Any],
+        game: str,
+        question: str,
+        game_aliases: list[str] | None = None,
+    ) -> float:
         text = " ".join(
             str(item.get(field) or "")
             for field in ("title", "url", "content")
@@ -325,7 +615,7 @@ class TavilySearchProvider:
         if TavilySearchProvider._is_low_value_page(text=text, question=question):
             return 0
 
-        game_tokens = relevance_tokens(game)
+        game_tokens = relevance_tokens(" ".join([game, *(game_aliases or [])]))
         game_token_set = set(game_tokens)
         question_tokens = [
             token
@@ -378,12 +668,19 @@ class TavilySearchProvider:
         return False
 
     @staticmethod
-    def _is_high_quality_source(*, item: dict[str, Any], game: str, question: str, source_type: str) -> bool:
+    def _is_high_quality_source(
+        *,
+        item: dict[str, Any],
+        game: str,
+        question: str,
+        source_type: str,
+        game_aliases: list[str] | None = None,
+    ) -> bool:
         if source_type == "official":
             return True
 
         title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
-        game_token_set = set(relevance_tokens(game))
+        game_token_set = set(relevance_tokens(" ".join([game, *(game_aliases or [])])))
         entity_tokens = [
             token
             for token in question_relevance_tokens(question)
@@ -447,6 +744,7 @@ class TavilySearchProvider:
             "boss_strategy": {"wiki": 0.8, "community": 1.0, "web": 0.45, "official": 0.2},
             "item_location": {"wiki": 1.0, "web": 0.65, "community": 0.35, "official": 0.2},
             "quest_step": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.2},
+            "item_usage": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.25},
             "build": {"community": 1.0, "wiki": 0.65, "web": 0.45, "official": 0.2},
             "patch": {"official": 1.0, "wiki": 0.55, "web": 0.45, "community": 0.25},
             "lore": {"wiki": 0.9, "web": 0.65, "community": 0.35, "official": 0.2},
@@ -478,6 +776,6 @@ class TavilySearchProvider:
             return 0.85
         if version_sensitive:
             return 0.45
-        if intent in {"item_location", "quest_step", "lore"}:
+        if intent in {"item_location", "item_usage", "quest_step", "lore"}:
             return 0.75
         return 0.55

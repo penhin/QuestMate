@@ -12,6 +12,7 @@ import {
   setAiSettings,
   streamQuestMate,
   type ChatResponse,
+  type GameCandidate,
   type SessionSummary,
 } from "./api";
 import { GAME_NAMES } from "./config/games";
@@ -22,6 +23,8 @@ type Message = {
   content: string;
   status?: boolean;
   sources?: ChatResponse["sources"];
+  gameCandidates?: GameCandidate[];
+  pendingQuestion?: string;
 };
 
 type Language = "zh" | "en";
@@ -68,6 +71,8 @@ type Copy = {
   ask: string;
   sources: string;
   requestFailed: string;
+  chooseGame: string;
+  noneOfThese: string;
 };
 
 const COPY = {
@@ -112,6 +117,8 @@ const COPY = {
     ask: "提问",
     sources: "来源",
     requestFailed: "请求失败",
+    chooseGame: "请选择要查询的游戏",
+    noneOfThese: "都不是",
   },
   en: {
     open: "Open QuestMate",
@@ -154,6 +161,8 @@ const COPY = {
     ask: "Ask",
     sources: "Sources",
     requestFailed: "Request failed",
+    chooseGame: "Choose the game",
+    noneOfThese: "None of these",
   },
 } satisfies Record<Language, Copy>;
 
@@ -390,20 +399,29 @@ export default function App() {
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
-    const trimmedGame = game.trim();
-    const trimmedQuestion = question.trim();
+    await submitQuestion(question, game);
+  }
+
+  async function submitQuestion(
+    rawQuestion: string,
+    rawGame: string,
+    metadata: Record<string, unknown> = {},
+    options: { appendUserMessage?: boolean } = {},
+  ) {
+    const trimmedGame = rawGame.trim();
+    const trimmedQuestion = rawQuestion.trim();
 
     if (!trimmedGame || !trimmedQuestion || loading) {
       return;
     }
 
+    const appendUserMessage = options.appendUserMessage ?? true;
     setError("");
     setLoading(true);
-    setMessages((current) => [
-      ...current,
-      { role: "user", content: trimmedQuestion },
-      { role: "assistant", content: formatAgentStatus("准备查询"), status: true },
-    ]);
+    setMessages((current) => {
+      const next = appendUserMessage ? [...current, { role: "user" as const, content: trimmedQuestion }] : current;
+      return [...next, { role: "assistant", content: formatAgentStatus("准备查询"), status: true }];
+    });
     setQuestion("");
 
     try {
@@ -415,6 +433,7 @@ export default function App() {
           question: trimmedQuestion,
           sessionId,
           aiSettings,
+          metadata,
         },
         {
           onStatus: (status) => {
@@ -460,7 +479,13 @@ export default function App() {
       });
       setDraftSession(false);
       setMessages((current) => {
-        return updateLastAssistantMessage(current, { content: response.answer, sources: response.sources, status: false });
+        return updateLastAssistantMessage(current, {
+          content: response.answer,
+          sources: response.sources,
+          status: false,
+          gameCandidates: response.game_candidates,
+          pendingQuestion: response.needs_game_confirmation ? trimmedQuestion : undefined,
+        });
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : text.requestFailed;
@@ -469,6 +494,42 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function confirmGameCandidate(candidate: GameCandidate, pendingQuestion?: string) {
+    const nextGame = candidate.name;
+    setGame(nextGame);
+    manualGameOverrideRef.current = true;
+    setMessages((current) =>
+      updateLastAssistantMessage(current, {
+        content: `已确认游戏：${candidate.name}`,
+        gameCandidates: [],
+        pendingQuestion: undefined,
+        status: true,
+      }),
+    );
+    void submitQuestion(
+      pendingQuestion || question,
+      nextGame,
+      {
+        confirmed_game: true,
+        game_aliases: [candidate.name, ...candidate.aliases],
+        database_domains: candidate.database_domains,
+      },
+      { appendUserMessage: false },
+    );
+  }
+
+  function rejectGameCandidates(pendingQuestion?: string) {
+    setQuestion(pendingQuestion || question);
+    setMessages((current) =>
+      updateLastAssistantMessage(current, {
+        content: "没有匹配到正确游戏。请补充 Steam/itch.io 链接、英文名或开发商后再查。",
+        gameCandidates: [],
+        pendingQuestion: undefined,
+        status: false,
+      }),
+    );
   }
 
   if (mode === "bubble") {
@@ -816,6 +877,34 @@ export default function App() {
                   className={`message ${message.role}${message.status ? " status" : ""}`}
                 >
                   <p>{message.content}</p>
+                  {message.gameCandidates && message.gameCandidates.length > 0 && (
+                    <div className="game-candidates" aria-label={text.chooseGame}>
+                      <span>{text.chooseGame}</span>
+                      <div className="candidate-list">
+                        {message.gameCandidates.map((candidate) => (
+                          <button
+                            type="button"
+                            key={`${candidate.name}-${candidate.platform_urls[0] ?? ""}`}
+                            className="candidate-card"
+                            onClick={() => confirmGameCandidate(candidate, message.pendingQuestion)}
+                          >
+                            <strong>{candidate.name}</strong>
+                            {candidate.tags.length > 0 && (
+                              <small>{candidate.tags.join(" / ")}</small>
+                            )}
+                            {candidate.platform_urls[0] && <em>{formatCandidateHost(candidate.platform_urls[0])}</em>}
+                          </button>
+                        ))}
+                        <button
+                          type="button"
+                          className="candidate-card none"
+                          onClick={() => rejectGameCandidates(message.pendingQuestion)}
+                        >
+                          <strong>{text.noneOfThese}</strong>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {message.sources && message.sources.length > 0 && (
                     <div className="sources">
                       <span>{text.sources}</span>
@@ -903,6 +992,14 @@ function updateLastAssistantMessage(messages: Message[], patch: Partial<Message>
 
 function formatAgentStatus(status: string) {
   return `${status}...`;
+}
+
+function formatCandidateHost(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
 
 function GameField(props: {
