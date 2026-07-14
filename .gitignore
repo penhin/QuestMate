@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 .agents/
 skills-lock.json
+evals/reports/
 
 overlay/.env
 overlay/node_modules/

@@ -60,3 +60,7 @@ curl -X POST http://127.0.0.1:8000/api/knowledge/documents \
 ```
 
 嵌入接口未配置时，知识库使用关键词检索；配置 OpenAI 兼容嵌入接口后启用 pgvector 语义检索。
+
+## Agent 评测
+
+评测集与运行方式见 [evals/README.md](evals/README.md)。

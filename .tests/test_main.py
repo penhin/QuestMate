@@ -10,6 +10,7 @@ import main
 from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
 from knowledge import chunk_text, keyword_terms, parse_published_at
+from evals.run_evals import DEFAULT_CASES, evaluate_case, load_cases
 from agent import QuestAgent
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
@@ -109,6 +110,41 @@ async def test_storage_requires_explicit_opt_in_for_ephemeral_fallback() -> None
     store = PostgresConversationStore(database=BrokenDatabase())
     with pytest.raises(RuntimeError, match="Postgres is unavailable"):
         await store.init_schema()
+
+
+def test_evaluation_suite_has_diverse_unique_cases() -> None:
+    cases = load_cases(DEFAULT_CASES)
+
+    assert len(cases) == 30
+    assert len({case["id"] for case in cases}) == len(cases)
+    assert {"patch", "boss_strategy", "quest_step", "prompt_injection"}.issubset(
+        {case["category"] for case in cases}
+    )
+
+
+def test_evaluation_rejects_undated_non_official_patch_answer() -> None:
+    case = {
+        "id": "patch",
+        "expected_behavior": "conservative_or_versioned",
+        "expected_source_types": ["official"],
+        "required_terms": [],
+        "requires_official_versioned_source": True,
+    }
+    response = {
+        "answer": "当前版本已经削弱。",
+        "sources": [
+            {
+                "title": "Community patch summary",
+                "url": "https://example.com/patch",
+                "source_type": "community",
+            }
+        ],
+    }
+
+    result = evaluate_case(case, response)
+
+    assert result["version_policy_pass"] is False
+    assert result["passed"] is False
 
 
 class AmbiguousGameSearchProvider:
