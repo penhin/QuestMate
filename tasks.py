@@ -1,6 +1,9 @@
+import asyncio
+
 from celery import Celery
 
 from config import get_settings
+from knowledge import knowledge_store
 
 settings = get_settings()
 
@@ -19,10 +22,8 @@ celery_app.conf.update(
 
 
 @celery_app.task(name="questmate.index_url")
-def index_url(url: str, game: str | None = None) -> dict[str, str | None]:
-    return {
-        "status": "queued",
-        "url": url,
-        "game": game,
-    }
-
+def index_url(url: str, game: str, title: str | None = None, source_type: str = "web") -> dict[str, object]:
+    """Fetch, extract, chunk and persist one guide page for retrieval."""
+    return asyncio.run(
+        knowledge_store.index_url(url=url, game=game, title=title, source_type=source_type)
+    )

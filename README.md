@@ -46,3 +46,24 @@ npm run dev
 第一版有意保持为可运行骨架。搜索、LLM、存储和后台任务的边界已经就位，后续可以逐步补全完整的检索和索引行为。
 
 The first version is intentionally a runnable skeleton. Search, LLM, storage, and background task boundaries are in place so the full retrieval and indexing behavior can be filled in incrementally.
+
+## 知识库索引 / Knowledge Index
+
+知识库会抓取指定 URL、提取正文、按段落分块并写入 Postgres；配置了 OpenAI 兼容的嵌入接口后，会同时写入 pgvector 向量。未配置嵌入接口时仍可按关键词检索，便于本地开发和渐进部署。
+
+启动依赖与 worker：
+
+```bash
+docker compose up -d postgres redis
+uv run celery -A tasks.celery_app worker --loglevel=info
+```
+
+提交一篇资料：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/knowledge/documents \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/guide","game":"Elden Ring","source_type":"wiki"}'
+```
+
+用 `GET /api/knowledge/documents?game=Elden%20Ring` 查看索引状态。状态为 `ready` 的资料会在每次问答时优先参与检索，再与实时网页结果去重合并。

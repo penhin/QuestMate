@@ -21,6 +21,11 @@ class Settings(BaseSettings):
 
     search_max_results: int = Field(default=5, ge=1, le=20)
     cache_ttl_seconds: int = Field(default=604800, ge=60)
+    knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
+    embedding_api_key: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = Field(default=1536, ge=64, le=4096)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

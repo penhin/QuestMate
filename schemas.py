@@ -130,3 +130,26 @@ class FeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     accepted: bool = True
+
+
+class KnowledgeIndexRequest(BaseModel):
+    url: HttpUrl
+    game: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, max_length=300)
+    source_type: Literal["official", "wiki", "community", "web"] = "web"
+
+
+class KnowledgeIndexResponse(BaseModel):
+    task_id: str
+    status: Literal["queued"] = "queued"
+
+
+class KnowledgeDocumentStatus(BaseModel):
+    url: HttpUrl
+    game: str
+    title: str | None = None
+    source_type: Literal["official", "wiki", "community", "web"] = "web"
+    status: Literal["queued", "indexing", "ready", "failed"]
+    chunk_count: int = 0
+    error: str | None = None
+    updated_at: datetime | None = None

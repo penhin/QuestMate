@@ -8,6 +8,7 @@ import agent as agent_module
 import main
 from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
+from knowledge import chunk_text, keyword_terms
 from agent import QuestAgent
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
@@ -32,6 +33,43 @@ class EmptySearchProvider:
 
     async def search(self, query: str, game: str, max_results: int | None = None, plan=None, game_resolution=None):
         return []
+
+
+def test_knowledge_chunking_preserves_order_and_overlap() -> None:
+    content = "第一段资料。" * 180
+    chunks = chunk_text(content, chunk_size=120, overlap=20)
+
+    assert len(chunks) > 1
+    assert chunks[0].startswith("第一段资料")
+    terms = keyword_terms("女武神 Malenia 怎么打")
+    assert "malenia" in terms
+    assert {"女武", "武神"}.issubset(terms)
+
+
+class LocalKnowledge:
+    async def retrieve(self, *, game: str, query: str):
+        return [
+            Source(
+                title="本地女武神资料",
+                url="https://example.com/malenia",
+                snippet="本地索引内容",
+                source_type="wiki",
+                trust_score=0.8,
+                trust_label="百科",
+            )
+        ]
+
+
+async def test_agent_merges_local_knowledge_before_web_results() -> None:
+    agent = QuestAgent(search_provider=EmptySearchProvider(), knowledge=LocalKnowledge())
+    sources = await agent._retrieve_sources(
+        "女武神怎么打？",
+        "Elden Ring",
+        plan=SearchPlan(),
+        game_resolution=GameResolution(input_name="Elden Ring", confirmed_name="Elden Ring", confidence=0.8),
+    )
+
+    assert [source.title for source in sources] == ["本地女武神资料"]
 
 
 class AmbiguousGameSearchProvider:

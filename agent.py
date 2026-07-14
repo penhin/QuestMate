@@ -4,6 +4,8 @@ from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
+from knowledge import KnowledgeStore, knowledge_store
+from config import get_settings
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, GameResolution, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
@@ -27,9 +29,11 @@ class QuestAgent:
         self,
         search_provider: SearchProvider | None = None,
         llm: GuideLLM | None = None,
+        knowledge: KnowledgeStore | None = None,
     ) -> None:
         self.search_provider = search_provider or TavilySearchProvider()
         self.llm = llm or GuideLLM()
+        self.knowledge = knowledge or knowledge_store
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -121,7 +125,7 @@ class QuestAgent:
         search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
 
         yield ("status", self._status_for_search(search_plan))
-        sources = await self.search_provider.search(
+        sources = await self._retrieve_sources(
             request.question,
             request.game,
             plan=search_plan,
@@ -182,13 +186,39 @@ class QuestAgent:
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        sources = await self.search_provider.search(
+        sources = await self._retrieve_sources(
             request.question,
             request.game,
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
         )
         return {**state, "sources": sources}
+
+    async def _retrieve_sources(
+        self,
+        question: str,
+        game: str,
+        *,
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+    ) -> list[Source]:
+        """Blend curated local evidence with fresh web results, retaining URL diversity."""
+        local_sources = await self.knowledge.retrieve(game=game, query=question)
+        web_sources = await self.search_provider.search(
+            question,
+            game,
+            plan=plan,
+            game_resolution=game_resolution,
+        )
+        selected: list[Source] = []
+        seen_urls: set[str] = set()
+        for source in [*local_sources, *web_sources]:
+            key = str(source.url).rstrip("/").lower()
+            if key in seen_urls:
+                continue
+            selected.append(source)
+            seen_urls.add(key)
+        return selected[: get_settings().search_max_results]
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]

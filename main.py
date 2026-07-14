@@ -3,23 +3,28 @@ from contextlib import asynccontextmanager
 import json
 
 import structlog
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from agent import QuestAgent, quest_agent
 from config import Settings, get_settings
+from knowledge import knowledge_store
 from schemas import (
     ChatRequest,
     ChatResponse,
     FeedbackRequest,
     FeedbackResponse,
+    KnowledgeDocumentStatus,
+    KnowledgeIndexRequest,
+    KnowledgeIndexResponse,
     RenameSessionRequest,
     SessionResponse,
     SessionSummary,
     SessionsResponse,
 )
 from storage import conversation_store
+from tasks import index_url
 from uuid import UUID
 
 logger = structlog.get_logger()
@@ -29,6 +34,10 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await conversation_store.init_schema()
+        try:
+            await knowledge_store.init_schema()
+        except Exception:
+            logger.warning("knowledge.schema_unavailable")
         yield
 
     app = FastAPI(title="QuestMate", version="0.1.0", lifespan=lifespan)
@@ -88,6 +97,28 @@ def create_app() -> FastAPI:
     async def feedback(request: FeedbackRequest) -> FeedbackResponse:
         await conversation_store.save_feedback(request)
         return FeedbackResponse()
+
+    @app.post("/api/knowledge/documents", response_model=KnowledgeIndexResponse, status_code=status.HTTP_202_ACCEPTED)
+    async def index_knowledge_document(request: KnowledgeIndexRequest) -> KnowledgeIndexResponse:
+        try:
+            task = index_url.delay(
+                str(request.url),
+                request.game,
+                request.title,
+                request.source_type,
+            )
+        except Exception as exc:
+            logger.exception("knowledge.index_enqueue_failed")
+            raise HTTPException(status_code=503, detail="索引队列暂不可用") from exc
+        return KnowledgeIndexResponse(task_id=task.id)
+
+    @app.get("/api/knowledge/documents", response_model=list[KnowledgeDocumentStatus])
+    async def list_knowledge_documents(game: str | None = None) -> list[KnowledgeDocumentStatus]:
+        try:
+            return await knowledge_store.list_documents(game=game)
+        except Exception as exc:
+            logger.exception("knowledge.list_failed")
+            raise HTTPException(status_code=503, detail="知识库暂不可用") from exc
 
     return app
 
