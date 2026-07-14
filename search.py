@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from urllib.parse import urlparse, urlunparse
 from typing import Any, Protocol
@@ -6,12 +5,9 @@ from typing import Any, Protocol
 from tavily import TavilyClient
 
 from config import Settings, get_settings
+from game_resolution import GameResolver
 from query_tokens import question_relevance_tokens, relevance_tokens
-from schemas import GameCandidate, GameResolution, PlannedSearchQuery, SearchPlan, Source
-
-
-def re_split_title(value: str) -> list[str]:
-    return re.split(r"\s[-|:：]\s|[（）()【】\[\]]", value)
+from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
 
 
 @dataclass(frozen=True)
@@ -104,6 +100,7 @@ class TavilySearchProvider:
     def __init__(self, settings: Settings | None = None, client: Any | None = None) -> None:
         self.settings = settings or get_settings()
         self._client = client or (TavilyClient(api_key=self.settings.tavily_api_key) if self.settings.tavily_api_key else None)
+        self._game_resolver = GameResolver(self._client) if self._client is not None else None
 
     async def search(
         self,
@@ -146,10 +143,9 @@ class TavilySearchProvider:
         )
 
         if len(strict_sources_by_url) < min_strict_results and intent != "patch":
-            database_domains = tuple(game_resolution.database_domains) or self._discover_database_domains(
-                game=game,
-                game_aliases=game_aliases,
-            )
+            database_domains = tuple(game_resolution.database_domains)
+            if not database_domains and self._game_resolver is not None:
+                database_domains = self._game_resolver.discover_database_domains(game=game, game_aliases=game_aliases)
             if database_domains or game_aliases:
                 database_queries = self._build_search_queries(
                     game=game,
@@ -190,33 +186,7 @@ class TavilySearchProvider:
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
-
-        candidates = list(self._discover_game_candidates(game=game))
-        aliases = list(self._discover_game_aliases(game=game))
-        for candidate in candidates:
-            for alias in [candidate.name, *candidate.aliases]:
-                if alias.lower() != game.lower() and alias not in aliases:
-                    aliases.append(alias)
-        database_domains = list(self._discover_database_domains(game=game, game_aliases=aliases))
-        platform_urls = list(self._discover_platform_urls(game=game, game_aliases=aliases))
-        confirmed_name = candidates[0].name if candidates else (aliases[0] if aliases else game)
-        confidence = self._resolution_confidence(
-            game=game,
-            aliases=aliases,
-            platform_urls=platform_urls,
-            database_domains=database_domains,
-        )
-        ambiguous = len(candidates) > 1 and candidates[0].confidence - candidates[1].confidence < 0.2
-        return GameResolution(
-            input_name=game,
-            confirmed_name=confirmed_name,
-            aliases=aliases,
-            platform_urls=platform_urls,
-            database_domains=database_domains,
-            candidates=candidates,
-            confidence=confidence,
-            ambiguous=ambiguous,
-        )
+        return self._game_resolver.resolve(game=game, question=question)
 
     def _collect_sources(
         self,
@@ -291,264 +261,6 @@ class TavilySearchProvider:
                     current = strict_sources_by_url.get(source_key)
                     if current is None or (source.score or 0) > (current.score or 0):
                         strict_sources_by_url[source_key] = source
-
-    def _discover_database_domains(self, *, game: str, game_aliases: list[str] | None = None) -> tuple[str, ...]:
-        game_names = [game, *(game_aliases or [])]
-        candidates = tuple(
-            f"{game_name} {suffix}"
-            for game_name in game_names[:3]
-            for suffix in ("fandom wiki", "wiki.gg wiki", "official wiki")
-        )
-        domains: list[str] = []
-        for query in candidates:
-            result = self._client.search(
-                query=query,
-                max_results=3,
-                include_answer=False,
-                include_raw_content=False,
-            )
-            for item in result.get("results", []):
-                url = str(item.get("url") or "")
-                domain = urlparse(url).netloc.lower()
-                if not self._is_supported_database_domain(domain):
-                    continue
-                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
-                if not self._matches_game_text(text=text, game=game, game_aliases=game_aliases or []):
-                    continue
-                if domain not in domains:
-                    domains.append(domain)
-                if len(domains) >= 4:
-                    return tuple(domains)
-        return tuple(domains)
-
-    @staticmethod
-    def _is_supported_database_domain(domain: str) -> bool:
-        return (
-            domain.endswith(".fandom.com")
-            or domain == "fandom.com"
-            or domain.endswith(".wiki.gg")
-            or domain == "wiki.gg"
-        )
-
-    def _discover_game_aliases(self, *, game: str) -> tuple[str, ...]:
-        candidates = (
-            f"{game} Steam",
-            f"{game} Steam official",
-            f"{game} itch.io",
-            f"{game} GOG",
-            f"{game} game English title",
-        )
-        aliases: list[str] = []
-        for query in candidates:
-            result = self._client.search(
-                query=query,
-                max_results=3,
-                include_answer=False,
-                include_raw_content=False,
-            )
-            for item in result.get("results", []):
-                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
-                if not self._matches_game_text(text=text, game=game, game_aliases=[]):
-                    continue
-                title = str(item.get("title") or "")
-                for alias in self._title_alias_candidates(title):
-                    if alias.lower() != game.lower() and alias not in aliases:
-                        aliases.append(alias)
-                    if len(aliases) >= 4:
-                        return tuple(aliases)
-        return tuple(aliases)
-
-    def _discover_platform_urls(self, *, game: str, game_aliases: list[str] | None = None) -> tuple[str, ...]:
-        game_names = [game, *(game_aliases or [])]
-        candidates = tuple(
-            f"{game_name} {platform}"
-            for game_name in game_names[:3]
-            for platform in ("Steam", "itch.io", "GOG", "Epic Games")
-        )
-        urls: list[str] = []
-        for query in candidates:
-            result = self._client.search(
-                query=query,
-                max_results=3,
-                include_answer=False,
-                include_raw_content=False,
-            )
-            for item in result.get("results", []):
-                url = str(item.get("url") or "")
-                domain = urlparse(url).netloc.lower()
-                if not self._is_supported_platform_domain(domain):
-                    continue
-                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
-                if not self._matches_game_text(text=text, game=game, game_aliases=game_aliases or []):
-                    continue
-                if url not in urls:
-                    urls.append(url)
-                if len(urls) >= 6:
-                    return tuple(urls)
-        return tuple(urls)
-
-    def _discover_game_candidates(self, *, game: str) -> tuple[GameCandidate, ...]:
-        queries = (
-            f"{game} Steam",
-            f"{game} itch.io game",
-            f"{game} GOG game",
-            f"{game} Epic Games",
-        )
-        candidates_by_name: dict[str, GameCandidate] = {}
-        for query in queries:
-            result = self._client.search(
-                query=query,
-                max_results=4,
-                include_answer=False,
-                include_raw_content=False,
-            )
-            for item in result.get("results", []):
-                url = str(item.get("url") or "")
-                domain = urlparse(url).netloc.lower()
-                if not self._is_supported_platform_domain(domain):
-                    continue
-                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
-                if not self._matches_game_text(text=text, game=game, game_aliases=[]):
-                    continue
-                title = str(item.get("title") or url)
-                if self._is_low_value_game_candidate(title=title, url=url):
-                    continue
-                aliases = list(self._title_alias_candidates(title))
-                name = aliases[0] if aliases else title[:80]
-                canonical_key = self._candidate_key(name=name, url=url)
-                tags = self._infer_game_tags(text)
-                raw_score = float(item.get("score") or 0.5)
-                confidence = min(1.0, 0.45 + raw_score * 0.35 + (0.15 if aliases else 0) + (0.05 if tags else 0))
-                existing = candidates_by_name.get(canonical_key)
-                platform_urls = [url]
-                if existing:
-                    platform_urls = list(dict.fromkeys([*map(str, existing.platform_urls), url]))
-                    confidence = max(existing.confidence, confidence)
-                    tags = list(dict.fromkeys([*existing.tags, *tags]))[:5]
-                    aliases = list(dict.fromkeys([*existing.aliases, *aliases]))[:6]
-                    name = existing.name if len(existing.name) <= len(name) else name
-                candidates_by_name[canonical_key] = GameCandidate(
-                    name=name,
-                    aliases=[alias for alias in aliases if alias != name][:6],
-                    tags=tags,
-                    platform_urls=platform_urls[:4],
-                    confidence=confidence,
-                )
-        return tuple(
-            sorted(candidates_by_name.values(), key=lambda candidate: candidate.confidence, reverse=True)[:6]
-        )
-
-    @staticmethod
-    def _infer_game_tags(text: str) -> list[str]:
-        tag_rules = (
-            ("RPG", ("rpg", "role-playing", "角色扮演")),
-            ("生存", ("survival", "生存")),
-            ("恐怖", ("horror", "恐怖")),
-            ("解谜", ("puzzle", "解谜", "谜题")),
-            ("冒险", ("adventure", "冒险")),
-            ("动作", ("action", "动作")),
-            ("模拟", ("simulation", "simulator", "模拟")),
-            ("策略", ("strategy", "策略")),
-            ("视觉小说", ("visual novel", "视觉小说")),
-            ("独立游戏", ("indie", "独立")),
-        )
-        tags: list[str] = []
-        for tag, keywords in tag_rules:
-            if any(keyword in text for keyword in keywords):
-                tags.append(tag)
-        return tags[:5]
-
-    @staticmethod
-    def _is_low_value_game_candidate(*, title: str, url: str) -> bool:
-        lowered = f"{title} {url}".lower()
-        low_value_patterns = (
-            "所有游戏",
-            "全部游戏",
-            "购买",
-            "立省",
-            "省",
-            "折扣",
-            "特惠",
-            "sale",
-            "bundle",
-            "合集",
-            "collection",
-            "steam 上购买",
-            "on sale",
-        )
-        return any(pattern in lowered for pattern in low_value_patterns)
-
-    @staticmethod
-    def _candidate_key(*, name: str, url: str) -> str:
-        parsed = urlparse(url)
-        if "steampowered.com" in parsed.netloc:
-            parts = [part for part in parsed.path.split("/") if part]
-            if len(parts) >= 2 and parts[0] == "app":
-                return f"steam:{parts[1]}"
-        if "gog.com" in parsed.netloc:
-            parts = [part for part in parsed.path.split("/") if part]
-            if parts:
-                return f"gog:{parts[-1]}"
-        if "itch.io" in parsed.netloc:
-            return f"itch:{parsed.netloc}{parsed.path.rstrip('/')}"
-        normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", name.lower())
-        return normalized or url
-
-    @staticmethod
-    def _is_supported_platform_domain(domain: str) -> bool:
-        return any(
-            value in domain
-            for value in (
-                "store.steampowered.com",
-                "steamcommunity.com",
-                "itch.io",
-                "gog.com",
-                "epicgames.com",
-            )
-        )
-
-    @staticmethod
-    def _resolution_confidence(
-        *,
-        game: str,
-        aliases: list[str],
-        platform_urls: list[str],
-        database_domains: list[str],
-    ) -> float:
-        score = 0.25
-        if aliases:
-            score += 0.25
-        if platform_urls:
-            score += 0.35
-        if database_domains:
-            score += 0.25
-        if not relevance_tokens(game):
-            score -= 0.2
-        return max(0, min(1, score))
-
-    @staticmethod
-    def _title_alias_candidates(title: str) -> tuple[str, ...]:
-        cleaned = title.strip()
-        for marker in (" on Steam", " Steam", "在 Steam 上", "Steam 上的", " - Steam", " | Steam"):
-            cleaned = cleaned.replace(marker, "")
-        cleaned = re.sub(r"^在\s*steam\s*上购买", "", cleaned, flags=re.I)
-        cleaned = re.sub(r"立省\s*\d+%.*$", "", cleaned)
-        cleaned = re.sub(r"\s*-\s*\d+%.*$", "", cleaned)
-        cleaned = re.sub(r"\s*所有游戏.*$", "", cleaned)
-        cleaned = " ".join(cleaned.split()).strip(" -|:：")
-        candidates = [cleaned] if 3 <= len(cleaned) <= 80 else []
-        ascii_parts = [
-            part.strip(" -|:：")
-            for part in re_split_title(cleaned)
-            if any(char.isascii() and char.isalpha() for char in part) and 3 <= len(part.strip()) <= 80
-        ]
-        candidates.extend(ascii_parts)
-        return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
-
-    @staticmethod
-    def _matches_game_text(*, text: str, game: str, game_aliases: list[str]) -> bool:
-        game_tokens = relevance_tokens(" ".join([game, *game_aliases]))
-        return not game_tokens or any(token in text for token in game_tokens)
 
     def _build_search_queries(
         self,
