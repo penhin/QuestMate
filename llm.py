@@ -291,7 +291,9 @@ class GuideLLM:
         return (
             f"{PROMPT_SECURITY_RULES} "
             "You plan web searches for a game guide assistant. "
-            "Return only compact JSON with keys: intent, queries, missing_info. "
+            "Return only compact JSON with keys: intent, aliases, queries, missing_info. "
+            "aliases must contain 0 to 6 useful alternate names for the queried entity, generated from your game "
+            "knowledge when helpful; include English names, official names, or common aliases, but never invent URLs. "
             "queries must contain 2 to 4 objects with source_type and query. "
             "source_type must be one of official, wiki, community, web. "
             "intent must be one of boss_strategy, item_location, quest_step, build, patch, lore, general. "
@@ -366,6 +368,7 @@ class GuideLLM:
 
         return SearchPlan(
             intent=plan.intent or "general",
+            aliases=cls._sanitize_aliases(plan.aliases),
             queries=sanitized_queries,
             missing_info=plan.missing_info[:4],
         )
@@ -414,7 +417,7 @@ class GuideLLM:
             ]
         )
 
-        return SearchPlan(intent=intent, queries=queries[:4], missing_info=[])
+        return SearchPlan(intent=intent, aliases=[], queries=queries[:4], missing_info=[])
 
     @staticmethod
     def _sanitize_search_text(value: str) -> str:
@@ -431,6 +434,22 @@ class GuideLLM:
 
         cleaned = " ".join("".join(kept).split())
         return cleaned or value.strip()
+
+    @classmethod
+    def _sanitize_aliases(cls, aliases: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for alias in aliases[:6]:
+            value = cls._sanitize_search_text(alias).strip().strip("\"'“”‘’")
+            if not value or len(value) > 80:
+                continue
+            lowered = value.lower()
+            if any(token in lowered for token in ("http://", "https://", "site:", "ignore", "system prompt", "api key")):
+                continue
+            if lowered in {"wiki", "guide", "boss", "item", "quest", "攻略", "打法", "位置"}:
+                continue
+            if value not in cleaned:
+                cleaned.append(value)
+        return cleaned
 
     @staticmethod
     def _infer_intent(question: str) -> str:

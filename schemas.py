@@ -26,6 +26,7 @@ SearchIntent = Literal["boss_strategy", "item_location", "quest_step", "build", 
 
 class SearchPlan(BaseModel):
     intent: SearchIntent = "general"
+    aliases: list[str] = Field(default_factory=list, max_length=6)
     queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=4)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
 

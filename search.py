@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from typing import Any, Protocol
 
 from tavily import TavilyClient
@@ -107,10 +107,12 @@ class TavilySearchProvider:
             return []
 
         total_results = max_results or self.settings.search_max_results
-        per_query_results = min(2, max(1, total_results))
-        sources_by_url: dict[str, Source] = {}
+        per_query_results = min(4, max(2, total_results))
+        strict_sources_by_url: dict[str, Source] = {}
+        relaxed_sources_by_url: dict[str, Source] = {}
         search_queries = self._build_search_queries(game=game, question=query, plan=plan)
         intent = (plan.intent if plan else "general") or "general"
+        aliases = list((plan.aliases if plan else [])[:6])
 
         for search_query, search_source in search_queries:
             result = self._client.search(
@@ -126,7 +128,7 @@ class TavilySearchProvider:
                 relevance_score = self._result_relevance_score(
                     item=item,
                     game=game,
-                    question=f"{query} {search_query}",
+                    question=f"{query} {search_query} {' '.join(aliases)}",
                 )
                 if relevance_score <= 0:
                     continue
@@ -156,15 +158,36 @@ class TavilySearchProvider:
                     trust_score=search_source.trust_score,
                     trust_label=search_source.trust_label,
                 )
-                current = sources_by_url.get(url)
+                source_key = self._canonical_source_key(str(url))
+                current = relaxed_sources_by_url.get(source_key)
                 if current is None or (source.score or 0) > (current.score or 0):
-                    sources_by_url[url] = source
+                    relaxed_sources_by_url[source_key] = source
+                if self._is_high_quality_source(
+                    item=item,
+                    game=game,
+                    question=f"{query} {search_query} {' '.join(aliases)}",
+                    source_type=search_source.source_type,
+                ):
+                    current = strict_sources_by_url.get(source_key)
+                    if current is None or (source.score or 0) > (current.score or 0):
+                        strict_sources_by_url[source_key] = source
 
-        return sorted(
-            sources_by_url.values(),
+        strict_ranked_sources = sorted(
+            strict_sources_by_url.values(),
             key=lambda source: ((source.score or 0), source.trust_score),
             reverse=True,
-        )[:total_results]
+        )
+        relaxed_ranked_sources = sorted(
+            relaxed_sources_by_url.values(),
+            key=lambda source: ((source.score or 0), source.trust_score),
+            reverse=True,
+        )
+        return self._balanced_sources(
+            strict_sources=strict_ranked_sources,
+            relaxed_sources=relaxed_ranked_sources,
+            total_results=total_results,
+            min_strict_results=min(3, total_results),
+        )
 
     def _build_search_queries(
         self,
@@ -174,6 +197,7 @@ class TavilySearchProvider:
         plan: SearchPlan | None,
     ) -> list[tuple[str, SearchSource]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
+        aliases = list((plan.aliases if plan else [])[:3])
         built: list[tuple[str, SearchSource]] = []
         seen: set[str] = set()
 
@@ -186,6 +210,9 @@ class TavilySearchProvider:
             candidates.extend(template.format(game=game, query=query) for template in source.query_templates)
             if not candidates:
                 candidates.append(f"{game} {query}")
+            for alias in aliases:
+                if alias.lower() not in query.lower():
+                    candidates.append(f"{game} {alias} {query}")
 
             for candidate in candidates:
                 normalized = " ".join(candidate.split())
@@ -209,6 +236,8 @@ class TavilySearchProvider:
             for field in ("title", "url", "content")
         ).lower()
         if not TavilySearchProvider._is_same_game_surface(text=text, game=game, question=question):
+            return 0
+        if TavilySearchProvider._is_low_value_page(text=text, question=question):
             return 0
 
         game_tokens = relevance_tokens(game)
@@ -243,6 +272,89 @@ class TavilySearchProvider:
         if "elden ring" in normalized_game and "nightreign" in text and "nightreign" not in normalized_question:
             return False
         return True
+
+    @staticmethod
+    def _is_low_value_page(*, text: str, question: str) -> bool:
+        lowered_question = question.lower()
+        if "villains.fandom.com" in text and not any(token in lowered_question for token in ("lore", "剧情", "背景")):
+            return True
+        if any(value in text for value in ("all-fiction-battles", "vs battles wiki", "battle wiki")) and not any(
+            token in lowered_question for token in ("lore", "剧情", "背景")
+        ):
+            return True
+        if "reddit - the heart of the internet" in text:
+            return True
+        if "reddit.com/r/eldenring/comments" not in text and any(
+            value in text for value in ("reddit.com/r/eldenring", "reddit - the heart of the internet")
+        ):
+            return True
+        if "steamcommunity.com/app" in text and "/discussions/" not in text:
+            return True
+        return False
+
+    @staticmethod
+    def _is_high_quality_source(*, item: dict[str, Any], game: str, question: str, source_type: str) -> bool:
+        if source_type == "official":
+            return True
+
+        title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
+        game_token_set = set(relevance_tokens(game))
+        entity_tokens = [
+            token
+            for token in question_relevance_tokens(question)
+            if token not in game_token_set and token not in TavilySearchProvider.search_noise_tokens
+        ]
+        title_entity_matches = sum(1 for token in entity_tokens if token in title_url)
+
+        if source_type == "wiki":
+            return title_entity_matches > 0
+        if source_type == "community":
+            return title_entity_matches > 0 and any(value in title_url for value in ("comments", "discussions"))
+        return title_entity_matches > 0
+
+    @staticmethod
+    def _canonical_source_key(url: str) -> str:
+        parsed = urlparse(url)
+        if any(value in parsed.netloc.lower() for value in ("steamcommunity.com", "reddit.com")):
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+        return url
+
+    @staticmethod
+    def _limit_source_diversity(sources: list[Source], *, total_results: int) -> list[Source]:
+        selected: list[Source] = []
+        domain_counts: dict[str, int] = {}
+        for source in sources:
+            domain = urlparse(str(source.url)).netloc.lower()
+            limit = 2 if any(value in domain for value in ("reddit.com", "steamcommunity.com")) else 3
+            if domain_counts.get(domain, 0) >= limit:
+                continue
+            selected.append(source)
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            if len(selected) >= total_results:
+                return selected
+        return selected
+
+    @classmethod
+    def _balanced_sources(
+        cls,
+        *,
+        strict_sources: list[Source],
+        relaxed_sources: list[Source],
+        total_results: int,
+        min_strict_results: int,
+    ) -> list[Source]:
+        selected = cls._limit_source_diversity(strict_sources, total_results=total_results)
+        if len(selected) >= min_strict_results or len(selected) >= total_results:
+            return selected
+
+        selected_keys = {cls._canonical_source_key(str(source.url)) for source in selected}
+        fill_sources = [
+            source
+            for source in relaxed_sources
+            if cls._canonical_source_key(str(source.url)) not in selected_keys
+        ]
+        combined = selected + fill_sources
+        return cls._limit_source_diversity(combined, total_results=total_results)
 
     @staticmethod
     def _intent_source_boost(*, intent: str, source_type: str) -> float:

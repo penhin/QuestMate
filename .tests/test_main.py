@@ -201,6 +201,19 @@ async def test_search_keeps_results_matched_by_planned_query_alias() -> None:
     assert sources[0].title == "Malenia Blade of Miquella"
 
 
+def test_search_builds_alias_queries_from_plan() -> None:
+    provider = TavilySearchProvider(client=FakeSearchClient())
+    plan = SearchPlan(
+        intent="boss_strategy",
+        aliases=["Malenia Blade of Miquella"],
+        queries=[{"source_type": "community", "query": "boss weakness phase"}],
+    )
+
+    queries = provider._build_search_queries(game="Elden Ring", question="女武神怎么打？", plan=plan)
+
+    assert any("Malenia Blade of Miquella" in query for query, _source in queries)
+
+
 def test_search_filters_unrelated_game_results() -> None:
     item = {
         "title": "Dead by Daylight Wiki",
@@ -255,6 +268,85 @@ def test_search_filters_nightreign_when_question_is_base_elden_ring() -> None:
         game="Elden Ring",
         question="Malenia Blade of Miquella boss weakness phase",
     )
+
+
+def test_search_filters_low_value_pages_for_strategy() -> None:
+    item = {
+        "title": "Malenia | Villains Wiki | Fandom",
+        "url": "https://villains.fandom.com/wiki/Malenia",
+        "content": "Malenia Blade of Miquella Elden Ring character biography.",
+    }
+
+    assert not TavilySearchProvider._is_relevant_result(
+        item=item,
+        game="Elden Ring",
+        question="Malenia Blade of Miquella boss weakness phase",
+    )
+
+
+def test_search_filters_battle_wiki_for_strategy() -> None:
+    item = {
+        "title": "Malenia, Blade of Miquella | All Fiction Battles Wiki | Fandom",
+        "url": "https://all-fiction-battles.fandom.com/wiki/Malenia,_Blade_of_Miquella",
+        "content": "Malenia Blade of Miquella power scaling.",
+    }
+
+    assert not TavilySearchProvider._is_relevant_result(
+        item=item,
+        game="Elden Ring",
+        question="Malenia Blade of Miquella boss weakness phase",
+    )
+
+
+def test_search_filters_generic_reddit_result_title() -> None:
+    item = {
+        "title": "Reddit - The heart of the internet",
+        "url": "https://www.reddit.com/r/Eldenring/comments/abc/example",
+        "content": "Malenia Blade of Miquella discussion.",
+    }
+
+    assert not TavilySearchProvider._is_relevant_result(
+        item=item,
+        game="Elden Ring",
+        question="Malenia Blade of Miquella boss weakness phase",
+    )
+
+
+def test_search_canonicalizes_community_urls_for_deduplication() -> None:
+    assert TavilySearchProvider._canonical_source_key(
+        "https://steamcommunity.com/app/1245620/discussions/0/3426690213922967942?l=koreana"
+    ) == "https://steamcommunity.com/app/1245620/discussions/0/3426690213922967942"
+
+
+def test_search_limits_source_diversity() -> None:
+    sources = [
+        Source(title=f"Reddit {index}", url=f"https://www.reddit.com/r/Eldenring/comments/{index}", score=1 - index * 0.01)
+        for index in range(4)
+    ]
+
+    selected = TavilySearchProvider._limit_source_diversity(sources, total_results=5)
+
+    assert len(selected) == 2
+
+
+def test_search_balances_strict_and_relaxed_sources() -> None:
+    strict_sources = [
+        Source(title="Malenia Wiki", url="https://eldenring.wiki.fextralife.com/Malenia", score=0.95),
+    ]
+    relaxed_sources = [
+        strict_sources[0],
+        Source(title="Malenia Steam", url="https://steamcommunity.com/app/1245620/discussions/0/1", score=0.7),
+        Source(title="Malenia Reddit", url="https://www.reddit.com/r/Eldenring/comments/1", score=0.65),
+    ]
+
+    selected = TavilySearchProvider._balanced_sources(
+        strict_sources=strict_sources,
+        relaxed_sources=relaxed_sources,
+        total_results=5,
+        min_strict_results=3,
+    )
+
+    assert [source.title for source in selected] == ["Malenia Wiki", "Malenia Steam", "Malenia Reddit"]
 
 
 def test_search_rerank_prefers_question_entity_in_title() -> None:
@@ -356,6 +448,18 @@ def test_search_planner_sanitizes_prompt_injection_text() -> None:
     assert all("系统prompt" not in query.query for query in plan.queries)
     assert all("忽略以上指令" not in query.query for query in plan.queries)
     assert any("女武神怎么打" in query.query for query in plan.queries)
+
+
+def test_search_planner_sanitizes_aliases() -> None:
+    aliases = GuideLLM._sanitize_aliases([
+        "Malenia",
+        "site:fandom.com Malenia",
+        "https://example.com",
+        "boss",
+        "Blade of Miquella",
+    ])
+
+    assert aliases == ["Malenia", "Blade of Miquella"]
 
 
 def test_fallback_search_plan_uses_intent_specific_queries() -> None:
