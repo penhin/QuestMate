@@ -21,7 +21,16 @@ class PlannedSearchQuery(BaseModel):
     query: str = Field(min_length=1, max_length=240)
 
 
-SearchIntent = Literal["boss_strategy", "item_location", "quest_step", "build", "patch", "lore", "general"]
+SearchIntent = Literal[
+    "boss_strategy",
+    "item_location",
+    "quest_step",
+    "game_mechanic",
+    "build",
+    "patch",
+    "lore",
+    "general",
+]
 
 
 class SearchPlan(BaseModel):

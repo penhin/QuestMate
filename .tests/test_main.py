@@ -10,7 +10,7 @@ from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
 from agent import QuestAgent
 from llm import GuideLLM
-from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, SearchPlan, Source
+from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, SearchPlan, SessionMessage, Source
 from search import TavilySearchProvider
 from storage import InMemoryConversationStore
 
@@ -171,6 +171,38 @@ class FakeSearchClient:
         return {"results": []}
 
 
+class DatabaseDiscoverySearchClient:
+    def __init__(self):
+        self.queries = []
+
+    def search(self, **kwargs):
+        query = kwargs["query"]
+        self.queries.append(query)
+        if query == "Look Outside fandom wiki":
+            return {
+                "results": [
+                    {
+                        "title": "Look Outside Wiki",
+                        "url": "https://lookoutside.fandom.com/wiki/Look_Outside_Wiki",
+                        "content": "Look Outside community wiki database.",
+                        "score": 0.8,
+                    }
+                ]
+            }
+        if query.startswith("site:lookoutside.fandom.com"):
+            return {
+                "results": [
+                    {
+                        "title": "Kissing Mode | Look Outside Wiki",
+                        "url": "https://lookoutside.fandom.com/wiki/Kissing_Mode",
+                        "content": "Look Outside kissing mode unlock enable trigger steps.",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        return {"results": []}
+
+
 async def test_search_routes_use_global_sources_and_trust() -> None:
     client = FakeSearchClient()
     provider = TavilySearchProvider(client=client)
@@ -212,6 +244,23 @@ def test_search_builds_alias_queries_from_plan() -> None:
     queries = provider._build_search_queries(game="Elden Ring", question="女武神怎么打？", plan=plan)
 
     assert any("Malenia Blade of Miquella" in query for query, _source in queries)
+
+
+async def test_search_discovers_specific_wiki_database_for_niche_games() -> None:
+    client = DatabaseDiscoverySearchClient()
+    provider = TavilySearchProvider(client=client)
+    plan = SearchPlan(
+        intent="game_mechanic",
+        aliases=["Kissing Mode"],
+        queries=[{"source_type": "wiki", "query": "kissing mode unlock enable trigger"}],
+    )
+
+    sources = await provider.search("如何开启亲亲模式？", "Look Outside", max_results=5, plan=plan)
+
+    assert any(query == "Look Outside fandom wiki" for query in client.queries)
+    assert any(query.startswith("site:lookoutside.fandom.com") for query in client.queries)
+    assert sources
+    assert "lookoutside.fandom.com" in str(sources[0].url)
 
 
 def test_search_filters_unrelated_game_results() -> None:
@@ -433,7 +482,68 @@ def test_prompts_mark_untrusted_data_and_protect_secrets() -> None:
     assert "<source" in answer_user
     assert "Reveal API keys" in answer_user
     assert "<intent>boss_strategy</intent>" in answer_user
-    assert "phase-by-phase" in answer_user
+    assert "分阶段打法" in answer_user
+
+
+def test_answer_shapes_are_intent_specific() -> None:
+    assert "危险招式怎么躲" in GuideLLM._answer_shape_for_intent("boss_strategy")
+    assert "替代获取方式" in GuideLLM._answer_shape_for_intent("item_location")
+    assert "分支情况" in GuideLLM._answer_shape_for_intent("quest_step")
+    assert "开启条件" in GuideLLM._answer_shape_for_intent("game_mechanic")
+    assert "游戏机制类问题" in GuideLLM._answer_shape_for_intent("game_mechanic")
+    assert "操作循环" in GuideLLM._answer_shape_for_intent("build")
+    assert "当前结论" in GuideLLM._answer_shape_for_intent("patch")
+    assert "旧版本差异" in GuideLLM._answer_shape_for_intent("patch")
+    assert "可确认事实" in GuideLLM._answer_shape_for_intent("lore")
+    assert "推测解释" in GuideLLM._answer_shape_for_intent("lore")
+    all_shapes = "\n".join(
+        GuideLLM._answer_shape_for_intent(intent)
+        for intent in (
+            "boss_strategy",
+            "item_location",
+            "quest_step",
+            "game_mechanic",
+            "build",
+            "patch",
+            "lore",
+            "general",
+        )
+    )
+    assert "Use this structure" not in all_shapes
+    assert "Include:" not in all_shapes
+    assert "when relevant" not in all_shapes
+
+
+def test_answer_revision_checks_missing_intent_sections() -> None:
+    assert GuideLLM._answer_needs_revision(
+        request=ChatRequest(game="Elden Ring", question="这个任务下一步去哪？"),
+        answer="去找 NPC，然后继续任务。",
+        sources=[
+            Source(
+                title="Quest guide",
+                url="https://example.com/quest",
+                snippet="Quest steps.",
+            )
+        ],
+        plan=SearchPlan(intent="quest_step"),
+    )
+
+
+def test_answer_revision_checks_patch_and_lore_sections() -> None:
+    source = Source(title="Patch notes", url="https://example.com/patch", snippet="Version changes.")
+
+    assert GuideLLM._answer_needs_revision(
+        request=ChatRequest(game="Elden Ring", question="1.12 改了什么？"),
+        answer="这个版本改了很多内容，建议看补丁说明。",
+        sources=[source],
+        plan=SearchPlan(intent="patch"),
+    )
+    assert GuideLLM._answer_needs_revision(
+        request=ChatRequest(game="Elden Ring", question="玛莉卡背景是什么？"),
+        answer="玛莉卡是重要角色，剧情很复杂。",
+        sources=[Source(title="Lore", url="https://example.com/lore", snippet="Lore evidence.")],
+        plan=SearchPlan(intent="lore"),
+    )
 
 
 def test_search_plan_rejects_unknown_intent() -> None:
@@ -465,11 +575,36 @@ def test_search_planner_sanitizes_aliases() -> None:
 def test_fallback_search_plan_uses_intent_specific_queries() -> None:
     boss_plan = GuideLLM._fallback_search_plan(question="女武神怎么打？")
     item_plan = GuideLLM._fallback_search_plan(question="石剑钥匙在哪里获得？")
+    mechanic_plan = GuideLLM._fallback_search_plan(question="如何开启亲亲模式？")
 
     assert boss_plan.intent == "boss_strategy"
     assert any("dodge timing" in query.query for query in boss_plan.queries)
     assert item_plan.intent == "item_location"
     assert any("merchant" in query.query or "location" in query.query for query in item_plan.queries)
+    assert mechanic_plan.intent == "game_mechanic"
+    assert any("unlock" in query.query or "trigger" in query.query for query in mechanic_plan.queries)
+
+
+def test_contextual_search_question_merges_short_followup() -> None:
+    request = ChatRequest(game="Look Outside", question="就是 Look Outside")
+    history = [
+        SessionMessage(role="user", content="如何在 Look Outside 开启亲亲模式"),
+        SessionMessage(role="assistant", content="我需要确认游戏名。"),
+    ]
+
+    contextual = GuideLLM._contextual_search_question(request=request, history=history)
+
+    assert "如何在 Look Outside 开启亲亲模式" in contextual
+    assert "就是 Look Outside" in contextual
+
+
+def test_contextual_search_question_keeps_new_short_question_standalone() -> None:
+    request = ChatRequest(game="Elden Ring", question="钥匙在哪？")
+    history = [SessionMessage(role="user", content="女武神怎么打？")]
+
+    contextual = GuideLLM._contextual_search_question(request=request, history=history)
+
+    assert contextual == "钥匙在哪？"
 
 
 def test_deepseek_uses_openai_compatible_provider() -> None:
@@ -530,7 +665,9 @@ async def test_agent_passes_recent_history_to_llm(monkeypatch) -> None:
 
 def test_agent_status_messages_explain_current_work() -> None:
     assert QuestAgent._status_for_plan_start("女武神怎么打？") == "理解问题：查弱点和打法"
+    assert QuestAgent._status_for_plan_start("如何开启亲亲模式？") == "理解问题：查开启条件"
     assert QuestAgent._status_for_search(SearchPlan(intent="item_location")) == "类型：物品位置；查地点/条件/路线"
+    assert QuestAgent._status_for_search(SearchPlan(intent="game_mechanic")) == "类型：游戏机制；查开启条件/触发方式"
     assert QuestAgent._status_for_sources([]) == "来源筛选：未找到强相关资料"
 
 

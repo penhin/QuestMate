@@ -113,7 +113,68 @@ class TavilySearchProvider:
         search_queries = self._build_search_queries(game=game, question=query, plan=plan)
         intent = (plan.intent if plan else "general") or "general"
         aliases = list((plan.aliases if plan else [])[:6])
+        min_strict_results = min(3, total_results)
 
+        self._collect_sources(
+            search_queries=search_queries,
+            per_query_results=per_query_results,
+            game=game,
+            query=query,
+            aliases=aliases,
+            intent=intent,
+            strict_sources_by_url=strict_sources_by_url,
+            relaxed_sources_by_url=relaxed_sources_by_url,
+        )
+
+        if len(strict_sources_by_url) < min_strict_results and intent != "patch":
+            database_domains = self._discover_database_domains(game=game)
+            if database_domains:
+                database_queries = self._build_search_queries(
+                    game=game,
+                    question=query,
+                    plan=plan,
+                    database_domains=database_domains,
+                )
+                self._collect_sources(
+                    search_queries=database_queries,
+                    per_query_results=per_query_results,
+                    game=game,
+                    query=query,
+                    aliases=aliases,
+                    intent=intent,
+                    strict_sources_by_url=strict_sources_by_url,
+                    relaxed_sources_by_url=relaxed_sources_by_url,
+                )
+
+        strict_ranked_sources = sorted(
+            strict_sources_by_url.values(),
+            key=lambda source: ((source.score or 0), source.trust_score),
+            reverse=True,
+        )
+        relaxed_ranked_sources = sorted(
+            relaxed_sources_by_url.values(),
+            key=lambda source: ((source.score or 0), source.trust_score),
+            reverse=True,
+        )
+        return self._balanced_sources(
+            strict_sources=strict_ranked_sources,
+            relaxed_sources=relaxed_ranked_sources,
+            total_results=total_results,
+            min_strict_results=min_strict_results,
+        )
+
+    def _collect_sources(
+        self,
+        *,
+        search_queries: list[tuple[str, SearchSource]],
+        per_query_results: int,
+        game: str,
+        query: str,
+        aliases: list[str],
+        intent: str,
+        strict_sources_by_url: dict[str, Source],
+        relaxed_sources_by_url: dict[str, Source],
+    ) -> None:
         for search_query, search_source in search_queries:
             result = self._client.search(
                 query=search_query,
@@ -125,10 +186,11 @@ class TavilySearchProvider:
                 url = item.get("url")
                 if not url:
                     continue
+                search_context = f"{query} {search_query} {' '.join(aliases)}"
                 relevance_score = self._result_relevance_score(
                     item=item,
                     game=game,
-                    question=f"{query} {search_query} {' '.join(aliases)}",
+                    question=search_context,
                 )
                 if relevance_score <= 0:
                     continue
@@ -165,28 +227,48 @@ class TavilySearchProvider:
                 if self._is_high_quality_source(
                     item=item,
                     game=game,
-                    question=f"{query} {search_query} {' '.join(aliases)}",
+                    question=search_context,
                     source_type=search_source.source_type,
                 ):
                     current = strict_sources_by_url.get(source_key)
                     if current is None or (source.score or 0) > (current.score or 0):
                         strict_sources_by_url[source_key] = source
 
-        strict_ranked_sources = sorted(
-            strict_sources_by_url.values(),
-            key=lambda source: ((source.score or 0), source.trust_score),
-            reverse=True,
+    def _discover_database_domains(self, *, game: str) -> tuple[str, ...]:
+        candidates = (
+            f"{game} fandom wiki",
+            f"{game} wiki.gg wiki",
+            f"{game} official wiki",
         )
-        relaxed_ranked_sources = sorted(
-            relaxed_sources_by_url.values(),
-            key=lambda source: ((source.score or 0), source.trust_score),
-            reverse=True,
-        )
-        return self._balanced_sources(
-            strict_sources=strict_ranked_sources,
-            relaxed_sources=relaxed_ranked_sources,
-            total_results=total_results,
-            min_strict_results=min(3, total_results),
+        domains: list[str] = []
+        for query in candidates:
+            result = self._client.search(
+                query=query,
+                max_results=3,
+                include_answer=False,
+                include_raw_content=False,
+            )
+            for item in result.get("results", []):
+                url = str(item.get("url") or "")
+                domain = urlparse(url).netloc.lower()
+                if not self._is_supported_database_domain(domain):
+                    continue
+                text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
+                if not any(token in text for token in relevance_tokens(game)):
+                    continue
+                if domain not in domains:
+                    domains.append(domain)
+                if len(domains) >= 4:
+                    return tuple(domains)
+        return tuple(domains)
+
+    @staticmethod
+    def _is_supported_database_domain(domain: str) -> bool:
+        return (
+            domain.endswith(".fandom.com")
+            or domain == "fandom.com"
+            or domain.endswith(".wiki.gg")
+            or domain == "wiki.gg"
         )
 
     def _build_search_queries(
@@ -195,6 +277,7 @@ class TavilySearchProvider:
         game: str,
         question: str,
         plan: SearchPlan | None,
+        database_domains: tuple[str, ...] = (),
     ) -> list[tuple[str, SearchSource]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
         aliases = list((plan.aliases if plan else [])[:3])
@@ -206,6 +289,8 @@ class TavilySearchProvider:
             query = planned.query.replace("{question}", question).strip()
 
             candidates: list[str] = []
+            if source.source_type == "wiki":
+                candidates.extend(f"site:{domain} {game} {query}" for domain in database_domains)
             candidates.extend(f"site:{domain} {game} {query}" for domain in source.domains)
             candidates.extend(template.format(game=game, query=query) for template in source.query_templates)
             if not candidates:

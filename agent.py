@@ -138,6 +138,8 @@ class QuestAgent:
             return "理解问题：查位置和获取方式"
         if any(token in question for token in ("任务", "支线", "下一步", "NPC", "npc")):
             return "理解问题：查任务步骤"
+        if any(token in question for token in ("模式", "开启", "打开", "解锁", "触发", "机制")):
+            return "理解问题：查开启条件"
         return "理解问题：规划查询"
 
     @staticmethod
@@ -146,6 +148,7 @@ class QuestAgent:
             "boss_strategy": "类型：Boss 打法；查弱点/阶段/社区打法",
             "item_location": "类型：物品位置；查地点/条件/路线",
             "quest_step": "类型：任务步骤；查 NPC/触发/顺序",
+            "game_mechanic": "类型：游戏机制；查开启条件/触发方式",
             "build": "类型：配装；查数值/装备/版本",
             "patch": "类型：版本变化；优先官方补丁",
             "lore": "类型：剧情背景；查事实和解释",
