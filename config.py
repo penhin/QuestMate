@@ -17,9 +17,15 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://questmate:questmate@localhost:5432/questmate"
     sync_database_url: str = "postgresql+psycopg://questmate:questmate@localhost:5432/questmate"
     redis_url: str = "redis://localhost:6379/0"
+    database_pool_size: int = Field(default=10, ge=1, le=50)
+    database_max_overflow: int = Field(default=20, ge=0, le=100)
+    database_pool_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    allow_in_memory_storage: bool = False
     cors_allowed_origins: str = "http://localhost:1420,http://127.0.0.1:1420,tauri://localhost"
 
     search_max_results: int = Field(default=5, ge=1, le=20)
+    external_request_timeout_seconds: int = Field(default=20, ge=3, le=90)
+    tavily_max_concurrency: int = Field(default=3, ge=1, le=8)
     cache_ttl_seconds: int = Field(default=604800, ge=60)
     knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
     embedding_api_key: str = ""

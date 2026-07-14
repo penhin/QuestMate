@@ -106,6 +106,8 @@ def create_app() -> FastAPI:
                 request.game,
                 request.title,
                 request.source_type,
+                request.game_version,
+                request.published_at.isoformat() if request.published_at else None,
             )
         except Exception as exc:
             logger.exception("knowledge.index_enqueue_failed")

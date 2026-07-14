@@ -14,6 +14,10 @@ class Source(BaseModel):
     source_type: Literal["official", "wiki", "community", "web"] = "web"
     trust_score: float = Field(default=0.5, ge=0, le=1)
     trust_label: str = "普通"
+    evidence: str | None = None
+    published_at: datetime | None = None
+    fetched_at: datetime | None = None
+    game_version: str | None = Field(default=None, max_length=80)
 
 
 class PlannedSearchQuery(BaseModel):
@@ -137,6 +141,8 @@ class KnowledgeIndexRequest(BaseModel):
     game: str = Field(min_length=1, max_length=120)
     title: str | None = Field(default=None, max_length=300)
     source_type: Literal["official", "wiki", "community", "web"] = "web"
+    game_version: str | None = Field(default=None, max_length=80)
+    published_at: datetime | None = None
 
 
 class KnowledgeIndexResponse(BaseModel):
@@ -149,6 +155,9 @@ class KnowledgeDocumentStatus(BaseModel):
     game: str
     title: str | None = None
     source_type: Literal["official", "wiki", "community", "web"] = "web"
+    game_version: str | None = None
+    published_at: datetime | None = None
+    fetched_at: datetime | None = None
     status: Literal["queued", "indexing", "ready", "failed"]
     chunk_count: int = 0
     error: str | None = None

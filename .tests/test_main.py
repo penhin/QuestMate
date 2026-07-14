@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -8,12 +9,12 @@ import agent as agent_module
 import main
 from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
-from knowledge import chunk_text, keyword_terms
+from knowledge import chunk_text, keyword_terms, parse_published_at
 from agent import QuestAgent
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
 from search import TavilySearchProvider
-from storage import InMemoryConversationStore
+from storage import InMemoryConversationStore, PostgresConversationStore
 
 
 client = TestClient(main.app)
@@ -70,6 +71,44 @@ async def test_agent_merges_local_knowledge_before_web_results() -> None:
     )
 
     assert [source.title for source in sources] == ["本地女武神资料"]
+
+
+def test_patch_answers_require_dated_official_evidence() -> None:
+    request = ChatRequest(game="Elden Ring", question="Malenia patch 改了什么？")
+    plan = SearchPlan(intent="patch")
+    wiki_source = Source(
+        title="Malenia patch notes",
+        url="https://example.com/malenia-patch",
+        snippet="Malenia patch notes",
+        source_type="wiki",
+        trust_score=0.8,
+        trust_label="百科",
+        game_version="1.12",
+    )
+    official_source = wiki_source.model_copy(
+        update={
+            "source_type": "official",
+            "trust_score": 0.95,
+            "trust_label": "官方",
+            "published_at": datetime(2026, 7, 1, tzinfo=timezone.utc),
+        }
+    )
+
+    assert GuideLLM._should_return_conservative_answer(request=request, sources=[wiki_source], plan=plan)
+    assert not GuideLLM._should_return_conservative_answer(request=request, sources=[official_source], plan=plan)
+    assert parse_published_at("2026-07-01T12:00:00Z") == datetime(2026, 7, 1, 12, tzinfo=timezone.utc)
+
+
+async def test_storage_requires_explicit_opt_in_for_ephemeral_fallback() -> None:
+    class BrokenDatabase:
+        settings = Settings(allow_in_memory_storage=False)
+
+        async def init_schema(self) -> None:
+            raise OSError("database unavailable")
+
+    store = PostgresConversationStore(database=BrokenDatabase())
+    with pytest.raises(RuntimeError, match="Postgres is unavailable"):
+        await store.init_schema()
 
 
 class AmbiguousGameSearchProvider:

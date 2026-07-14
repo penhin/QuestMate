@@ -1,4 +1,7 @@
+import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import re
 from urllib.parse import urlparse, urlunparse
 from typing import Any, Protocol
 
@@ -130,7 +133,7 @@ class TavilySearchProvider:
         game_aliases = list(game_resolution.aliases)
         min_strict_results = min(3, total_results)
 
-        self._collect_sources(
+        await self._collect_sources(
             search_queries=search_queries,
             per_query_results=per_query_results,
             game=game,
@@ -154,7 +157,7 @@ class TavilySearchProvider:
                     database_domains=database_domains,
                     game_aliases=tuple(game_aliases),
                 )
-                self._collect_sources(
+                await self._collect_sources(
                     search_queries=database_queries,
                     per_query_results=per_query_results,
                     game=game,
@@ -186,9 +189,15 @@ class TavilySearchProvider:
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
-        return self._game_resolver.resolve(game=game, question=question)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._game_resolver.resolve, game=game, question=question),
+                timeout=self.settings.external_request_timeout_seconds,
+            )
+        except Exception:
+            return GameResolution(input_name=game, confirmed_name=game, confidence=0)
 
-    def _collect_sources(
+    async def _collect_sources(
         self,
         *,
         search_queries: list[tuple[str, SearchSource]],
@@ -201,13 +210,8 @@ class TavilySearchProvider:
         strict_sources_by_url: dict[str, Source],
         relaxed_sources_by_url: dict[str, Source],
     ) -> None:
-        for search_query, search_source in search_queries:
-            result = self._client.search(
-                query=search_query,
-                max_results=per_query_results,
-                include_answer=False,
-                include_raw_content=False,
-            )
+        results = await self._fetch_search_results(search_queries, per_query_results)
+        for (search_query, search_source), result in zip(search_queries, results, strict=True):
             for item in result.get("results", []):
                 url = item.get("url")
                 if not url:
@@ -246,6 +250,12 @@ class TavilySearchProvider:
                     source_type=search_source.source_type,
                     trust_score=search_source.trust_score,
                     trust_label=search_source.trust_label,
+                    evidence=item.get("content"),
+                    published_at=self._parse_source_datetime(item.get("published_date") or item.get("published_at")),
+                    fetched_at=datetime.now(timezone.utc),
+                    game_version=self._extract_game_version(
+                        f"{item.get('title') or ''} {item.get('content') or ''}"
+                    ),
                 )
                 source_key = self._canonical_source_key(str(url))
                 current = relaxed_sources_by_url.get(source_key)
@@ -261,6 +271,31 @@ class TavilySearchProvider:
                     current = strict_sources_by_url.get(source_key)
                     if current is None or (source.score or 0) > (current.score or 0):
                         strict_sources_by_url[source_key] = source
+
+    async def _fetch_search_results(
+        self,
+        search_queries: list[tuple[str, SearchSource]],
+        per_query_results: int,
+    ) -> list[dict[str, Any]]:
+        semaphore = asyncio.Semaphore(self.settings.tavily_max_concurrency)
+
+        async def fetch(query: str) -> dict[str, Any]:
+            try:
+                async with semaphore:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._client.search,
+                            query=query,
+                            max_results=per_query_results,
+                            include_answer=False,
+                            include_raw_content=False,
+                        ),
+                        timeout=self.settings.external_request_timeout_seconds,
+                    )
+            except Exception:
+                return {"results": []}
+
+        return await asyncio.gather(*(fetch(query) for query, _ in search_queries))
 
     def _build_search_queries(
         self,
@@ -491,3 +526,18 @@ class TavilySearchProvider:
         if intent in {"item_location", "item_usage", "quest_step", "lore"}:
             return 0.75
         return 0.55
+
+    @staticmethod
+    def _extract_game_version(text: str) -> str | None:
+        match = re.search(r"(?:patch|version|ver\.?|v|补丁|版本)\s*([0-9]+(?:\.[0-9]+){1,3})", text, re.I)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _parse_source_datetime(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

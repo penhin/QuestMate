@@ -32,6 +32,9 @@ knowledge_documents = Table(
     Column("game", String(120), nullable=False),
     Column("title", String(300)),
     Column("source_type", String(16), nullable=False, default="web"),
+    Column("game_version", String(80)),
+    Column("published_at", DateTime(timezone=True)),
+    Column("fetched_at", DateTime(timezone=True)),
     Column("status", String(16), nullable=False, default="queued"),
     Column("error", Text),
     Column("chunk_count", Integer, nullable=False, default=0),
@@ -96,14 +99,37 @@ class KnowledgeStore:
         async with self.database.engine.begin() as connection:
             await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await connection.run_sync(metadata.create_all)
+            # The first knowledge-index release may already exist in a developer
+            # database. Keep its metadata forward-compatible without requiring a
+            # destructive rebuild.
+            await connection.execute(text("ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS game_version VARCHAR(80)"))
+            await connection.execute(text("ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ"))
+            await connection.execute(text("ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS fetched_at TIMESTAMPTZ"))
         self._initialized = True
         self._available = True
 
-    async def index_url(self, *, url: str, game: str, title: str | None = None, source_type: str = "web") -> dict[str, Any]:
+    async def index_url(
+        self,
+        *,
+        url: str,
+        game: str,
+        title: str | None = None,
+        source_type: str = "web",
+        game_version: str | None = None,
+        published_at: datetime | None = None,
+    ) -> dict[str, Any]:
         await self.init_schema()
-        document_id = await self._upsert_document(url=url, game=game, title=title, source_type=source_type, status="indexing")
+        document_id = await self._upsert_document(
+            url=url,
+            game=game,
+            title=title,
+            source_type=source_type,
+            game_version=game_version,
+            published_at=published_at,
+            status="indexing",
+        )
         try:
-            extracted_title, content = await self._fetch_and_extract(url)
+            extracted_title, content, extracted_published_at = await self._fetch_and_extract(url)
             chunks = chunk_text(content)
             if not chunks:
                 raise ValueError("No extractable article content found")
@@ -129,7 +155,15 @@ class KnowledgeStore:
                     await session.execute(
                         update(knowledge_documents)
                         .where(knowledge_documents.c.id == document_id)
-                        .values(title=title or extracted_title, status="ready", error=None, chunk_count=len(chunks), updated_at=now)
+                        .values(
+                            title=title or extracted_title,
+                            status="ready",
+                            error=None,
+                            chunk_count=len(chunks),
+                            published_at=published_at or extracted_published_at,
+                            fetched_at=now,
+                            updated_at=now,
+                        )
                     )
             return {"status": "ready", "document_id": document_id, "chunk_count": len(chunks)}
         except Exception as exc:
@@ -166,26 +200,36 @@ class KnowledgeStore:
             rows = (await session.execute(statement)).mappings()
             return [KnowledgeDocumentStatus(**dict(row)) for row in rows]
 
-    async def _upsert_document(self, *, url: str, game: str, title: str | None, source_type: str, status: str) -> str:
+    async def _upsert_document(
+        self,
+        *,
+        url: str,
+        game: str,
+        title: str | None,
+        source_type: str,
+        game_version: str | None,
+        published_at: datetime | None,
+        status: str,
+    ) -> str:
         now = datetime.now(timezone.utc)
         async with self.database.sessionmaker() as session:
             async with session.begin():
                 existing = (await session.execute(select(knowledge_documents.c.id).where(knowledge_documents.c.url == url))).scalar_one_or_none()
                 if existing:
-                    await session.execute(update(knowledge_documents).where(knowledge_documents.c.id == existing).values(game=game, title=title, source_type=source_type, status=status, error=None, updated_at=now))
+                    await session.execute(update(knowledge_documents).where(knowledge_documents.c.id == existing).values(game=game, title=title, source_type=source_type, game_version=game_version, published_at=published_at, status=status, error=None, updated_at=now))
                     return existing
                 document_id = str(uuid4())
-                await session.execute(insert(knowledge_documents).values(id=document_id, url=url, game=game, title=title, source_type=source_type, status=status, error=None, chunk_count=0, created_at=now, updated_at=now))
+                await session.execute(insert(knowledge_documents).values(id=document_id, url=url, game=game, title=title, source_type=source_type, game_version=game_version, published_at=published_at, status=status, error=None, chunk_count=0, created_at=now, updated_at=now))
                 return document_id
 
-    async def _fetch_and_extract(self, url: str) -> tuple[str | None, str]:
+    async def _fetch_and_extract(self, url: str) -> tuple[str | None, str, datetime | None]:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": "QuestMateIndexer/0.1"}) as client:
             response = await client.get(url)
             response.raise_for_status()
         downloaded = response.text
         content = trafilatura.extract(downloaded, include_comments=False, include_tables=True, favor_precision=True) or ""
         metadata = trafilatura.extract_metadata(downloaded)
-        return (metadata.title if metadata else None), content
+        return (metadata.title if metadata else None), content, parse_published_at(metadata.date if metadata else None)
 
     async def _vector_rows(self, *, game: str, vector: list[float], limit: int) -> list[dict[str, Any]]:
         distance = knowledge_chunks.c.embedding.cosine_distance(vector).label("distance")
@@ -219,7 +263,20 @@ class KnowledgeStore:
         source_type = row["source_type"] if row["source_type"] in {"official", "wiki", "community", "web"} else "web"
         trust = {"official": (0.95, "官方"), "wiki": (0.8, "百科"), "community": (0.55, "社区"), "web": (0.65, "知识库")}[source_type]
         score = 1 - float(row["distance"]) if row.get("distance") is not None else min(0.95, 0.5 + row.get("keyword_score", 0) * 0.08)
-        return Source(title=row.get("title") or urlparse(row["url"]).netloc, url=row["url"], snippet=row["content"][:900], score=max(0, score), source_type=source_type, trust_score=trust[0], trust_label=trust[1])
+        evidence = row["content"][:900]
+        return Source(
+            title=row.get("title") or urlparse(row["url"]).netloc,
+            url=row["url"],
+            snippet=evidence,
+            evidence=evidence,
+            score=max(0, score),
+            source_type=source_type,
+            trust_score=trust[0],
+            trust_label=trust[1],
+            published_at=row.get("published_at"),
+            fetched_at=row.get("fetched_at"),
+            game_version=row.get("game_version"),
+        )
 
 
 def chunk_text(content: str, *, chunk_size: int = 900, overlap: int = 160) -> list[str]:
@@ -248,6 +305,16 @@ def keyword_terms(query: str) -> list[str]:
     latin = re.findall(r"[a-z0-9]{3,}", lowered)
     chinese = [lowered[index : index + 2] for index in range(len(lowered) - 1) if re.fullmatch(r"[\u4e00-\u9fff]{2}", lowered[index : index + 2])]
     return list(dict.fromkeys([*latin, *chinese]))
+
+
+def parse_published_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 knowledge_store = KnowledgeStore()

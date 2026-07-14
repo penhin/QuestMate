@@ -2,6 +2,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import UUID
 
+import structlog
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, String, Table, Text, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
@@ -19,6 +20,7 @@ from schemas import (
 
 
 metadata = MetaData()
+logger = structlog.get_logger()
 
 
 def StringColumn(name: str, length: int, *args, **kwargs):
@@ -69,7 +71,13 @@ conversation_feedback = Table(
 class Database:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
-        self.engine: AsyncEngine = create_async_engine(self.settings.database_url, pool_pre_ping=True)
+        self.engine: AsyncEngine = create_async_engine(
+            self.settings.database_url,
+            pool_pre_ping=True,
+            pool_size=self.settings.database_pool_size,
+            max_overflow=self.settings.database_max_overflow,
+            pool_timeout=self.settings.database_pool_timeout_seconds,
+        )
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def init_schema(self) -> None:
@@ -158,10 +166,16 @@ class PostgresConversationStore:
         try:
             await self.database.init_schema()
             self._using_fallback = False
-        except Exception:
+        except Exception as exc:
+            if not self.database.settings.allow_in_memory_storage:
+                raise RuntimeError(
+                    "Postgres is unavailable. Start the database or set ALLOW_IN_MEMORY_STORAGE=true for ephemeral local development."
+                ) from exc
+            logger.warning("storage.using_ephemeral_fallback", error=str(exc))
             self._using_fallback = True
             await self.fallback.init_schema()
-        finally:
+            self._initialized = True
+        else:
             self._initialized = True
 
     async def save_chat(self, request: ChatRequest, response: ChatResponse) -> None:
