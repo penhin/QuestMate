@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from typing import Any, Protocol
 
 from tavily import TavilyClient
@@ -29,6 +30,27 @@ class SearchProvider(Protocol):
 
 
 class TavilySearchProvider:
+    search_noise_tokens = {
+        "fandom",
+        "fextralife",
+        "wiki",
+        "guide",
+        "strategy",
+        "weakness",
+        "timing",
+        "location",
+        "merchant",
+        "questline",
+        "walkthrough",
+        "build",
+        "stats",
+        "weapons",
+        "talismans",
+        "official",
+        "patch",
+        "notes",
+        "update",
+    }
     sources = {
         "official": SearchSource(
             "official",
@@ -88,6 +110,7 @@ class TavilySearchProvider:
         per_query_results = min(2, max(1, total_results))
         sources_by_url: dict[str, Source] = {}
         search_queries = self._build_search_queries(game=game, question=query, plan=plan)
+        intent = (plan.intent if plan else "general") or "general"
 
         for search_query, search_source in search_queries:
             result = self._client.search(
@@ -100,11 +123,30 @@ class TavilySearchProvider:
                 url = item.get("url")
                 if not url:
                     continue
-                if not self._is_relevant_result(item=item, game=game, question=query):
+                relevance_score = self._result_relevance_score(
+                    item=item,
+                    game=game,
+                    question=f"{query} {search_query}",
+                )
+                if relevance_score <= 0:
                     continue
 
                 raw_score = float(item.get("score") or 0)
-                weighted_score = raw_score * 0.7 + search_source.trust_score * 0.3
+                intent_score = self._intent_source_boost(intent=intent, source_type=search_source.source_type)
+                domain_score = self._domain_quality_score(str(url))
+                version_score = self._version_safety_score(
+                    intent=intent,
+                    source_type=search_source.source_type,
+                    text=f"{item.get('title') or ''} {item.get('url') or ''} {item.get('content') or ''}",
+                )
+                weighted_score = (
+                    raw_score * 0.25
+                    + search_source.trust_score * 0.25
+                    + relevance_score * 0.35
+                    + intent_score * 0.1
+                    + domain_score * 0.03
+                    + version_score * 0.02
+                )
                 source = Source(
                     title=item.get("title") or url,
                     url=url,
@@ -158,18 +200,87 @@ class TavilySearchProvider:
 
     @staticmethod
     def _is_relevant_result(*, item: dict[str, Any], game: str, question: str) -> bool:
+        return TavilySearchProvider._result_relevance_score(item=item, game=game, question=question) > 0
+
+    @staticmethod
+    def _result_relevance_score(*, item: dict[str, Any], game: str, question: str) -> float:
         text = " ".join(
             str(item.get(field) or "")
             for field in ("title", "url", "content")
         ).lower()
+        if not TavilySearchProvider._is_same_game_surface(text=text, game=game, question=question):
+            return 0
+
         game_tokens = relevance_tokens(game)
-        question_tokens = question_relevance_tokens(question)
+        game_token_set = set(game_tokens)
+        question_tokens = [
+            token
+            for token in question_relevance_tokens(question)
+            if token not in game_token_set and token not in TavilySearchProvider.search_noise_tokens
+        ]
 
         has_game_match = not game_tokens or any(token in text for token in game_tokens)
         if not has_game_match:
-            return False
+            return 0
 
         if not question_tokens:
-            return True
+            return 0.45
 
-        return any(token in text for token in question_tokens)
+        matched = sum(1 for token in question_tokens if token in text)
+        if matched == 0:
+            return 0
+
+        title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
+        focused_matches = sum(1 for token in question_tokens if token in title_url)
+        coverage = matched / max(len(question_tokens), 1)
+        focus_bonus = min(focused_matches * 0.12, 0.3)
+        return min(1.0, 0.35 + coverage * 0.45 + focus_bonus)
+
+    @staticmethod
+    def _is_same_game_surface(*, text: str, game: str, question: str) -> bool:
+        normalized_game = game.lower()
+        normalized_question = question.lower()
+        if "elden ring" in normalized_game and "nightreign" in text and "nightreign" not in normalized_question:
+            return False
+        return True
+
+    @staticmethod
+    def _intent_source_boost(*, intent: str, source_type: str) -> float:
+        preferred = {
+            "boss_strategy": {"wiki": 0.8, "community": 1.0, "web": 0.45, "official": 0.2},
+            "item_location": {"wiki": 1.0, "web": 0.65, "community": 0.35, "official": 0.2},
+            "quest_step": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.2},
+            "build": {"community": 1.0, "wiki": 0.65, "web": 0.45, "official": 0.2},
+            "patch": {"official": 1.0, "wiki": 0.55, "web": 0.45, "community": 0.25},
+            "lore": {"wiki": 0.9, "web": 0.65, "community": 0.35, "official": 0.2},
+        }
+        return preferred.get(intent, {}).get(source_type, 0.4)
+
+    @staticmethod
+    def _domain_quality_score(url: str) -> float:
+        domain = urlparse(url).netloc.lower()
+        if any(value in domain for value in ("wiki.gg", "fandom.com", "fextralife.com")):
+            return 0.9
+        if any(value in domain for value in ("bandainamco", "playstation.com", "steampowered.com")):
+            return 0.85
+        if any(value in domain for value in ("reddit.com", "steamcommunity.com")):
+            return 0.55
+        return 0.4
+
+    @staticmethod
+    def _version_safety_score(*, intent: str, source_type: str, text: str) -> float:
+        lowered = text.lower()
+        has_version_signal = any(
+            token in lowered
+            for token in ("patch", "version", "update", "1.", "版本", "补丁", "更新")
+        )
+        version_sensitive = intent in {"patch", "build", "boss_strategy"}
+        if version_sensitive and source_type == "official":
+            return 1.0
+        if version_sensitive and has_version_signal:
+            return 0.85
+        if version_sensitive:
+            return 0.45
+        if intent in {"item_location", "quest_step", "lore"}:
+            return 0.75
+        return 0.55

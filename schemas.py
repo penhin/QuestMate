@@ -21,8 +21,11 @@ class PlannedSearchQuery(BaseModel):
     query: str = Field(min_length=1, max_length=240)
 
 
+SearchIntent = Literal["boss_strategy", "item_location", "quest_step", "build", "patch", "lore", "general"]
+
+
 class SearchPlan(BaseModel):
-    intent: str = Field(default="general", max_length=80)
+    intent: SearchIntent = "general"
     queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=4)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
 

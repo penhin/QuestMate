@@ -443,17 +443,21 @@ a:focus-visible {
 
 .message.assistant.status {
   width: fit-content;
-  max-width: 180px;
+  max-width: min(76%, 320px);
   min-width: 0;
   color: #425364;
   background: #f8fafc;
   padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .message.assistant.status p {
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .sources {
