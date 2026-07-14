@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, String, Table, Text, delete, func, insert, select, update
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, MetaData, String, Table, Text, delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -82,6 +82,7 @@ class Database:
 
     async def init_schema(self) -> None:
         async with self.engine.begin() as connection:
+            await connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
             await connection.run_sync(metadata.create_all)
 
 
