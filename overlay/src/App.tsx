@@ -17,6 +17,7 @@ import {
 } from "./api";
 import { GAME_NAMES } from "./config/games";
 import { getActiveGame, setOverlayMode, type ActiveGame, type OverlayMode } from "./tauri";
+import { installStartupUpdate } from "./updater";
 
 type Message = {
   role: "user" | "assistant";
@@ -212,6 +213,7 @@ export default function App() {
 
   useEffect(() => {
     void checkBackend().then(setBackendOnline);
+    void installStartupUpdate();
     void refreshActiveGame();
     void refreshSessions();
 
