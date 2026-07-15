@@ -100,17 +100,14 @@ mod platform {
     use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, HWND, MAX_PATH};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
+    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, MAX_PATH};
     use windows_sys::Win32::System::ProcessStatus::K32GetModuleBaseNameW;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsWindowVisible,
     };
 
     pub fn get_active_game() -> ActiveGame {
@@ -137,43 +134,43 @@ mod platform {
 
     pub fn list_processes() -> Vec<String> {
         unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-                return Vec::new();
-            }
-
-            let mut entry = PROCESSENTRY32W {
-                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                cntUsage: 0,
-                th32ProcessID: 0,
-                th32DefaultHeapID: 0,
-                th32ModuleID: 0,
-                cntThreads: 0,
-                th32ParentProcessID: 0,
-                pcPriClassBase: 0,
-                dwFlags: 0,
-                szExeFile: [0; 260],
-            };
             let mut processes = BTreeSet::new();
-            if Process32FirstW(snapshot, &mut entry) != 0 {
-                loop {
-                    let end = entry
-                        .szExeFile
-                        .iter()
-                        .position(|value| *value == 0)
-                        .unwrap_or(entry.szExeFile.len());
-                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-                    if !name.is_empty() {
-                        processes.insert(strip_exe_suffix(&name));
-                    }
-                    if Process32NextW(snapshot, &mut entry) == 0 {
-                        break;
-                    }
-                }
-            }
-            let _ = CloseHandle(snapshot);
+            EnumWindows(
+                Some(collect_taskbar_process),
+                &mut processes as *mut BTreeSet<String> as LPARAM,
+            );
             processes.into_iter().collect()
         }
+    }
+
+    unsafe extern "system" fn collect_taskbar_process(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        if IsWindowVisible(hwnd) == 0 || GetWindowTextLengthW(hwnd) <= 0 {
+            return 1;
+        }
+
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+        if let Some(process_name) = read_process_name(process_id) {
+            let name = strip_exe_suffix(&process_name);
+            if !is_system_process(&name) {
+                (*(lparam as *mut BTreeSet<String>)).insert(name);
+            }
+        }
+        1
+    }
+
+    fn is_system_process(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "applicationframehost"
+                | "dwm"
+                | "explorer"
+                | "searchhost"
+                | "sihost"
+                | "startmenuexperiencehost"
+                | "textinputhost"
+                | "questmate-overlay"
+        )
     }
 
     fn strip_exe_suffix(value: &str) -> String {

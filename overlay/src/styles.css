@@ -723,7 +723,10 @@ a:focus-visible {
 }
 
 .placement-control button {
-  padding-inline: 6px;
+  overflow: hidden;
+  padding-inline: 4px;
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
