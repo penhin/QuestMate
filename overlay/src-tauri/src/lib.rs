@@ -52,9 +52,11 @@ mod platform {
     use super::ActiveGame;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, MAX_PATH};
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, MAX_PATH};
     use windows_sys::Win32::System::ProcessStatus::K32GetModuleBaseNameW;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
     };
@@ -62,7 +64,7 @@ mod platform {
     pub fn get_active_game() -> ActiveGame {
         unsafe {
             let hwnd = GetForegroundWindow();
-            if hwnd == 0 {
+            if hwnd.is_null() {
                 return empty();
             }
 
@@ -81,7 +83,7 @@ mod platform {
         }
     }
 
-    unsafe fn read_window_title(hwnd: isize) -> Option<String> {
+    unsafe fn read_window_title(hwnd: HWND) -> Option<String> {
         let len = GetWindowTextLengthW(hwnd);
         if len <= 0 {
             return None;
@@ -93,17 +95,26 @@ mod platform {
             return None;
         }
 
-        Some(OsString::from_wide(&buffer[..copied as usize]).to_string_lossy().to_string())
+        Some(
+            OsString::from_wide(&buffer[..copied as usize])
+                .to_string_lossy()
+                .to_string(),
+        )
     }
 
     unsafe fn read_process_name(process_id: u32) -> Option<String> {
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id);
-        if handle == 0 {
+        if handle.is_null() {
             return None;
         }
 
         let mut buffer = vec![0u16; MAX_PATH as usize];
-        let copied = K32GetModuleBaseNameW(handle, 0, buffer.as_mut_ptr(), buffer.len() as u32);
+        let copied = K32GetModuleBaseNameW(
+            handle,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+        );
         let _ = CloseHandle(handle);
 
         if copied == 0 {

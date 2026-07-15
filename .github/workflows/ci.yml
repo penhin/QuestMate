@@ -51,7 +51,9 @@ jobs:
       - name: Install overlay dependencies
         run: npm ci
       - name: Build Windows installer
-        run: npm run tauri build
+        # Update artifacts are signed only by the tag-release workflow. Keeping
+        # this CI job unsigned also allows pull requests from forks to build.
+        run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - uses: actions/upload-artifact@v4
         with:
           name: questmate-overlay-windows
