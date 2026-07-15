@@ -11,6 +11,7 @@ SCORE_DIMENSIONS = (
     "source_type_pass",
     "source_recall_pass",
     "evidence_recall_pass",
+    "action_chain_pass",
     "required_terms_pass",
     "forbidden_terms_pass",
     "source_urls_valid",
@@ -79,6 +80,14 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
     ).casefold()
     evidence_terms = [str(term).casefold() for term in case.get("evidence_terms") or []]
     evidence_recall_pass = all(term in evidence_text for term in evidence_terms)
+    required_answer_groups = [
+        [str(term).casefold() for term in group]
+        for group in case.get("required_answer_groups") or []
+    ]
+    action_chain_pass = all(
+        any(term in lowered_answer for term in alternatives)
+        for alternatives in required_answer_groups
+    )
     urls_valid = all(
         isinstance(source, dict) and str(source.get("url") or "").startswith(("https://", "http://"))
         for source in sources
@@ -89,6 +98,7 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
         "source_type_pass": source_pass,
         "source_recall_pass": source_recall_pass,
         "evidence_recall_pass": evidence_recall_pass,
+        "action_chain_pass": action_chain_pass,
         "required_terms_pass": has_required_terms,
         "forbidden_terms_pass": avoids_forbidden_terms,
         "source_urls_valid": urls_valid,

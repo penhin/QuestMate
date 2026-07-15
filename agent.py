@@ -13,6 +13,8 @@ from llm import GuideLLM
 from quality_policy import (
     EVIDENCE_POOL_WEIGHTS,
     HIGH_TRUST_THRESHOLD,
+    MAX_INVESTIGATION_HOPS,
+    MAX_MERGED_EVIDENCE_CHARS,
     VERSION_SENSITIVE_INTENTS,
     source_domain_limit,
 )
@@ -144,7 +146,7 @@ class QuestAgent:
         )
 
         if refined:
-            yield ("status", "证据不足：已换一种表述补充检索")
+            yield ("status", "证据扩展：已补查前置条件和到达方式")
         yield ("status", self._status_for_sources(sources))
         yield ("status", "整理答案：保留来源，核对版本")
         chunks: list[str] = []
@@ -221,37 +223,42 @@ class QuestAgent:
             plan=plan,
             game_resolution=game_resolution,
         )
-        refined_plan = await self.llm.refine_search_plan(
-            request=request,
-            plan=plan,
-            sources=sources,
-            history=history,
-            game_resolution=game_resolution,
-        )
-        if refined_plan is None:
-            return sources, plan, False
+        merged_sources = sources
+        merged_plan = plan
+        refined = False
+        for hop in range(1, MAX_INVESTIGATION_HOPS + 1):
+            refined_plan = await self.llm.refine_search_plan(
+                request=request,
+                plan=merged_plan,
+                sources=merged_sources,
+                history=history,
+                game_resolution=game_resolution,
+            )
+            if refined_plan is None:
+                break
 
-        refined_sources = await self._retrieve_sources(
-            request.question,
-            request.game,
-            plan=refined_plan,
-            game_resolution=game_resolution,
-            include_knowledge=False,
-        )
-        merged_plan = self._merge_search_plans(plan, refined_plan)
-        merged_sources = self._rank_sources(
-            sources=[*sources, *refined_sources],
-            query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
-            intent=merged_plan.intent,
-        )
-        logger.info(
-            "retrieval.refined",
-            game=request.game,
-            initial_source_count=len(sources),
-            refined_source_count=len(refined_sources),
-            merged_source_count=len(merged_sources),
-        )
-        return merged_sources, merged_plan, True
+            refined_sources = await self._retrieve_sources(
+                request.question,
+                request.game,
+                plan=refined_plan,
+                game_resolution=game_resolution,
+                include_knowledge=False,
+            )
+            merged_plan = self._merge_search_plans(merged_plan, refined_plan)
+            merged_sources = self._rank_sources(
+                sources=[*merged_sources, *refined_sources],
+                query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
+                intent=merged_plan.intent,
+            )
+            refined = True
+            logger.info(
+                "retrieval.investigation_hop",
+                game=request.game,
+                hop=hop,
+                new_source_count=len(refined_sources),
+                merged_source_count=len(merged_sources),
+            )
+        return merged_sources, merged_plan, refined
 
     async def _retrieve_sources(
         self,
@@ -320,7 +327,7 @@ class QuestAgent:
         return SearchPlan(
             intent=initial.intent,
             aliases=aliases,
-            queries=queries[:4],
+            queries=queries[:6],
             missing_info=list(dict.fromkeys([*initial.missing_info, *refined.missing_info]))[:4],
         )
 
@@ -332,7 +339,15 @@ class QuestAgent:
             rank = QuestAgent._source_rank(source=source, query=query, intent=intent)
             current = ranked_by_url.get(key)
             if current is None or rank > current[0]:
-                ranked_by_url[key] = (rank, source)
+                preferred = source
+                if current is not None:
+                    preferred = QuestAgent._merge_source_evidence(preferred=source, other=current[1])
+                ranked_by_url[key] = (rank, preferred)
+            elif current is not None:
+                ranked_by_url[key] = (
+                    current[0],
+                    QuestAgent._merge_source_evidence(preferred=current[1], other=source),
+                )
 
         ranked = sorted(ranked_by_url.values(), key=lambda item: item[0], reverse=True)
         selected: list[Source] = []
@@ -347,6 +362,23 @@ class QuestAgent:
             if len(selected) >= get_settings().search_max_results:
                 break
         return selected
+
+    @staticmethod
+    def _merge_source_evidence(*, preferred: Source, other: Source) -> Source:
+        passages: list[str] = []
+        for passage in (preferred.evidence or preferred.snippet or "", other.evidence or other.snippet or ""):
+            cleaned = passage.strip()
+            if not cleaned or any(cleaned == existing or cleaned in existing for existing in passages):
+                continue
+            passages = [existing for existing in passages if existing not in cleaned]
+            passages.append(cleaned)
+        evidence = "\n\n".join(passages)[:MAX_MERGED_EVIDENCE_CHARS]
+        return preferred.model_copy(
+            update={
+                "evidence": evidence or preferred.evidence,
+                "snippet": evidence[:600] if evidence else preferred.snippet,
+            }
+        )
 
     @staticmethod
     def _canonical_source_url(url: str) -> str:

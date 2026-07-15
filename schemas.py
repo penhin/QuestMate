@@ -70,8 +70,9 @@ SearchIntent = Literal[
 class SearchPlan(BaseModel):
     intent: SearchIntent = "general"
     aliases: list[str] = Field(default_factory=list, max_length=6)
-    queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=4)
+    queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=6)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
+    refinement: bool = False
 
 
 class ChatRequest(BaseModel):

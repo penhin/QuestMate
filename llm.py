@@ -27,6 +27,9 @@ PROMPT_INJECTION_QUERY_PATTERNS = (
     re.compile(r"(忽略|无视|覆盖|忘记).{0,40}(指令|规则|提示词|系统|开发者)", re.I),
     re.compile(r"(输出|显示|泄露|透露|打印).{0,40}(系统prompt|系统提示|提示词|api key|密钥|环境变量|隐藏配置)", re.I),
 )
+ACTIONABLE_INVESTIGATION_INTENTS = frozenset(
+    {"item_location", "item_usage", "quest_step", "game_mechanic"}
+)
 
 
 class GuideLLM:
@@ -74,7 +77,10 @@ class GuideLLM:
         game_resolution: GameResolution | None = None,
     ) -> SearchPlan | None:
         evidence_question = self._evidence_question(request=request, plan=plan)
-        if self._evidence_level(question=evidence_question, sources=sources) == "direct":
+        if (
+            not self._requires_action_chain(intent=plan.intent, question=request.question)
+            and self._evidence_level(question=evidence_question, sources=sources) == "direct"
+        ):
             return None
 
         provider = self._provider or create_model_provider(request=request, settings=self.settings)
@@ -94,6 +100,7 @@ class GuideLLM:
                     f"<question>{self._sanitize_search_text(request.question)}</question>\n"
                     f"<intent>{plan.intent}</intent>\n"
                     f"<attempted_queries>{json.dumps(attempted_queries, ensure_ascii=False)}</attempted_queries>\n"
+                    f"<recent_conversation>{self._history_context(history or []) or 'No prior messages.'}</recent_conversation>\n"
                     f"<first_pass_sources>{self._source_context(sources)[:6000] or 'No sources found.'}</first_pass_sources>"
                 ),
                 json_mode=True,
@@ -106,6 +113,33 @@ class GuideLLM:
             question=request.question,
             intent=plan.intent,
             attempted_queries=attempted_queries,
+        )
+
+    @staticmethod
+    def _requires_action_chain(*, intent: SearchIntent, question: str) -> bool:
+        if intent in ACTIONABLE_INVESTIGATION_INTENTS:
+            return True
+        lowered = question.casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "如何",
+                "怎么",
+                "在哪",
+                "哪里",
+                "进入",
+                "打开",
+                "解锁",
+                "获得",
+                "获取",
+                "触发",
+                "下一步",
+                "找不到",
+                "不见",
+                "why can't",
+                "how to",
+                "where is",
+            )
         )
 
     async def answer(
@@ -664,6 +698,7 @@ class GuideLLM:
             aliases=cls._sanitize_aliases(plan.aliases),
             queries=[PlannedSearchQuery(source_type=plan.queries[0].source_type, query=query)],
             missing_info=plan.missing_info[:4],
+            refinement=True,
         )
 
     @staticmethod
@@ -961,5 +996,26 @@ class GuideLLM:
     @staticmethod
     def _is_short_followup(question: str) -> bool:
         lowered = question.lower().strip()
-        followup_markers = ("就是", "我说的是", "这个", "那个", "上面", "刚才", "it is", "i mean", "same game")
+        followup_markers = (
+            "就是",
+            "我说的是",
+            "这个",
+            "那个",
+            "该钥匙",
+            "该区域",
+            "该物品",
+            "该任务",
+            "该npc",
+            "那里",
+            "它",
+            "上面",
+            "刚才",
+            "为什么没有",
+            "怎么去",
+            "然后呢",
+            "接下来",
+            "it is",
+            "i mean",
+            "same game",
+        )
         return any(marker in lowered for marker in followup_markers)

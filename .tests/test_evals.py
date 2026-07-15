@@ -96,6 +96,7 @@ def test_evaluation_measures_source_and_evidence_recall_separately() -> None:
         "expected_source_types": ["wiki"],
         "expected_source_urls": ["example.com/wiki/exact_entity"],
         "evidence_terms": ["required key", "hidden room"],
+        "required_answer_groups": [["隐藏入口", "hidden entrance"], ["钥匙", "key"]],
         "required_terms": ["结论"],
     }
     correct_source = {
@@ -105,23 +106,25 @@ def test_evaluation_measures_source_and_evidence_recall_separately() -> None:
         "evidence": "The required key opens the hidden room.",
     }
 
-    passing = evaluate_case(case, {"answer": "结论如下。[1]", "sources": [correct_source]})
+    passing = evaluate_case(case, {"answer": "结论：先拿钥匙，再走隐藏入口。[1]", "sources": [correct_source]})
     wrong_page = evaluate_case(
         case,
         {
-            "answer": "结论如下。[1]",
+            "answer": "结论：先拿钥匙，再走隐藏入口。[1]",
             "sources": [{**correct_source, "url": "https://example.com/wiki/index"}],
         },
     )
     missing_evidence = evaluate_case(
         case,
-        {"answer": "结论如下。[1]", "sources": [{**correct_source, "evidence": "Generic overview."}]},
+        {"answer": "结论：先拿钥匙，再走隐藏入口。[1]", "sources": [{**correct_source, "evidence": "Generic overview."}]},
     )
+    incomplete_chain = evaluate_case(case, {"answer": "结论：拿到钥匙。[1]", "sources": [correct_source]})
 
     assert passing["source_recall_pass"] is True
     assert passing["evidence_recall_pass"] is True
     assert wrong_page["source_recall_pass"] is False
     assert missing_evidence["evidence_recall_pass"] is False
+    assert incomplete_chain["action_chain_pass"] is False
 
 
 def test_answer_with_late_uncertainty_note_is_not_a_conservative_refusal() -> None:

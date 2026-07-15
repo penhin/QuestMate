@@ -13,6 +13,7 @@
 - `forbidden_terms`：答案中不得出现的错误或高风险表述。
 - `expected_source_urls`：可接受的正确来源 URL；返回来源至少命中一个，用于衡量 Source Recall。
 - `evidence_terms`：必须出现在返回来源正文片段中的证据词，用于衡量 Evidence Recall。
+- `required_answer_groups`：行动链答案必须覆盖的概念组；每组命中任一中英文表达即通过。
 - `require_citations`：要求答案至少包含一个有效的 `[n]` 来源编号；`answer` 类型默认开启。
 
 评测还会拒绝超出来源数量的引用编号，并区分“有官方版本证据的明确回答”和“没有版本证据时的保守回答”。报告会分别输出评分维度通过率，以及按类别、数据集、游戏层级和难度分组的结果。

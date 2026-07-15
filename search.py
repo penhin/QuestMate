@@ -139,6 +139,7 @@ class TavilySearchProvider:
             game=game,
             question=query,
             aliases=aliases,
+            planned_queries=[item.query for item in (plan.queries if plan else [])],
             game_aliases=game_aliases,
             database_domains=list(game_resolution.database_domains),
             intent=intent,
@@ -233,6 +234,7 @@ class TavilySearchProvider:
         game: str,
         question: str,
         aliases: list[str],
+        planned_queries: list[str],
         game_aliases: list[str],
         database_domains: list[str],
         intent: str,
@@ -248,7 +250,7 @@ class TavilySearchProvider:
         if not wiki_domains:
             return []
 
-        wiki_query = " ".join(aliases[:2]).strip() or question
+        wiki_query = " ".join(aliases[:2]).strip() or (planned_queries[0] if planned_queries else question)
 
         async def fetch(domain: str) -> dict[str, Any]:
             cache_key = f"mediawiki:{domain}:{wiki_query.casefold()}:{max_results}"
@@ -635,6 +637,7 @@ class TavilySearchProvider:
     ) -> list[tuple[str, SourcePolicy]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
         aliases = list((plan.aliases if plan else [])[:3])
+        per_planned_query_limit = 1 if plan and plan.refinement else MAX_QUERIES_PER_PLANNED_QUERY
         built: list[tuple[str, SourcePolicy]] = []
         seen: set[str] = set()
 
@@ -683,7 +686,7 @@ class TavilySearchProvider:
                 added_for_plan += 1
                 if len(built) >= MAX_SEARCH_QUERIES:
                     return built
-                if added_for_plan >= MAX_QUERIES_PER_PLANNED_QUERY:
+                if added_for_plan >= per_planned_query_limit:
                     break
 
         return built
