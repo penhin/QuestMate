@@ -359,6 +359,11 @@ class LocalKnowledge:
         ]
 
 
+class BrokenKnowledge:
+    async def retrieve(self, *, game: str, query: str):
+        raise OSError("knowledge database unavailable")
+
+
 async def test_agent_merges_local_knowledge_before_web_results() -> None:
     agent = QuestAgent(search_provider=EmptySearchProvider(), knowledge=LocalKnowledge())
     sources = await agent._retrieve_sources(
@@ -393,6 +398,29 @@ async def test_agent_reranks_local_and_web_sources_together() -> None:
     )
 
     assert sources[0].title == "Malenia strategy"
+
+
+async def test_agent_keeps_web_results_when_local_dimension_fails() -> None:
+    class WebSearchProvider(EmptySearchProvider):
+        async def search(self, query: str, game: str, max_results=None, plan=None, game_resolution=None):
+            return [
+                Source(
+                    title="Malenia Wiki",
+                    url="https://example.org/malenia",
+                    evidence="Malenia weakness phase guide",
+                    score=0.9,
+                )
+            ]
+
+    agent = QuestAgent(search_provider=WebSearchProvider(), knowledge=BrokenKnowledge())
+    sources = await agent._retrieve_sources(
+        "Malenia weakness",
+        "Elden Ring",
+        plan=SearchPlan(intent="boss_strategy", aliases=["Malenia"]),
+        game_resolution=GameResolution(input_name="Elden Ring", confirmed_name="Elden Ring", confidence=0.8),
+    )
+
+    assert [source.title for source in sources] == ["Malenia Wiki"]
 
 
 def test_patch_answers_require_dated_official_evidence() -> None:

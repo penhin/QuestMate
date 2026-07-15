@@ -1,9 +1,11 @@
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Literal, TypedDict
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
+import structlog
 
 from knowledge import KnowledgeStore, knowledge_store
 from config import get_settings
@@ -21,6 +23,7 @@ from storage import conversation_store
 
 
 AgentStreamEvent = tuple[Literal["status", "chunk", "done"], str | ChatResponse]
+logger = structlog.get_logger()
 
 
 class QuestAgentState(TypedDict):
@@ -211,13 +214,29 @@ class QuestAgent:
         game_resolution: GameResolution,
     ) -> list[Source]:
         """Rank local and live evidence in one pool, retaining URL diversity."""
-        local_sources = await self.knowledge.retrieve(game=game, query=question)
-        web_sources = await self.search_provider.search(
-            question,
-            game,
-            plan=plan,
-            game_resolution=game_resolution,
+        retrievals = await asyncio.gather(
+            self.knowledge.retrieve(game=game, query=question),
+            self.search_provider.search(
+                question,
+                game,
+                plan=plan,
+                game_resolution=game_resolution,
+            ),
+            return_exceptions=True,
         )
+        source_groups: list[list[Source]] = []
+        for dimension, result in zip(("knowledge", "web"), retrievals, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "retrieval.dimension_failed",
+                    dimension=dimension,
+                    game=game,
+                    error_type=type(result).__name__,
+                )
+                source_groups.append([])
+            else:
+                source_groups.append(result)
+        local_sources, web_sources = source_groups
         query = f"{question} {' '.join(plan.aliases)}".strip()
         ranked_by_url: dict[str, tuple[float, Source]] = {}
         for source in [*local_sources, *web_sources]:

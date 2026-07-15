@@ -7,6 +7,7 @@ export type Message = {
   sources?: ChatResponse["sources"];
   gameCandidates?: GameCandidate[];
   pendingQuestion?: string;
+  progress?: string[];
 };
 
 export type Language = "zh" | "en";
@@ -59,6 +60,7 @@ type Copy = {
   requestFailed: string;
   chooseGame: string;
   noneOfThese: string;
+  searchProgress: string;
 };
 
 export const COPY = {
@@ -73,7 +75,7 @@ export const COPY = {
     editSession: "改名", deleteSession: "删除", saveSession: "保存", cancelEdit: "取消", activeWindow: "当前窗口",
     language: "语言", game: "游戏", question: "问题", gamePlaceholder: "艾尔登法环",
     questionPlaceholder: "这个 Boss 怎么打？", loading: "查询中...", ask: "提问", sources: "来源",
-    requestFailed: "请求失败", chooseGame: "请选择要查询的游戏", noneOfThese: "都不是",
+    requestFailed: "请求失败", chooseGame: "请选择要查询的游戏", noneOfThese: "都不是", searchProgress: "检索进度",
   },
   en: {
     open: "Open QuestMate", title: "Quick Guide", subtitle: "In-game answers on demand", settings: "Settings",
@@ -87,7 +89,7 @@ export const COPY = {
     saveSession: "Save", cancelEdit: "Cancel", activeWindow: "Active window", language: "Language", game: "Game",
     question: "Question", gamePlaceholder: "Elden Ring", questionPlaceholder: "How do I beat this boss?",
     loading: "Searching...", ask: "Ask", sources: "Sources", requestFailed: "Request failed",
-    chooseGame: "Choose the game", noneOfThese: "None of these",
+    chooseGame: "Choose the game", noneOfThese: "None of these", searchProgress: "Search progress",
   },
 } satisfies Record<Language, Copy>;
 
@@ -116,7 +118,6 @@ export function Icon({ name }: { name: IconName }) {
 export const providerLabel = (provider: AiSettings["provider"]) => provider === "deepseek" ? "DeepSeek" : "Anthropic";
 export const formatMessageCount = (count: number, language: Language) => language === "zh" ? `${count} 条消息` : `${count} messages`;
 export const updateLastAssistantMessage = (messages: Message[], patch: Partial<Message>) => messages.map((message, index) => index === messages.length - 1 && message.role === "assistant" ? { ...message, ...patch } : message);
-export const formatAgentStatus = (status: string) => `${status}...`;
 export function formatCandidateHost(url: string) { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } }
 export const displayProcessName = (processName: string) => processName.replace(/\.exe$/i, "");
 export const isOverlayProcess = (processName: string) => /questmate-overlay/i.test(processName);

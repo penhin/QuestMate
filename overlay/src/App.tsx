@@ -25,7 +25,7 @@ import {
   type OverlayPlacement,
 } from "./tauri";
 import { installStartupUpdate } from "./updater";
-import { COPY, GameField, Icon, SETTINGS_TABS, displayProcessName, formatAgentStatus, formatCandidateHost, formatMessageCount, isOverlayProcess, providerLabel, updateLastAssistantMessage, type Language, type Message, type SettingsTab } from "./ui";
+import { COPY, GameField, Icon, SETTINGS_TABS, displayProcessName, formatCandidateHost, formatMessageCount, isOverlayProcess, providerLabel, updateLastAssistantMessage, type Language, type Message, type SettingsTab } from "./ui";
 
 export default function App() {
   const [language, setLanguage] = useState<Language>("zh");
@@ -277,12 +277,21 @@ export default function App() {
     setLoading(true);
     setMessages((current) => {
       const next = appendUserMessage ? [...current, { role: "user" as const, content: trimmedQuestion }] : current;
-      return [...next, { role: "assistant", content: formatAgentStatus("准备查询"), status: true }];
+      const pendingMessage: Message = {
+        role: "assistant",
+        content: "",
+        status: true,
+        progress: ["准备查询"],
+      };
+      if (!appendUserMessage && next[next.length - 1]?.role === "assistant") {
+        return [...next.slice(0, -1), pendingMessage];
+      }
+      return [...next, pendingMessage];
     });
     setQuestion("");
 
     try {
-      let answerStarted = false;
+      let streamedAnswer = "";
       let finalResponse: ChatResponse | undefined;
       await streamQuestMate(
         {
@@ -294,24 +303,17 @@ export default function App() {
         },
         {
           onStatus: (status) => {
-            if (answerStarted) {
-              return;
-            }
-            setMessages((current) =>
-              updateLastAssistantMessage(current, { content: formatAgentStatus(status), status: true }),
-            );
-          },
-          onChunk: (chunk) => {
-            const wasAnswerStarted = answerStarted;
-            answerStarted = true;
             setMessages((current) => {
               const lastAssistant = current[current.length - 1];
-              const content =
-                wasAnswerStarted && lastAssistant?.role === "assistant"
-                  ? lastAssistant.content + chunk
-                  : chunk;
-              return updateLastAssistantMessage(current, { content, status: false });
+              const progress = lastAssistant?.role === "assistant" ? [...(lastAssistant.progress ?? [])] : [];
+              if (progress[progress.length - 1] !== status) {
+                progress.push(status);
+              }
+              return updateLastAssistantMessage(current, { content: "", progress, status: true });
             });
+          },
+          onChunk: (chunk) => {
+            streamedAnswer += chunk;
           },
           onDone: (response) => {
             finalResponse = response;
@@ -337,9 +339,10 @@ export default function App() {
       setDraftSession(false);
       setMessages((current) => {
         return updateLastAssistantMessage(current, {
-          content: response.answer,
+          content: response.answer || streamedAnswer,
           sources: response.sources,
           status: false,
+          progress: undefined,
           gameCandidates: response.game_candidates,
           pendingQuestion: response.needs_game_confirmation ? trimmedQuestion : undefined,
         });
@@ -347,7 +350,13 @@ export default function App() {
     } catch (err) {
       const message = err instanceof Error ? err.message : text.requestFailed;
       setError(message);
-      setMessages((current) => updateLastAssistantMessage(current, { content: message, status: false }));
+      setMessages((current) =>
+        updateLastAssistantMessage(current, {
+          content: text.requestFailed,
+          status: false,
+          progress: undefined,
+        }),
+      );
     } finally {
       setLoading(false);
     }
@@ -363,6 +372,7 @@ export default function App() {
         gameCandidates: [],
         pendingQuestion: undefined,
         status: true,
+        progress: [`已确认游戏：${candidate.name}`],
       }),
     );
     void submitQuestion(
@@ -758,7 +768,27 @@ export default function App() {
                   key={`${message.role}-${index}`}
                   className={`message ${message.role}${message.status ? " status" : ""}`}
                 >
-                  <p>{message.content}</p>
+                  {message.status && message.progress && message.progress.length > 0 ? (
+                    <section className="search-progress" role="status" aria-live="polite" aria-atomic="true">
+                      <div className="search-progress-heading">
+                        <span className="progress-spinner" aria-hidden="true" />
+                        <h2>{text.searchProgress}</h2>
+                      </div>
+                      <ol>
+                        {message.progress.map((step, stepIndex) => {
+                          const isCurrent = stepIndex === message.progress!.length - 1;
+                          return (
+                            <li key={`${step}-${stepIndex}`} className={isCurrent ? "current" : "complete"}>
+                              <span className="progress-marker" aria-hidden="true" />
+                              <span>{step}</span>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    </section>
+                  ) : (
+                    <p>{message.content}</p>
+                  )}
                   {message.gameCandidates && message.gameCandidates.length > 0 && (
                     <div className="game-candidates" aria-label={text.chooseGame}>
                       <span>{text.chooseGame}</span>
