@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     evidence_passage_max_chars: int = Field(default=1600, ge=400, le=6000)
     external_request_timeout_seconds: int = Field(default=20, ge=3, le=90)
     tavily_max_concurrency: int = Field(default=3, ge=1, le=8)
+    tavily_search_cache_ttl_seconds: int = Field(default=86400, ge=0, le=2592000)
+    tavily_search_cache_max_entries: int = Field(default=512, ge=16, le=10000)
+    search_cache_use_redis: bool = True
+    tavily_first_wave_queries: int = Field(default=2, ge=1, le=4)
+    tavily_max_queries_per_request: int = Field(default=4, ge=1, le=8)
+    mediawiki_direct_search: bool = True
     knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
     embedding_api_key: str = ""
     embedding_base_url: str = ""

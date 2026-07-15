@@ -24,7 +24,7 @@ from agent import QuestAgent
 from game_resolution import GameResolver, identity_matches_game
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
-from search import TavilySearchProvider
+from search import MediaWikiClient, TavilySearchProvider
 from storage import InMemoryConversationStore, PostgresConversationStore
 
 
@@ -79,6 +79,31 @@ class FastIdentitySearchClient:
         return {"results": []}
 
 
+class CountingEmptySearchClient:
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def search(self, **kwargs):
+        self.queries.append(kwargs["query"])
+        return {"results": []}
+
+
+class DirectWikiClient:
+    def __init__(self):
+        self.queries: list[tuple[str, str]] = []
+
+    def search(self, *, domain: str, query: str, max_results: int):
+        self.queries.append((domain, query))
+        return {
+            "results": [{
+                "title": "Pavol",
+                "url": "https://felvidek.fandom.com/wiki/Pavol",
+                "content": "Pavol is the protagonist of Felvidek and the player character from the start.",
+                "score": 0.9,
+            }]
+        }
+
+
 def test_game_resolver_fast_identity_confirms_niche_game() -> None:
     client = FastIdentitySearchClient()
     resolution = GameResolver(client).resolve(game="Look Outside")
@@ -88,6 +113,95 @@ def test_game_resolver_fast_identity_confirms_niche_game() -> None:
     assert resolution.database_domains == ["look-outside.fandom.com"]
     assert "Smooch Mode" not in resolution.aliases
     assert len(client.queries) == 1
+
+
+async def test_tavily_identity_search_is_cached() -> None:
+    client = FastIdentitySearchClient()
+    provider = TavilySearchProvider(client=client)
+
+    first = await provider.resolve_game("Look Outside")
+    second = await provider.resolve_game("Look Outside")
+
+    assert first == second
+    assert len(client.queries) == 1
+    assert provider._client.upstream_calls == 1
+    assert provider._client.cache_hits == 1
+
+
+async def test_progressive_search_caps_paid_queries() -> None:
+    client = CountingEmptySearchClient()
+    settings = Settings(
+        tavily_first_wave_queries=2,
+        tavily_max_queries_per_request=4,
+        tavily_search_cache_ttl_seconds=0,
+    )
+    provider = TavilySearchProvider(settings=settings, client=client)
+    plan = SearchPlan(
+        intent="item_usage",
+        aliases=["Loaded Dice"],
+        queries=[
+            {"source_type": "wiki", "query": "Loaded Dice item use"},
+            {"source_type": "community", "query": "Loaded Dice where use"},
+            {"source_type": "web", "query": "Loaded Dice walkthrough"},
+        ],
+    )
+
+    sources = await provider.search(
+        "Loaded Dice 有什么用？",
+        "Escape from Ever After",
+        plan=plan,
+        game_resolution=GameResolution(
+            input_name="Escape from Ever After",
+            confirmed_name="Escape from Ever After",
+            confidence=0.8,
+        ),
+    )
+
+    assert sources == []
+    assert len(client.queries) == 4
+
+
+async def test_direct_mediawiki_hit_skips_paid_search() -> None:
+    tavily = CountingEmptySearchClient()
+    mediawiki = DirectWikiClient()
+    provider = TavilySearchProvider(client=tavily, mediawiki_client=mediawiki)
+    plan = SearchPlan(
+        intent="quest_step",
+        aliases=["Pavol"],
+        queries=[{"source_type": "wiki", "query": "Pavol recruit party"}],
+    )
+
+    sources = await provider.search(
+        "Pavol 怎么加入队伍？",
+        "Felvidek",
+        plan=plan,
+        game_resolution=GameResolution(
+            input_name="Felvidek",
+            confirmed_name="Felvidek",
+            database_domains=["felvidek.fandom.com"],
+            confidence=0.8,
+        ),
+    )
+
+    assert [source.title for source in sources] == ["Pavol"]
+    assert tavily.queries == []
+    assert mediawiki.queries == [("felvidek.fandom.com", "Pavol")]
+
+
+def test_mediawiki_wikitext_cleaner_removes_markup() -> None:
+    content = """
+    {{Infobox character|name=Pavol}}
+    == Location ==
+    [[File:Pavol.png|thumb]]
+    '''Pavol''' waits in [[Hollow Basin|the Hollow Basin]].<ref>Hidden note</ref>
+    """
+
+    cleaned = MediaWikiClient._clean_wikitext(content)
+
+    assert "Pavol waits in the Hollow Basin." in cleaned
+    assert "Infobox" not in cleaned
+    assert "File:" not in cleaned
+    assert "Hidden note" not in cleaned
 
 
 def test_game_identity_requires_exact_compact_name() -> None:
@@ -1165,6 +1279,13 @@ def test_fallback_search_plan_keeps_embedded_english_entity_compact() -> None:
     assert plan.aliases == ["Kissing Mode"]
     assert all("请给出具体触发步骤" not in query.query for query in plan.queries)
     assert any(query.query.startswith("Kissing Mode ") for query in plan.queries)
+
+
+def test_fallback_search_plan_normalizes_smart_apostrophe_in_entity() -> None:
+    plan = GuideLLM._fallback_search_plan(question="如何进入 Wing’s Rest？")
+
+    assert plan.aliases == ["Wing's Rest"]
+    assert all("s Rest" != query.query for query in plan.queries)
 
 
 def test_contextual_search_question_merges_short_followup() -> None:

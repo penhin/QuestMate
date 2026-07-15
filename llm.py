@@ -750,9 +750,15 @@ class GuideLLM:
     @staticmethod
     def _fallback_search_subject(question: str) -> str:
         """Keep entity names while dropping natural-language search instructions."""
+        normalized_question = question.translate(
+            str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
+        )
         latin_phrases = [
             " ".join(phrase.split()).strip(" -_'\"")
-            for phrase in re.findall(r"[A-Za-z0-9][A-Za-z0-9'_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'_.-]*)*", question)
+            for phrase in re.findall(
+                r"[A-Za-z0-9][A-Za-z0-9'_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'_.-]*)*",
+                normalized_question,
+            )
         ]
         latin_phrases = [phrase for phrase in latin_phrases if len(phrase) >= 3]
         if latin_phrases:
