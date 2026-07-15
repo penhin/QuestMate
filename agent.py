@@ -136,13 +136,15 @@ class QuestAgent:
         search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
 
         yield ("status", self._status_for_search(search_plan))
-        sources = await self._retrieve_sources(
-            request.question,
-            request.game,
+        sources, search_plan, refined = await self._retrieve_with_refinement(
+            request=request,
+            history=history,
             plan=search_plan,
             game_resolution=game_resolution,
         )
 
+        if refined:
+            yield ("status", "证据不足：已换一种表述补充检索")
         yield ("status", self._status_for_sources(sources))
         yield ("status", "整理答案：保留来源，核对版本")
         chunks: list[str] = []
@@ -197,13 +199,59 @@ class QuestAgent:
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        sources = await self._retrieve_sources(
-            request.question,
-            request.game,
+        sources, search_plan, _refined = await self._retrieve_with_refinement(
+            request=request,
+            history=state["history"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
         )
-        return {**state, "sources": sources}
+        return {**state, "sources": sources, "search_plan": search_plan}
+
+    async def _retrieve_with_refinement(
+        self,
+        *,
+        request: ChatRequest,
+        history: list[SessionMessage],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+    ) -> tuple[list[Source], SearchPlan, bool]:
+        sources = await self._retrieve_sources(
+            request.question,
+            request.game,
+            plan=plan,
+            game_resolution=game_resolution,
+        )
+        refined_plan = await self.llm.refine_search_plan(
+            request=request,
+            plan=plan,
+            sources=sources,
+            history=history,
+            game_resolution=game_resolution,
+        )
+        if refined_plan is None:
+            return sources, plan, False
+
+        refined_sources = await self._retrieve_sources(
+            request.question,
+            request.game,
+            plan=refined_plan,
+            game_resolution=game_resolution,
+            include_knowledge=False,
+        )
+        merged_plan = self._merge_search_plans(plan, refined_plan)
+        merged_sources = self._rank_sources(
+            sources=[*sources, *refined_sources],
+            query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
+            intent=merged_plan.intent,
+        )
+        logger.info(
+            "retrieval.refined",
+            game=request.game,
+            initial_source_count=len(sources),
+            refined_source_count=len(refined_sources),
+            merged_source_count=len(merged_sources),
+        )
+        return merged_sources, merged_plan, True
 
     async def _retrieve_sources(
         self,
@@ -212,20 +260,26 @@ class QuestAgent:
         *,
         plan: SearchPlan,
         game_resolution: GameResolution,
+        include_knowledge: bool = True,
     ) -> list[Source]:
         """Rank local and live evidence in one pool, retaining URL diversity."""
-        retrievals = await asyncio.gather(
-            self.knowledge.retrieve(game=game, query=question),
+        retrieval_calls = []
+        dimensions = []
+        if include_knowledge:
+            retrieval_calls.append(self.knowledge.retrieve(game=game, query=question))
+            dimensions.append("knowledge")
+        retrieval_calls.append(
             self.search_provider.search(
                 question,
                 game,
                 plan=plan,
                 game_resolution=game_resolution,
-            ),
-            return_exceptions=True,
+            )
         )
+        dimensions.append("web")
+        retrievals = await asyncio.gather(*retrieval_calls, return_exceptions=True)
         source_groups: list[list[Source]] = []
-        for dimension, result in zip(("knowledge", "web"), retrievals, strict=True):
+        for dimension, result in zip(dimensions, retrievals, strict=True):
             if isinstance(result, BaseException):
                 logger.warning(
                     "retrieval.dimension_failed",
@@ -236,12 +290,37 @@ class QuestAgent:
                 source_groups.append([])
             else:
                 source_groups.append(result)
-        local_sources, web_sources = source_groups
         query = f"{question} {' '.join(plan.aliases)}".strip()
+        return self._rank_sources(
+            sources=[source for group in source_groups for source in group],
+            query=query,
+            intent=plan.intent,
+        )
+
+    @staticmethod
+    def _merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:
+        aliases = list(dict.fromkeys([*initial.aliases, *refined.aliases]))[:6]
+        queries = []
+        seen_queries: set[str] = set()
+        for query in [*initial.queries, *refined.queries]:
+            normalized = " ".join(query.query.casefold().split())
+            if normalized in seen_queries:
+                continue
+            seen_queries.add(normalized)
+            queries.append(query)
+        return SearchPlan(
+            intent=initial.intent,
+            aliases=aliases,
+            queries=queries[:4],
+            missing_info=list(dict.fromkeys([*initial.missing_info, *refined.missing_info]))[:4],
+        )
+
+    @staticmethod
+    def _rank_sources(*, sources: list[Source], query: str, intent: str) -> list[Source]:
         ranked_by_url: dict[str, tuple[float, Source]] = {}
-        for source in [*local_sources, *web_sources]:
-            key = self._canonical_source_url(str(source.url))
-            rank = self._source_rank(source=source, query=query, intent=plan.intent)
+        for source in sources:
+            key = QuestAgent._canonical_source_url(str(source.url))
+            rank = QuestAgent._source_rank(source=source, query=query, intent=intent)
             current = ranked_by_url.get(key)
             if current is None or rank > current[0]:
                 ranked_by_url[key] = (rank, source)

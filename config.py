@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     tavily_search_cache_max_entries: int = Field(default=512, ge=16, le=10000)
     search_cache_use_redis: bool = True
     tavily_first_wave_queries: int = Field(default=2, ge=1, le=4)
-    tavily_max_queries_per_request: int = Field(default=4, ge=1, le=8)
+    tavily_max_queries_per_request: int = Field(default=2, ge=1, le=8)
     mediawiki_direct_search: bool = True
     knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
     embedding_api_key: str = ""

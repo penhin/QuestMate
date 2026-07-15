@@ -488,8 +488,7 @@ class TavilySearchProvider:
         game_aliases: tuple[str, ...] = (),
     ) -> list[tuple[str, SourcePolicy]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
-        aliases = [*self._numbered_location_aliases(question), *((plan.aliases if plan else [])[:3])]
-        aliases = list(dict.fromkeys(aliases))[:6]
+        aliases = list((plan.aliases if plan else [])[:3])
         built: list[tuple[str, SourcePolicy]] = []
         seen: set[str] = set()
 
@@ -498,9 +497,6 @@ class TavilySearchProvider:
             query = planned.query.replace("{question}", question).strip()
 
             candidates: list[str] = []
-            semantic_query = self._scenario_semantic_query(question)
-            if semantic_query and source.source_type in {"wiki", "community", "web"}:
-                candidates.append(f"{game} {semantic_query}")
             if source.source_type == "wiki":
                 candidates.extend(f"site:{domain} {game} {query}" for domain in database_domains)
                 for alias in aliases:
@@ -545,35 +541,6 @@ class TavilySearchProvider:
                     break
 
         return built
-
-    @staticmethod
-    def _scenario_semantic_query(question: str) -> str:
-        lowered = question.lower()
-        win_scenario = any(
-            token in lowered
-            for token in ("获胜", "胜利条件", "谁会赢", "谁赢", "win condition", "who wins")
-        )
-        if not win_scenario:
-            return ""
-
-        terms = ["role win condition priority"]
-        if any(token in lowered for token in ("感染", "infect")):
-            terms.append("infection infect all living players")
-        if any(token in lowered for token in ("票出", "投票", "出局", "voted", "vote", "eliminated")):
-            terms.append("last uninfected voted out elimination")
-        return " ".join(terms)
-
-    @staticmethod
-    def _numbered_location_aliases(question: str) -> list[str]:
-        aliases: list[str] = []
-        patterns = re.findall(
-            r"(?<!\d)(\d{1,4})\s*(?:号房|号公寓|房间|室|楼|层|f\b)",
-            question,
-            flags=re.IGNORECASE,
-        )
-        for number in patterns[:2]:
-            aliases.extend((f"Apartment {number}", f"Room {number}", f"Apt {number}"))
-        return aliases
 
     @staticmethod
     def _is_relevant_result(*, item: dict[str, Any], game: str, question: str) -> bool:

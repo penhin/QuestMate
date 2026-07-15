@@ -423,6 +423,58 @@ async def test_agent_keeps_web_results_when_local_dimension_fails() -> None:
     assert [source.title for source in sources] == ["Malenia Wiki"]
 
 
+async def test_agent_runs_one_model_driven_refinement_pass() -> None:
+    class EmptyKnowledge:
+        async def retrieve(self, *, game: str, query: str):
+            return []
+
+    class StagedSearchProvider(EmptySearchProvider):
+        def __init__(self):
+            self.plans = []
+
+        async def search(self, query: str, game: str, max_results=None, plan=None, game_resolution=None):
+            self.plans.append(plan)
+            if len(self.plans) == 1:
+                return [Source(title="Generic guide", url="https://example.com/game", evidence="Game overview")]
+            return [
+                Source(
+                    title="Translated Entity 35",
+                    url="https://example.com/entity-35",
+                    evidence="Translated Entity 35 exact instructions",
+                )
+            ]
+
+    class RefinementLLM:
+        async def refine_search_plan(self, *, request, plan, sources, history, game_resolution=None):
+            return SearchPlan(
+                intent=plan.intent,
+                aliases=["Translated Entity 35"],
+                queries=[{"source_type": "wiki", "query": "Translated Entity 35 exact instructions"}],
+            )
+
+    search_provider = StagedSearchProvider()
+    agent = QuestAgent(search_provider=search_provider, llm=RefinementLLM(), knowledge=EmptyKnowledge())
+    request = ChatRequest(game="Unknown Niche Game", question="如何进入35号区域？")
+    resolution = GameResolution(
+        input_name=request.game,
+        confirmed_name=request.game,
+        aliases=[request.game],
+        confidence=0.8,
+    )
+
+    sources, plan, refined = await agent._retrieve_with_refinement(
+        request=request,
+        history=[],
+        plan=SearchPlan(queries=[{"source_type": "web", "query": request.question}]),
+        game_resolution=resolution,
+    )
+
+    assert refined is True
+    assert len(search_provider.plans) == 2
+    assert "Translated Entity 35" in plan.aliases
+    assert sources[0].title == "Translated Entity 35"
+
+
 def test_patch_answers_require_dated_official_evidence() -> None:
     request = ChatRequest(game="Elden Ring", question="Malenia patch 改了什么？")
     plan = SearchPlan(intent="patch")
@@ -1285,51 +1337,109 @@ def test_fallback_search_plan_normalizes_smart_apostrophe_in_entity() -> None:
     assert all("s Rest" != query.query for query in plan.queries)
 
 
-def test_numbered_room_is_preserved_as_search_entity() -> None:
-    from query_tokens import question_relevance_tokens
+def test_exact_identifiers_are_preserved_without_domain_rules() -> None:
+    from query_tokens import exact_identifiers, question_relevance_tokens
 
+    question = "如何进入35号房，并确认3F和v2.01的差异？"
+
+    assert exact_identifiers(question) == ["35", "3f", "v2.01"]
+    assert {"35", "3f", "v2.01"}.issubset(question_relevance_tokens(question))
+
+
+def test_chinese_fallback_keeps_full_question_instead_of_guessing_entity() -> None:
     question = "我怎么样才能进入35号房"
     plan = GuideLLM._fallback_search_plan(question=question)
 
-    assert "35号房" in question_relevance_tokens(question)
-    assert "35" in question_relevance_tokens(question)
-    assert plan.aliases == ["35号房"]
-    assert any("35号房" in query.query for query in plan.queries)
+    assert plan.aliases == []
+    assert all("35" in query.query for query in plan.queries)
+    assert any(question in query.query for query in plan.queries)
 
 
-def test_role_win_scenario_uses_mechanic_search_terms() -> None:
-    from query_tokens import question_relevance_tokens
+def test_refinement_plan_preserves_identifiers_and_changes_query() -> None:
+    content = json.dumps(
+        {
+            "intent": "general",
+            "aliases": ["translated entity"],
+            "queries": [{"source_type": "wiki", "query": "translated entity walkthrough"}],
+            "missing_info": [],
+        }
+    )
 
-    question = "当我玩鸽子时，如果我已经感染了其它所有人，只有一个没被感染的人最后被票出去了，谁会获胜"
-    plan = GuideLLM._fallback_search_plan(question=question)
+    plan = GuideLLM._parse_refinement_plan(
+        content,
+        question="如何打开区域 B2 的 35 号门？",
+        intent="general",
+        attempted_queries=["如何打开区域 B2 的 35 号门"],
+    )
 
-    assert plan.intent == "game_mechanic"
-    assert "鸽子" in plan.aliases[0]
-    assert "感染" in plan.aliases[0]
-    assert any("win condition" in query.query for query in plan.queries)
-    assert any("voted out" in query.query for query in plan.queries)
-    assert {"infect", "voted", "win"}.issubset(question_relevance_tokens(question))
-
-
-def test_search_adds_english_aliases_for_numbered_rooms() -> None:
-    provider = TavilySearchProvider(client=FakeSearchClient())
-    plan = GuideLLM._fallback_search_plan(question="我怎么样才能进入35号房")
-
-    queries = provider._build_search_queries(game="Look Outside", question="我怎么样才能进入35号房", plan=plan)
-
-    assert any("Apartment 35" in query for query, _source in queries)
+    assert plan is not None
+    assert plan.aliases == ["translated entity"]
+    assert "b2" in plan.queries[0].query.lower()
+    assert "35" in plan.queries[0].query
 
 
-def test_search_adds_cross_language_semantics_for_win_scenario() -> None:
-    provider = TavilySearchProvider(client=FakeSearchClient())
-    question = "鸽子感染了其他人，最后未感染的人被票出，谁会获胜？"
-    plan = GuideLLM._fallback_search_plan(question=question)
+def test_refinement_prompt_has_no_case_specific_vocabulary() -> None:
+    from guide_prompts import search_refinement_system_prompt
 
-    queries = provider._build_search_queries(game="Goose Goose Duck", question=question, plan=plan)
+    prompt = search_refinement_system_prompt().lower()
 
-    assert queries[0][0].startswith("Goose Goose Duck role win condition priority")
-    assert "infection infect all living players" in queries[0][0]
-    assert "last uninfected voted out elimination" in queries[0][0]
+    assert "exact identifiers" in prompt
+    assert "materially different" in prompt
+    assert "apartment 35" not in prompt
+    assert "pigeon" not in prompt
+
+
+async def test_refinement_is_skipped_when_first_pass_has_direct_evidence() -> None:
+    class UnexpectedProvider:
+        async def complete(self, **kwargs):
+            raise AssertionError("model refinement should not run")
+
+    llm = GuideLLM(provider=UnexpectedProvider())
+    request = ChatRequest(game="Niche Game", question="Artifact ZX-17 有什么用？")
+    plan = SearchPlan(intent="item_usage", aliases=["Artifact ZX-17"])
+    sources = [
+        Source(
+            title="Artifact ZX-17",
+            url="https://example.com/zx-17",
+            evidence="Artifact ZX-17 changes the gate state.",
+        )
+    ]
+
+    refined = await llm.refine_search_plan(request=request, plan=plan, sources=sources)
+
+    assert refined is None
+
+
+async def test_refinement_uses_first_pass_gap_and_returns_one_query() -> None:
+    class RefinementProvider:
+        def __init__(self):
+            self.calls = []
+
+        async def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            return json.dumps(
+                {
+                    "intent": "general",
+                    "aliases": ["Translated Gate"],
+                    "queries": [{"source_type": "wiki", "query": "Translated Gate access requirements"}],
+                    "missing_info": [],
+                }
+            )
+
+    provider = RefinementProvider()
+    llm = GuideLLM(provider=provider)
+    request = ChatRequest(game="Niche Game", question="如何打开 B2 区域的35号门？")
+    initial = SearchPlan(queries=[{"source_type": "web", "query": request.question}])
+    sources = [Source(title="Niche Game guide", url="https://example.com/guide", evidence="General overview")]
+
+    refined = await llm.refine_search_plan(request=request, plan=initial, sources=sources)
+
+    assert len(provider.calls) == 1
+    assert refined is not None
+    assert len(refined.queries) == 1
+    assert "b2" in refined.queries[0].query.lower()
+    assert "35" in refined.queries[0].query
+    assert request.question in provider.calls[0]["user"]
 
 
 def test_contextual_search_question_merges_short_followup() -> None:
@@ -1384,6 +1494,9 @@ class ContextCapturingLLM:
     async def answer(self, *, request, sources, plan, history, game_resolution=None):
         self.answer_history = history
         return "带上下文回答"
+
+    async def refine_search_plan(self, *, request, plan, sources, history, game_resolution=None):
+        return None
 
     async def improve_answer(self, *, request, sources, answer, plan, history, game_resolution=None):
         return answer
