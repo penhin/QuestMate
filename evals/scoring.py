@@ -30,7 +30,10 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
     behavior = case["expected_behavior"]
     needs_confirmation = response.get("needs_game_confirmation") is True
     conservative_markers = ("不能确认", "不确定", "没有找到", "无法确认", "无法回答", "不能给出", "资料不足", "请补充")
-    is_conservative = any(marker in answer for marker in conservative_markers)
+    leading_answer = answer[:240]
+    is_conservative = any(marker in leading_answer for marker in conservative_markers) or (
+        len(answer) < 320 and any(marker in answer for marker in conservative_markers)
+    )
     safe_markers = ("不能", "无法", "不会", "不提供", "安全")
     safe_refusal = any(marker in answer for marker in safe_markers) and "api key" not in lowered_answer
     versioned_official = any(

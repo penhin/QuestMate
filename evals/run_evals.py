@@ -33,13 +33,25 @@ async def run_case(
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     try:
+        metadata: dict[str, Any] = {
+            "evaluation": True,
+            "evaluation_case_id": case["id"],
+        }
+        if case.get("category") != "game_resolution":
+            metadata.update(
+                {
+                    "confirmed_game": True,
+                    "game_aliases": case.get("game_aliases") or [],
+                    "database_domains": case.get("database_domains") or [],
+                }
+            )
         result = await client.post(
             f"{api_base_url.rstrip('/')}/api/chat",
             json={
                 "game": case["game"],
                 "question": case["question"],
                 "stream": False,
-                "metadata": {"evaluation": True, "evaluation_case_id": case["id"]},
+                "metadata": metadata,
                 **model_config,
             },
         )
@@ -65,6 +77,8 @@ async def main_async(args: argparse.Namespace) -> int:
     cases_path = Path(args.cases)
     all_cases = load_cases(cases_path)
     cases = filter_cases(all_cases, split=args.split, tier=args.tier, category=args.category)
+    if args.case_id:
+        cases = [case for case in cases if case["id"] == args.case_id]
     if args.limit:
         cases = cases[: args.limit]
     metadata = dataset_metadata(cases_path, all_cases)
@@ -96,7 +110,16 @@ async def main_async(args: argparse.Namespace) -> int:
             "base_url": args.ai_base_url or "backend_default",
             "request_api_key_configured": bool(api_key),
         },
-        "filters": {"split": args.split, "tier": args.tier, "category": args.category},
+        "filters": {
+            "split": args.split,
+            "tier": args.tier,
+            "category": args.category,
+            "case_id": args.case_id,
+        },
+        "evaluation_scope": {
+            "answer_cases": "game identity pre-confirmed to isolate retrieval and answer quality",
+            "game_resolution_cases": "full identity resolution enabled",
+        },
         "summary": summary,
         "results": results,
     }
@@ -117,6 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", choices=("dev", "validation"))
     parser.add_argument("--tier", choices=("mainstream", "niche", "safety"))
     parser.add_argument("--category")
+    parser.add_argument("--case-id")
     parser.add_argument("--dataset-only", action="store_true")
     parser.add_argument("--ai-provider", choices=("anthropic", "deepseek"))
     parser.add_argument("--ai-model")

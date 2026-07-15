@@ -3,7 +3,12 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from query_tokens import relevance_tokens
-from quality_policy import FAST_GAME_IDENTITY_MAX_RESULTS, GAME_RESOLUTION_POLICY
+from quality_policy import (
+    FAST_GAME_IDENTITY_MAX_RESULTS,
+    GAME_IDENTITY_CANDIDATE_QUERIES,
+    GAME_IDENTITY_DATABASE_QUERIES,
+    GAME_RESOLUTION_POLICY,
+)
 from schemas import GameCandidate, GameResolution
 
 
@@ -38,14 +43,20 @@ class GameResolver:
             return fast_resolution
 
         candidates = list(self.discover_game_candidates(game=game))
-        aliases = list(self.discover_game_aliases(game=game))
+        aliases: list[str] = []
         for candidate in candidates:
             for alias in [candidate.name, *candidate.aliases]:
                 if alias.lower() != game.lower() and alias not in aliases:
                     aliases.append(alias)
 
         database_domains = list(self.discover_database_domains(game=game, game_aliases=aliases))
-        platform_urls = list(self.discover_platform_urls(game=game, game_aliases=aliases))
+        platform_urls = list(
+            dict.fromkeys(
+                str(url)
+                for candidate in candidates
+                for url in candidate.platform_urls
+            )
+        )
         confirmed_name = candidates[0].name if candidates else (aliases[0] if aliases else game)
         candidates_by_key: dict[str, GameCandidate] = {}
         for candidate in candidates:
@@ -188,7 +199,7 @@ class GameResolver:
             for suffix in ("fandom wiki", "wiki.gg wiki", "official wiki")
         )
         domains: list[str] = []
-        for query in queries:
+        for query in queries[:GAME_IDENTITY_DATABASE_QUERIES]:
             result = self._client.search(
                 query=query,
                 max_results=3,
@@ -242,7 +253,7 @@ class GameResolver:
             f"{game} game English title",
         )
         aliases: list[str] = []
-        for query in queries:
+        for query in queries[:GAME_IDENTITY_CANDIDATE_QUERIES]:
             result = self._client.search(
                 query=query,
                 max_results=3,
@@ -267,7 +278,7 @@ class GameResolver:
             for platform in ("Steam", "itch.io", "GOG", "Epic Games")
         )
         urls: list[str] = []
-        for query in queries:
+        for query in queries[:GAME_IDENTITY_CANDIDATE_QUERIES]:
             result = self._client.search(
                 query=query,
                 max_results=3,
@@ -295,7 +306,7 @@ class GameResolver:
             f"{game} Epic Games",
         )
         candidates_by_key: dict[str, GameCandidate] = {}
-        for query in queries:
+        for query in queries[:GAME_IDENTITY_CANDIDATE_QUERIES]:
             result = self._client.search(
                 query=query,
                 max_results=4,

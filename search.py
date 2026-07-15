@@ -340,8 +340,8 @@ class TavilySearchProvider:
         results = await self._fetch_search_results(search_queries, per_query_results)
         for (search_query, search_source), result in zip(search_queries, results, strict=True):
             for item in result.get("results", []):
-                url = item.get("url")
-                if not url:
+                url = str(item.get("url") or "").strip()
+                if not url.startswith(("https://", "http://")):
                     continue
                 if search_source.source_type == "wiki":
                     result_domain = urlparse(str(url)).netloc.lower()

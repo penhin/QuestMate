@@ -1,0 +1,50 @@
+{
+  "baseline_id": "deepseek-chat-niche-validation-2026-07-16",
+  "dataset_sha256": "865ab2241c2489a8f63eddf678994b15cd4329ead61b4ddec7b89b08aaf674f5",
+  "model": {
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "base_url": "https://api.deepseek.com"
+  },
+  "scope": {
+    "split": "validation",
+    "tier": "niche",
+    "game_identity": "pre-confirmed",
+    "case_count": 9
+  },
+  "summary": {
+    "passed": 3,
+    "pass_rate": 0.3333,
+    "errors": 0,
+    "p50_latency_ms": 10102,
+    "p95_latency_ms": 22830,
+    "average_source_count": 1.67,
+    "tavily_upstream_calls_observed": 34,
+    "dimension_pass_rates": {
+      "answer_present": 1.0,
+      "behavior_pass": 0.7778,
+      "source_type_pass": 0.3333,
+      "required_terms_pass": 1.0,
+      "forbidden_terms_pass": 1.0,
+      "source_urls_valid": 1.0,
+      "version_policy_pass": 1.0,
+      "citation_pass": 0.7778
+    }
+  },
+  "cases": [
+    {"id": "lunacid-white-vhs", "passed": true, "source_count": 3, "failed_dimensions": []},
+    {"id": "look-outside-sewer-key", "passed": false, "source_count": 2, "failed_dimensions": ["source_type_pass"]},
+    {"id": "felvidek-zvolen", "passed": false, "source_count": 0, "failed_dimensions": ["behavior_pass", "source_type_pass", "citation_pass"]},
+    {"id": "nine-sols-tao-fruit", "passed": false, "source_count": 2, "failed_dimensions": ["source_type_pass"]},
+    {"id": "animal-well-kangaroo", "passed": true, "source_count": 2, "failed_dimensions": []},
+    {"id": "void-stranger-rod", "passed": false, "source_count": 0, "failed_dimensions": ["behavior_pass", "source_type_pass", "citation_pass"]},
+    {"id": "la-mulana-2-mantra", "passed": false, "source_count": 2, "failed_dimensions": ["source_type_pass"]},
+    {"id": "crystal-project-quintar", "passed": true, "source_count": 2, "failed_dimensions": []},
+    {"id": "unsighted-anima", "passed": false, "source_count": 2, "failed_dimensions": ["source_type_pass"]}
+  ],
+  "notes": [
+    "API Key and full model answers are intentionally excluded.",
+    "Four failures had useful community evidence but did not meet the expected wiki source type.",
+    "Felvidek and Void Stranger returned no eligible sources; retrieval coverage is the primary bottleneck."
+  ]
+}

@@ -187,7 +187,7 @@ class QuestAgent:
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
         existing = state.get("game_resolution")
-        if existing and (existing.is_confirmed or existing.candidates):
+        if existing is not None:
             return state
         game_resolution = await self.search_provider.resolve_game(request.game, question=request.question)
         return {**state, "game_resolution": game_resolution}

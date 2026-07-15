@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "ready_for_first_model_run",
+  "status": "partial_performance_baseline_recorded",
   "dataset": {
     "sha256": "865ab2241c2489a8f63eddf678994b15cd4329ead61b4ddec7b89b08aaf674f5",
     "case_count": 50,
@@ -31,5 +31,8 @@
     "dev_split": "用于日常定位和调参",
     "validation_split": "只用于回归确认，不针对单个失败案例调提示词",
     "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定"
-  }
+  },
+  "observed_baselines": [
+    "baselines/deepseek-chat-niche-validation-2026-07-16.json"
+  ]
 }

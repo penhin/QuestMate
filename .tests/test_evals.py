@@ -89,6 +89,21 @@ def test_evaluation_requires_answer_terms_and_valid_citations() -> None:
     assert passing["passed"] is True
 
 
+def test_answer_with_late_uncertainty_note_is_not_a_conservative_refusal() -> None:
+    case = {
+        "id": "qualified-answer",
+        "expected_behavior": "answer",
+        "expected_source_types": ["wiki"],
+        "required_terms": ["mantra"],
+    }
+    response = {
+        "answer": "Mantra 系统需要先取得石板。[1]" + "具体步骤。" * 60 + "仍有少量不确定部分。",
+        "sources": [{"title": "Mantra", "url": "https://example.com/mantra", "source_type": "wiki"}],
+    }
+
+    assert evaluate_case(case, response)["behavior_pass"] is True
+
+
 def test_summary_reports_quality_dimensions_and_segments() -> None:
     results = [
         {"case": {"category": "boss", "split": "dev", "tier": "mainstream", "difficulty": "standard"}, "evaluation": {"passed": True, "answer_present": True, "source_count": 2}, "latency_ms": 100},

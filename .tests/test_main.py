@@ -87,6 +87,18 @@ class CountingEmptySearchClient:
         return {"results": []}
 
 
+class RelativeUrlSearchClient:
+    def search(self, **kwargs):
+        return {
+            "results": [{
+                "title": "Redirect result",
+                "url": "/goto?url=invalid",
+                "content": "Crystal Project Golden Quintar breeding guide.",
+                "score": 0.9,
+            }]
+        }
+
+
 class DirectWikiClient:
     def __init__(self):
         self.queries: list[tuple[str, str]] = []
@@ -127,6 +139,19 @@ async def test_tavily_identity_search_is_cached() -> None:
     assert provider._client.cache_hits == 1
 
 
+async def test_game_identity_fallback_has_a_hard_query_cap() -> None:
+    client = CountingEmptySearchClient()
+    provider = TavilySearchProvider(
+        settings=Settings(tavily_search_cache_ttl_seconds=0),
+        client=client,
+    )
+
+    resolution = await provider.resolve_game("Unknown Niche Game")
+
+    assert resolution.is_confirmed is False
+    assert len(client.queries) == 3
+
+
 async def test_progressive_search_caps_paid_queries() -> None:
     client = CountingEmptySearchClient()
     settings = Settings(
@@ -158,6 +183,27 @@ async def test_progressive_search_caps_paid_queries() -> None:
 
     assert sources == []
     assert len(client.queries) == 4
+
+
+async def test_search_skips_relative_result_urls() -> None:
+    provider = TavilySearchProvider(client=RelativeUrlSearchClient())
+
+    sources = await provider.search(
+        "Golden Quintar 怎么培育？",
+        "Crystal Project",
+        plan=SearchPlan(
+            intent="game_mechanic",
+            aliases=["Golden Quintar"],
+            queries=[{"source_type": "wiki", "query": "Golden Quintar breeding"}],
+        ),
+        game_resolution=GameResolution(
+            input_name="Crystal Project",
+            confirmed_name="Crystal Project",
+            confidence=0.8,
+        ),
+    )
+
+    assert sources == []
 
 
 async def test_direct_mediawiki_hit_skips_paid_search() -> None:
