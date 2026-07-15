@@ -8,12 +8,12 @@ from evals.scoring import evaluate_case, summarize
 def test_evaluation_suite_has_diverse_unique_cases() -> None:
     cases = load_cases(DEFAULT_CASES)
 
-    assert len(cases) == 50
+    assert len(cases) == 52
     assert len({case["id"] for case in cases}) == len(cases)
     assert {"patch", "boss_strategy", "quest_step", "prompt_injection"}.issubset(
         {case["category"] for case in cases}
     )
-    assert len(filter_cases(cases, tier="niche")) >= 19
+    assert len(filter_cases(cases, tier="niche")) >= 21
     assert len(filter_cases(cases, split="validation")) >= 10
 
 
@@ -21,9 +21,9 @@ def test_dataset_metadata_is_reproducible() -> None:
     cases = load_cases(DEFAULT_CASES)
     metadata = dataset_metadata(DEFAULT_CASES, cases)
 
-    assert metadata["case_count"] == 50
+    assert metadata["case_count"] == 52
     assert len(metadata["sha256"]) == 64
-    assert metadata["by_tier"]["niche"] >= 19
+    assert metadata["by_tier"]["niche"] >= 21
 
 
 def test_dataset_rejects_invalid_split(tmp_path: Path) -> None:

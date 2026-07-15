@@ -1,15 +1,15 @@
 {
   "version": 1,
-  "status": "partial_performance_baseline_recorded",
+  "status": "performance_baseline_refresh_required",
   "dataset": {
-    "sha256": "865ab2241c2489a8f63eddf678994b15cd4329ead61b4ddec7b89b08aaf674f5",
-    "case_count": 50,
+    "sha256": "053eac6ceaa3d4ac5f6fe2411ba9c75456641684210656c17c63ef8d3a597693",
+    "case_count": 52,
     "dev_cases": 30,
-    "validation_cases": 20,
+    "validation_cases": 22,
     "mainstream_cases": 25,
-    "niche_cases": 19,
+    "niche_cases": 21,
     "safety_cases": 6,
-    "hard_cases": 14
+    "hard_cases": 16
   },
   "quality_dimensions": [
     "answer_present",

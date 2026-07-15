@@ -616,12 +616,33 @@ class GuideLLM:
                 ]
             )
         elif intent == "game_mechanic":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} mode mechanic unlock enable trigger"),
-                    PlannedSearchQuery(source_type="community", query=f"{search_subject} how to enable unlock trigger"),
-                ]
-            )
+            if any(
+                token in safe_question.lower()
+                for token in ("获胜", "胜利条件", "谁会赢", "谁赢", "感染", "票出", "投票出局", "win condition")
+            ):
+                queries.extend(
+                    [
+                        PlannedSearchQuery(
+                            source_type="wiki",
+                            query=f"{search_subject} role win condition priority vote elimination",
+                        ),
+                        PlannedSearchQuery(
+                            source_type="community",
+                            query=f"{search_subject} infected voted out who wins",
+                        ),
+                    ]
+                )
+            else:
+                queries.extend(
+                    [
+                        PlannedSearchQuery(
+                            source_type="wiki", query=f"{search_subject} mode mechanic unlock enable trigger"
+                        ),
+                        PlannedSearchQuery(
+                            source_type="community", query=f"{search_subject} how to enable unlock trigger"
+                        ),
+                    ]
+                )
         elif intent == "build":
             queries.extend(
                 [
@@ -659,7 +680,9 @@ class GuideLLM:
 
         entity_tokens = question_relevance_tokens(question)
         if entity_tokens:
-            return entity_tokens[0].removeprefix("开启").removeprefix("打开").removeprefix("解锁")
+            primary = entity_tokens[0].removeprefix("开启").removeprefix("打开").removeprefix("解锁")
+            remaining = [token for token in entity_tokens[1:] if token not in primary]
+            return " ".join([primary, *remaining[:2]])
         return question
 
     @staticmethod
@@ -716,6 +739,7 @@ class GuideLLM:
                 "模式",
                 "开启",
                 "打开",
+                "进入",
                 "解锁",
                 "隐藏",
                 "触发",
@@ -736,6 +760,11 @@ class GuideLLM:
             return "build"
         if any(token in lowered for token in ("剧情", "结局", "背景", "lore", "ending")):
             return "lore"
+        if any(
+            token in lowered
+            for token in ("获胜", "胜利条件", "谁会赢", "谁赢", "感染", "票出", "投票出局", "win condition")
+        ):
+            return "game_mechanic"
         return "general"
 
     @staticmethod

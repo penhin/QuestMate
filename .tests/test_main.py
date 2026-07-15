@@ -1285,6 +1285,53 @@ def test_fallback_search_plan_normalizes_smart_apostrophe_in_entity() -> None:
     assert all("s Rest" != query.query for query in plan.queries)
 
 
+def test_numbered_room_is_preserved_as_search_entity() -> None:
+    from query_tokens import question_relevance_tokens
+
+    question = "我怎么样才能进入35号房"
+    plan = GuideLLM._fallback_search_plan(question=question)
+
+    assert "35号房" in question_relevance_tokens(question)
+    assert "35" in question_relevance_tokens(question)
+    assert plan.aliases == ["35号房"]
+    assert any("35号房" in query.query for query in plan.queries)
+
+
+def test_role_win_scenario_uses_mechanic_search_terms() -> None:
+    from query_tokens import question_relevance_tokens
+
+    question = "当我玩鸽子时，如果我已经感染了其它所有人，只有一个没被感染的人最后被票出去了，谁会获胜"
+    plan = GuideLLM._fallback_search_plan(question=question)
+
+    assert plan.intent == "game_mechanic"
+    assert "鸽子" in plan.aliases[0]
+    assert "感染" in plan.aliases[0]
+    assert any("win condition" in query.query for query in plan.queries)
+    assert any("voted out" in query.query for query in plan.queries)
+    assert {"infect", "voted", "win"}.issubset(question_relevance_tokens(question))
+
+
+def test_search_adds_english_aliases_for_numbered_rooms() -> None:
+    provider = TavilySearchProvider(client=FakeSearchClient())
+    plan = GuideLLM._fallback_search_plan(question="我怎么样才能进入35号房")
+
+    queries = provider._build_search_queries(game="Look Outside", question="我怎么样才能进入35号房", plan=plan)
+
+    assert any("Apartment 35" in query for query, _source in queries)
+
+
+def test_search_adds_cross_language_semantics_for_win_scenario() -> None:
+    provider = TavilySearchProvider(client=FakeSearchClient())
+    question = "鸽子感染了其他人，最后未感染的人被票出，谁会获胜？"
+    plan = GuideLLM._fallback_search_plan(question=question)
+
+    queries = provider._build_search_queries(game="Goose Goose Duck", question=question, plan=plan)
+
+    assert queries[0][0].startswith("Goose Goose Duck role win condition priority")
+    assert "infection infect all living players" in queries[0][0]
+    assert "last uninfected voted out elimination" in queries[0][0]
+
+
 def test_contextual_search_question_merges_short_followup() -> None:
     request = ChatRequest(game="Look Outside", question="就是 Look Outside")
     history = [
