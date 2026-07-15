@@ -42,9 +42,9 @@ class QuestAgent:
         llm: GuideLLM | None = None,
         knowledge: KnowledgeStore | None = None,
     ) -> None:
-        self.search_provider = search_provider or TavilySearchProvider()
-        self.llm = llm or GuideLLM()
         self.knowledge = knowledge or knowledge_store
+        self.search_provider = search_provider or TavilySearchProvider(content_index=self.knowledge)
+        self.llm = llm or GuideLLM()
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -291,11 +291,20 @@ class QuestAgent:
             else:
                 source_groups.append(result)
         query = f"{question} {' '.join(plan.aliases)}".strip()
-        return self._rank_sources(
+        selected = self._rank_sources(
             sources=[source for group in source_groups for source in group],
             query=query,
             intent=plan.intent,
         )
+        logger.info(
+            "retrieval.completed",
+            game=game,
+            intent=plan.intent,
+            dimensions={dimension: len(group) for dimension, group in zip(dimensions, source_groups, strict=True)},
+            selected_count=len(selected),
+            selected_source_types=[source.source_type for source in selected],
+        )
+        return selected
 
     @staticmethod
     def _merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:

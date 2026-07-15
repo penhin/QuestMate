@@ -131,50 +131,50 @@ class KnowledgeStore:
         )
         try:
             extracted_title, content, extracted_published_at = await self._fetch_and_extract(url)
-            chunks = chunk_text(content)
-            if not chunks:
-                raise ValueError("No extractable article content found")
-            vectors = await self.embeddings.embed(chunks)
-            now = datetime.now(timezone.utc)
-            async with self.database.sessionmaker() as session:
-                async with session.begin():
-                    await session.execute(delete(knowledge_chunks).where(knowledge_chunks.c.document_id == document_id))
-                    await session.execute(
-                        insert(knowledge_chunks),
-                        [
-                            {
-                                "id": str(uuid4()),
-                                "document_id": document_id,
-                                "chunk_index": index,
-                                "content": chunk,
-                                "embedding": vector,
-                                "created_at": now,
-                            }
-                            for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True))
-                        ],
-                    )
-                    await session.execute(
-                        update(knowledge_documents)
-                        .where(knowledge_documents.c.id == document_id)
-                        .values(
-                            title=title or extracted_title,
-                            status="ready",
-                            error=None,
-                            chunk_count=len(chunks),
-                            published_at=published_at or extracted_published_at,
-                            fetched_at=now,
-                            updated_at=now,
-                        )
-                    )
-            return {"status": "ready", "document_id": document_id, "chunk_count": len(chunks)}
+            return await self._persist_content(
+                document_id=document_id,
+                content=content,
+                title=title or extracted_title,
+                published_at=published_at or extracted_published_at,
+            )
         except Exception as exc:
-            async with self.database.sessionmaker() as session:
-                async with session.begin():
-                    await session.execute(
-                        update(knowledge_documents)
-                        .where(knowledge_documents.c.id == document_id)
-                        .values(status="failed", error=str(exc)[:2000], updated_at=datetime.now(timezone.utc))
-                    )
+            await self._mark_failed(document_id=document_id, error=exc)
+            raise
+
+    async def index_content(
+        self,
+        *,
+        url: str,
+        game: str,
+        content: str,
+        title: str | None = None,
+        source_type: str = "wiki",
+        game_version: str | None = None,
+        published_at: datetime | None = None,
+        skip_if_fresh: bool = True,
+    ) -> dict[str, Any]:
+        """Persist content already fetched by a structured source adapter."""
+        await self.init_schema()
+        if skip_if_fresh and await self._is_fresh(url):
+            return {"status": "cached", "url": url}
+        document_id = await self._upsert_document(
+            url=url,
+            game=game,
+            title=title,
+            source_type=source_type,
+            game_version=game_version,
+            published_at=published_at,
+            status="indexing",
+        )
+        try:
+            return await self._persist_content(
+                document_id=document_id,
+                content=content,
+                title=title,
+                published_at=published_at,
+            )
+        except Exception as exc:
+            await self._mark_failed(document_id=document_id, error=exc)
             raise
 
     async def retrieve(self, *, game: str, query: str, limit: int | None = None) -> list[Source]:
@@ -222,6 +222,75 @@ class KnowledgeStore:
                 document_id = str(uuid4())
                 await session.execute(insert(knowledge_documents).values(id=document_id, url=url, game=game, title=title, source_type=source_type, game_version=game_version, published_at=published_at, status=status, error=None, chunk_count=0, created_at=now, updated_at=now))
                 return document_id
+
+    async def _persist_content(
+        self,
+        *,
+        document_id: str,
+        content: str,
+        title: str | None,
+        published_at: datetime | None,
+    ) -> dict[str, Any]:
+        chunks = chunk_text(content)
+        if not chunks:
+            raise ValueError("No extractable article content found")
+        vectors = await self.embeddings.embed(chunks)
+        now = datetime.now(timezone.utc)
+        async with self.database.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(delete(knowledge_chunks).where(knowledge_chunks.c.document_id == document_id))
+                await session.execute(
+                    insert(knowledge_chunks),
+                    [
+                        {
+                            "id": str(uuid4()),
+                            "document_id": document_id,
+                            "chunk_index": index,
+                            "content": chunk,
+                            "embedding": vector,
+                            "created_at": now,
+                        }
+                        for index, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True))
+                    ],
+                )
+                await session.execute(
+                    update(knowledge_documents)
+                    .where(knowledge_documents.c.id == document_id)
+                    .values(
+                        title=title,
+                        status="ready",
+                        error=None,
+                        chunk_count=len(chunks),
+                        published_at=published_at,
+                        fetched_at=now,
+                        updated_at=now,
+                    )
+                )
+        return {"status": "ready", "document_id": document_id, "chunk_count": len(chunks)}
+
+    async def _is_fresh(self, url: str) -> bool:
+        async with self.database.sessionmaker() as session:
+            row = (
+                await session.execute(
+                    select(
+                        knowledge_documents.c.status,
+                        knowledge_documents.c.fetched_at,
+                    ).where(knowledge_documents.c.url == url)
+                )
+            ).one_or_none()
+        if row is None or row.status != "ready" or row.fetched_at is None:
+            return False
+        age = datetime.now(timezone.utc) - row.fetched_at
+        return age.total_seconds() < self.settings.knowledge_auto_index_ttl_seconds
+
+    async def _mark_failed(self, *, document_id: str, error: Exception) -> None:
+        async with self.database.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(
+                    update(knowledge_documents)
+                    .where(knowledge_documents.c.id == document_id)
+                    .values(status="failed", error=str(error)[:2000], updated_at=datetime.now(timezone.utc))
+                )
 
     async def _fetch_and_extract(self, url: str) -> tuple[str | None, str, datetime | None]:
         async with httpx.AsyncClient(

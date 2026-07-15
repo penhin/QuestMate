@@ -9,6 +9,8 @@ SCORE_DIMENSIONS = (
     "answer_present",
     "behavior_pass",
     "source_type_pass",
+    "source_recall_pass",
+    "evidence_recall_pass",
     "required_terms_pass",
     "forbidden_terms_pass",
     "source_urls_valid",
@@ -56,6 +58,27 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
     citations_required = bool(case.get("require_citations")) or behavior == "answer"
     citation_pass = citations_valid and (not citations_required or bool(citation_indexes))
     source_pass = not expected_types or bool(expected_types & source_types)
+    source_urls = [
+        str(source.get("url") or "").casefold().rstrip("/")
+        for source in sources
+        if isinstance(source, dict)
+    ]
+    expected_source_urls = [
+        str(url).casefold().rstrip("/")
+        for url in case.get("expected_source_urls") or []
+    ]
+    source_recall_pass = not expected_source_urls or any(
+        expected == actual or expected in actual
+        for expected in expected_source_urls
+        for actual in source_urls
+    )
+    evidence_text = " ".join(
+        f"{source.get('title') or ''} {source.get('evidence') or source.get('snippet') or ''}"
+        for source in sources
+        if isinstance(source, dict)
+    ).casefold()
+    evidence_terms = [str(term).casefold() for term in case.get("evidence_terms") or []]
+    evidence_recall_pass = all(term in evidence_text for term in evidence_terms)
     urls_valid = all(
         isinstance(source, dict) and str(source.get("url") or "").startswith(("https://", "http://"))
         for source in sources
@@ -64,6 +87,8 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
         "answer_present": bool(answer),
         "behavior_pass": behavior_pass,
         "source_type_pass": source_pass,
+        "source_recall_pass": source_recall_pass,
+        "evidence_recall_pass": evidence_recall_pass,
         "required_terms_pass": has_required_terms,
         "forbidden_terms_pass": avoids_forbidden_terms,
         "source_urls_valid": urls_valid,

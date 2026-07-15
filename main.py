@@ -15,6 +15,7 @@ from schemas import (
     ChatResponse,
     FeedbackRequest,
     FeedbackResponse,
+    GameResolution,
     KnowledgeDocumentStatus,
     KnowledgeIndexRequest,
     KnowledgeIndexResponse,
@@ -24,6 +25,7 @@ from schemas import (
     SessionsResponse,
 )
 from storage import conversation_store
+from source_registry import game_source_registry
 from tasks import index_url
 from uuid import UUID
 
@@ -38,6 +40,10 @@ def create_app() -> FastAPI:
             await knowledge_store.init_schema()
         except Exception:
             logger.warning("knowledge.schema_unavailable")
+        try:
+            await game_source_registry.init_schema()
+        except Exception:
+            logger.warning("source_registry.schema_unavailable")
         yield
 
     app = FastAPI(title="QuestMate", version="0.1.0", lifespan=lifespan)
@@ -121,6 +127,10 @@ def create_app() -> FastAPI:
         except Exception as exc:
             logger.exception("knowledge.list_failed")
             raise HTTPException(status_code=503, detail="知识库暂不可用") from exc
+
+    @app.get("/api/source-registry", response_model=list[GameResolution])
+    async def list_source_registry() -> list[GameResolution]:
+        return await game_source_registry.list_resolutions()
 
     return app
 

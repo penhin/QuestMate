@@ -31,6 +31,7 @@ from query_tokens import question_relevance_tokens, relevance_tokens
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
 from mediawiki_client import MediaWikiClient
 from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
+from source_registry import GameSourceRegistry, game_source_registry
 
 
 logger = structlog.get_logger()
@@ -51,6 +52,11 @@ class SearchProvider(Protocol):
         ...
 
 
+class ContentIndex(Protocol):
+    async def index_content(self, **kwargs: Any) -> dict[str, Any]:
+        ...
+
+
 class TavilySearchProvider:
     search_noise_tokens = SEARCH_NOISE_TOKENS
     sources = SOURCE_POLICIES
@@ -68,6 +74,8 @@ class TavilySearchProvider:
         settings: Settings | None = None,
         client: Any | None = None,
         mediawiki_client: Any | None = None,
+        source_registry: GameSourceRegistry | None = None,
+        content_index: ContentIndex | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         upstream_client = client or (
@@ -89,6 +97,10 @@ class TavilySearchProvider:
         if upstream_client is not None:
             self._client = CachedSearchClient(upstream_client, shared_cache)
         self._game_resolver = GameResolver(self._client) if self._client is not None else None
+        self._source_registry = source_registry if source_registry is not None else (
+            game_source_registry if client is None else None
+        )
+        self._content_index = content_index
         self._mediawiki_client = mediawiki_client
         if self._mediawiki_client is None and client is None and self.settings.mediawiki_direct_search:
             self._mediawiki_client = MediaWikiClient()
@@ -242,6 +254,7 @@ class TavilySearchProvider:
             cache_key = f"mediawiki:{domain}:{wiki_query.casefold()}:{max_results}"
             cached = self._mediawiki_cache.get(cache_key)
             if cached is not None:
+                cached["_domain"] = domain
                 return cached
             try:
                 result = await asyncio.wait_for(
@@ -255,12 +268,21 @@ class TavilySearchProvider:
                 )
             except Exception:
                 return {"results": []}
+            result["_domain"] = domain
             self._mediawiki_cache.set(cache_key, result)
             return result
 
         results = await asyncio.gather(*(fetch(domain) for domain in wiki_domains))
-        sources_by_url: dict[str, Source] = {}
         search_context = f"{question} {' '.join(aliases)}"
+        expanded_results = await self._expand_mediawiki_results(
+            results=results,
+            search_context=search_context,
+            game=game,
+            game_aliases=game_aliases,
+        )
+        results = [*results, *expanded_results]
+        sources_by_url: dict[str, Source] = {}
+        page_content_by_url: dict[str, str] = {}
         wiki_policy = self.sources["wiki"]
         for result in results:
             for item in result.get("results", []):
@@ -298,15 +320,137 @@ class TavilySearchProvider:
                     game_version=self._extract_game_version(evidence),
                 )
                 sources_by_url[self._canonical_source_key(url)] = source
-        return sorted(
+                page_content_by_url[self._canonical_source_key(url)] = str(item.get("content") or "")
+        ranked_sources = sorted(
             sources_by_url.values(),
             key=lambda source: source.score or 0,
             reverse=True,
+        )
+        await self._auto_index_wiki_pages(
+            game=game,
+            sources=ranked_sources,
+            page_content_by_url=page_content_by_url,
+        )
+        return ranked_sources
+
+    async def _expand_mediawiki_results(
+        self,
+        *,
+        results: list[dict[str, Any]],
+        search_context: str,
+        game: str,
+        game_aliases: list[str],
+    ) -> list[dict[str, Any]]:
+        limit = self.settings.wiki_link_expansion_pages_per_query
+        if limit <= 0 or not hasattr(self._mediawiki_client, "fetch_pages"):
+            return []
+        game_tokens = set(relevance_tokens(" ".join([game, *game_aliases])))
+        query_tokens = [
+            token
+            for token in question_relevance_tokens(search_context)
+            if token not in game_tokens and token not in self.search_noise_tokens
+        ]
+        if not query_tokens:
+            return []
+
+        candidates: list[tuple[int, str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for result in results:
+            domain = str(result.get("_domain") or "")
+            if not domain:
+                continue
+            for item in result.get("results", []):
+                for title in item.get("links") or []:
+                    normalized_title = str(title).strip()
+                    key = (domain, normalized_title.casefold())
+                    if not normalized_title or key in seen:
+                        continue
+                    seen.add(key)
+                    lowered_title = normalized_title.casefold()
+                    score = sum(1 for token in query_tokens if token in lowered_title)
+                    if score:
+                        candidates.append((score, domain, normalized_title))
+        candidates.sort(reverse=True)
+        selected = candidates[:limit]
+        if not selected:
+            return []
+
+        titles_by_domain: dict[str, list[str]] = {}
+        for _score, domain, title in selected:
+            titles_by_domain.setdefault(domain, []).append(title)
+
+        async def fetch_linked(domain: str, titles: list[str]) -> dict[str, Any]:
+            cache_key = f"mediawiki-pages:{domain}:{'|'.join(title.casefold() for title in titles)}"
+            cached = self._mediawiki_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            try:
+                payload = await asyncio.wait_for(
+                    asyncio.to_thread(self._mediawiki_client.fetch_pages, domain=domain, titles=titles),
+                    timeout=self.settings.external_request_timeout_seconds,
+                )
+            except Exception:
+                return {"results": []}
+            payload["_domain"] = domain
+            self._mediawiki_cache.set(cache_key, payload)
+            return payload
+
+        expanded = await asyncio.gather(
+            *(fetch_linked(domain, titles) for domain, titles in titles_by_domain.items())
+        )
+        logger.info(
+            "mediawiki.expanded",
+            selected_links=len(selected),
+            fetched_pages=sum(len(result.get("results", [])) for result in expanded),
+        )
+        return list(expanded)
+
+    async def _auto_index_wiki_pages(
+        self,
+        *,
+        game: str,
+        sources: list[Source],
+        page_content_by_url: dict[str, str],
+    ) -> None:
+        if self._content_index is None or not self.settings.wiki_auto_index_enabled:
+            return
+        selected = sources[: self.settings.wiki_auto_index_pages_per_query]
+        results = await asyncio.gather(
+            *(
+                self._content_index.index_content(
+                    url=str(source.url),
+                    game=game,
+                    content=page_content_by_url.get(self._canonical_source_key(str(source.url)), ""),
+                    title=source.title,
+                    source_type="wiki",
+                    game_version=source.game_version,
+                    published_at=source.published_at,
+                    skip_if_fresh=True,
+                )
+                for source in selected
+            ),
+            return_exceptions=True,
+        )
+        logger.info(
+            "knowledge.wiki_auto_index",
+            game=game,
+            attempted=len(selected),
+            ready=sum(
+                1
+                for result in results
+                if isinstance(result, dict) and result.get("status") in {"ready", "cached"}
+            ),
+            failed=sum(1 for result in results if isinstance(result, BaseException)),
         )
 
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
+        if self._source_registry is not None:
+            cached_resolution = await self._source_registry.get_resolution(game)
+            if cached_resolution is not None and cached_resolution.is_confirmed:
+                logger.info("source_registry.hit", game=game)
+                return cached_resolution
         usage_before = (self._client.upstream_calls, self._client.cache_hits)
         try:
             resolution = await asyncio.wait_for(
@@ -321,6 +465,8 @@ class TavilySearchProvider:
             source_count=len(resolution.platform_urls) + len(resolution.database_domains),
             route="identity",
         )
+        if self._source_registry is not None:
+            await self._source_registry.upsert_resolution(resolution)
         return resolution
 
     async def _collect_sources(

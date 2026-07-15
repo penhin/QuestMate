@@ -115,6 +115,44 @@ class DirectWikiClient:
         }
 
 
+class ExpandingWikiClient:
+    def search(self, *, domain: str, query: str, max_results: int):
+        return {
+            "results": [
+                {
+                    "title": "Area index",
+                    "url": f"https://{domain}/wiki/Area_index",
+                    "content": "Niche Game area overview.",
+                    "links": ["Artifact ZX-17", "Unrelated history"],
+                    "score": 0.8,
+                }
+            ]
+        }
+
+    def fetch_pages(self, *, domain: str, titles: list[str]):
+        assert titles == ["Artifact ZX-17"]
+        return {
+            "results": [
+                {
+                    "title": "Artifact ZX-17",
+                    "url": f"https://{domain}/wiki/Artifact_ZX-17",
+                    "content": "Niche Game Artifact ZX-17 opens the sealed gate.",
+                    "links": [],
+                    "score": 0.9,
+                }
+            ]
+        }
+
+
+class RecordingContentIndex:
+    def __init__(self):
+        self.documents = []
+
+    async def index_content(self, **kwargs):
+        self.documents.append(kwargs)
+        return {"status": "ready", "document_id": "doc", "chunk_count": 1}
+
+
 def test_game_resolver_fast_identity_confirms_niche_game() -> None:
     client = FastIdentitySearchClient()
     resolution = GameResolver(client).resolve(game="Look Outside")
@@ -137,6 +175,51 @@ async def test_tavily_identity_search_is_cached() -> None:
     assert len(client.queries) == 1
     assert provider._client.upstream_calls == 1
     assert provider._client.cache_hits == 1
+
+
+async def test_source_registry_skips_repeated_identity_search() -> None:
+    class CachedRegistry:
+        async def get_resolution(self, game: str):
+            return GameResolution(
+                input_name=game,
+                confirmed_name="Registered Game",
+                aliases=["Registered Alias"],
+                platform_urls=["https://store.steampowered.com/app/1/Registered_Game/"],
+                database_domains=["registered-game.fandom.com"],
+                confidence=0.9,
+            )
+
+        async def upsert_resolution(self, resolution):
+            raise AssertionError("cached resolution should not be rewritten")
+
+    client = CountingEmptySearchClient()
+    provider = TavilySearchProvider(client=client, source_registry=CachedRegistry())
+
+    resolution = await provider.resolve_game("Registered Alias")
+
+    assert resolution.is_confirmed
+    assert resolution.database_domains == ["registered-game.fandom.com"]
+    assert client.queries == []
+
+
+async def test_live_identity_is_saved_to_source_registry() -> None:
+    class EmptyRegistry:
+        def __init__(self):
+            self.saved = []
+
+        async def get_resolution(self, game: str):
+            return None
+
+        async def upsert_resolution(self, resolution):
+            self.saved.append(resolution)
+
+    registry = EmptyRegistry()
+    provider = TavilySearchProvider(client=FastIdentitySearchClient(), source_registry=registry)
+
+    resolution = await provider.resolve_game("Look Outside")
+
+    assert resolution.is_confirmed
+    assert registry.saved == [resolution]
 
 
 async def test_game_identity_fallback_has_a_hard_query_cap() -> None:
@@ -231,6 +314,68 @@ async def test_direct_mediawiki_hit_skips_paid_search() -> None:
     assert [source.title for source in sources] == ["Pavol"]
     assert tavily.queries == []
     assert mediawiki.queries == [("felvidek.fandom.com", "Pavol")]
+
+
+async def test_mediawiki_pages_are_auto_indexed_for_future_questions() -> None:
+    tavily = CountingEmptySearchClient()
+    mediawiki = DirectWikiClient()
+    content_index = RecordingContentIndex()
+    provider = TavilySearchProvider(
+        client=tavily,
+        mediawiki_client=mediawiki,
+        content_index=content_index,
+    )
+    plan = SearchPlan(
+        intent="quest_step",
+        aliases=["Pavol"],
+        queries=[{"source_type": "wiki", "query": "Pavol recruit party"}],
+    )
+
+    await provider.search(
+        "Pavol 怎么加入队伍？",
+        "Felvidek",
+        plan=plan,
+        game_resolution=GameResolution(
+            input_name="Felvidek",
+            confirmed_name="Felvidek",
+            aliases=["Felvidek"],
+            database_domains=["felvidek.fandom.com"],
+            confidence=0.8,
+        ),
+    )
+
+    assert len(content_index.documents) == 1
+    assert content_index.documents[0]["title"] == "Pavol"
+    assert "protagonist" in content_index.documents[0]["content"]
+    assert content_index.documents[0]["skip_if_fresh"] is True
+
+
+async def test_mediawiki_expands_only_question_matching_links() -> None:
+    provider = TavilySearchProvider(
+        client=CountingEmptySearchClient(),
+        mediawiki_client=ExpandingWikiClient(),
+    )
+    plan = SearchPlan(
+        intent="item_usage",
+        aliases=["Artifact ZX-17"],
+        queries=[{"source_type": "wiki", "query": "Artifact ZX-17 use"}],
+    )
+
+    sources = await provider.search(
+        "ZX-17 有什么用？",
+        "Niche Game",
+        plan=plan,
+        game_resolution=GameResolution(
+            input_name="Niche Game",
+            confirmed_name="Niche Game",
+            aliases=["Niche Game"],
+            database_domains=["niche-game.fandom.com"],
+            confidence=0.8,
+        ),
+    )
+
+    assert [source.title for source in sources] == ["Artifact ZX-17"]
+    assert "sealed gate" in (sources[0].evidence or "")
 
 
 def test_mediawiki_wikitext_cleaner_removes_markup() -> None:

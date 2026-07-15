@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     tavily_first_wave_queries: int = Field(default=2, ge=1, le=4)
     tavily_max_queries_per_request: int = Field(default=2, ge=1, le=8)
     mediawiki_direct_search: bool = True
+    wiki_auto_index_enabled: bool = True
+    wiki_auto_index_pages_per_query: int = Field(default=3, ge=1, le=10)
+    wiki_link_expansion_pages_per_query: int = Field(default=2, ge=0, le=6)
+    knowledge_auto_index_ttl_seconds: int = Field(default=604800, ge=0, le=7776000)
     knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
     embedding_api_key: str = ""
     embedding_base_url: str = ""

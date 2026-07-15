@@ -2,7 +2,7 @@
   "version": 1,
   "status": "performance_baseline_refresh_required",
   "dataset": {
-    "sha256": "053eac6ceaa3d4ac5f6fe2411ba9c75456641684210656c17c63ef8d3a597693",
+    "sha256": "6288735dd3408d02aae875e877a76990ffececb2ba3f22820bd3912501467b9e",
     "case_count": 52,
     "dev_cases": 30,
     "validation_cases": 22,
@@ -15,6 +15,8 @@
     "answer_present",
     "behavior_pass",
     "source_type_pass",
+    "source_recall_pass",
+    "evidence_recall_pass",
     "required_terms_pass",
     "forbidden_terms_pass",
     "source_urls_valid",

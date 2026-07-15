@@ -89,6 +89,41 @@ def test_evaluation_requires_answer_terms_and_valid_citations() -> None:
     assert passing["passed"] is True
 
 
+def test_evaluation_measures_source_and_evidence_recall_separately() -> None:
+    case = {
+        "id": "retrieval-gold",
+        "expected_behavior": "answer",
+        "expected_source_types": ["wiki"],
+        "expected_source_urls": ["example.com/wiki/exact_entity"],
+        "evidence_terms": ["required key", "hidden room"],
+        "required_terms": ["结论"],
+    }
+    correct_source = {
+        "title": "Exact Entity",
+        "url": "https://example.com/wiki/Exact_Entity",
+        "source_type": "wiki",
+        "evidence": "The required key opens the hidden room.",
+    }
+
+    passing = evaluate_case(case, {"answer": "结论如下。[1]", "sources": [correct_source]})
+    wrong_page = evaluate_case(
+        case,
+        {
+            "answer": "结论如下。[1]",
+            "sources": [{**correct_source, "url": "https://example.com/wiki/index"}],
+        },
+    )
+    missing_evidence = evaluate_case(
+        case,
+        {"answer": "结论如下。[1]", "sources": [{**correct_source, "evidence": "Generic overview."}]},
+    )
+
+    assert passing["source_recall_pass"] is True
+    assert passing["evidence_recall_pass"] is True
+    assert wrong_page["source_recall_pass"] is False
+    assert missing_evidence["evidence_recall_pass"] is False
+
+
 def test_answer_with_late_uncertainty_note_is_not_a_conservative_refusal() -> None:
     case = {
         "id": "qualified-answer",
