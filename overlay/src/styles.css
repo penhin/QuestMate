@@ -59,16 +59,12 @@ a:focus-visible {
   background:
     linear-gradient(145deg, rgba(37, 99, 235, 0.86), rgba(20, 184, 166, 0.84)),
     #172026;
-  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.3);
-  transition:
-    transform 0.16s ease,
-    box-shadow 0.16s ease;
+  transition: transform 0.16s ease;
   -webkit-app-region: drag;
 }
 
 .bubble:hover {
   transform: translateY(-2px);
-  box-shadow: 0 22px 54px rgba(15, 23, 42, 0.34);
 }
 
 .bubble:active {
@@ -103,7 +99,6 @@ a:focus-visible {
   border: 1px solid rgba(15, 23, 42, 0.13);
   color: #182027;
   background: rgba(250, 252, 252, 0.98);
-  box-shadow: 0 22px 72px rgba(15, 23, 42, 0.28);
   animation: panel-in 0.18s ease-out;
 }
 
@@ -681,8 +676,7 @@ a:focus-visible {
 .section-heading h3,
 .section-heading p,
 .setting-row h3,
-.setting-row p,
-.muted-line {
+.setting-row p {
   margin: 0;
 }
 
@@ -693,8 +687,7 @@ a:focus-visible {
 }
 
 .section-heading p,
-.setting-row p,
-.muted-line {
+.setting-row p {
   overflow: hidden;
   color: #64748b;
   font-size: 13px;
@@ -719,14 +712,13 @@ a:focus-visible {
 }
 
 .placement-control {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 104px), 1fr));
 }
 
-.placement-control button {
-  overflow: hidden;
-  padding-inline: 4px;
+.segmented-control.placement-control button {
+  min-width: max-content;
+  padding-inline: 10px;
   font-size: 12px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

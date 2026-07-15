@@ -246,7 +246,7 @@ export default function App() {
   async function refreshActiveGame() {
     const value = await getActiveGame();
     if (value.processName && !manualGameOverrideRef.current && !isOverlayProcess(value.processName)) {
-      setGame(displayProcessName(value.processName));
+      setGame(value.detectedGame || displayProcessName(value.processName));
     }
   }
 
@@ -1060,9 +1060,7 @@ function GameField(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const options = props.processes
-    .filter((name) => name.toLowerCase().includes(props.game.trim().toLowerCase()))
-    .slice(0, 50);
+  const options = props.processes;
 
   return (
     <div

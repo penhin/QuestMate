@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import re
 from urllib.parse import urlparse, urlunparse
@@ -9,17 +8,25 @@ from tavily import TavilyClient
 
 from config import Settings, get_settings
 from game_resolution import GameResolver
+from quality_policy import (
+    RELEVANCE_SCORE_POLICY,
+    EXTERNAL_SEARCH_ATTEMPTS,
+    MAX_QUERIES_PER_PLANNED_QUERY,
+    MAX_SEARCH_QUERIES,
+    SEARCH_NOISE_TOKENS,
+    SEARCH_RESULT_WEIGHTS,
+    SOURCE_POLICIES,
+    SourcePolicy,
+    STABLE_FACT_INTENTS,
+    VERSION_SCORE_POLICY,
+    VERSION_SENSITIVE_INTENTS,
+    VERSION_SIGNAL_TOKENS,
+    domain_quality,
+    intent_source_preference,
+    source_domain_limit,
+)
 from query_tokens import question_relevance_tokens, relevance_tokens
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
-
-
-@dataclass(frozen=True)
-class SearchSource:
-    source_type: str
-    trust_score: float
-    trust_label: str
-    domains: tuple[str, ...] = ()
-    query_templates: tuple[str, ...] = ()
 
 
 class SearchProvider(Protocol):
@@ -38,59 +45,8 @@ class SearchProvider(Protocol):
 
 
 class TavilySearchProvider:
-    search_noise_tokens = {
-        "fandom",
-        "fextralife",
-        "wiki",
-        "guide",
-        "strategy",
-        "weakness",
-        "timing",
-        "location",
-        "merchant",
-        "questline",
-        "walkthrough",
-        "build",
-        "stats",
-        "weapons",
-        "talismans",
-        "official",
-        "patch",
-        "notes",
-        "update",
-    }
-    sources = {
-        "official": SearchSource(
-            "official",
-            0.95,
-            "官方",
-            query_templates=(
-                "{game} official {query}",
-                "{game} patch notes update {query}",
-            ),
-        ),
-        "wiki": SearchSource(
-            "wiki",
-            0.8,
-            "百科",
-            domains=("fandom.com", "wiki.gg", "fextralife.com"),
-        ),
-        "community": SearchSource(
-            "community",
-            0.55,
-            "社区",
-            domains=("reddit.com", "steamcommunity.com"),
-        ),
-        "web": SearchSource(
-            "web",
-            0.45,
-            "网页",
-            query_templates=(
-                "{game} guide {query}",
-                "{game} 攻略 {query}",
-            ),
-        ),
-    }
+    search_noise_tokens = SEARCH_NOISE_TOKENS
+    sources = SOURCE_POLICIES
     fallback_plan = SearchPlan(
         intent="general",
         queries=(
@@ -118,7 +74,7 @@ class TavilySearchProvider:
 
         game_resolution = game_resolution or await self.resolve_game(game=game, question=query)
         total_results = max_results or self.settings.search_max_results
-        per_query_results = min(4, max(2, total_results))
+        per_query_results = min(6, max(2, total_results))
         strict_sources_by_url: dict[str, Source] = {}
         relaxed_sources_by_url: dict[str, Source] = {}
         search_queries = self._build_search_queries(
@@ -143,6 +99,7 @@ class TavilySearchProvider:
             intent=intent,
             strict_sources_by_url=strict_sources_by_url,
             relaxed_sources_by_url=relaxed_sources_by_url,
+            database_domains=list(game_resolution.database_domains),
         )
 
         if len(strict_sources_by_url) < min_strict_results and intent != "patch":
@@ -167,6 +124,7 @@ class TavilySearchProvider:
                     intent=intent,
                     strict_sources_by_url=strict_sources_by_url,
                     relaxed_sources_by_url=relaxed_sources_by_url,
+                    database_domains=list(database_domains),
                 )
 
         strict_ranked_sources = sorted(
@@ -200,7 +158,7 @@ class TavilySearchProvider:
     async def _collect_sources(
         self,
         *,
-        search_queries: list[tuple[str, SearchSource]],
+        search_queries: list[tuple[str, SourcePolicy]],
         per_query_results: int,
         game: str,
         query: str,
@@ -209,6 +167,7 @@ class TavilySearchProvider:
         intent: str,
         strict_sources_by_url: dict[str, Source],
         relaxed_sources_by_url: dict[str, Source],
+        database_domains: list[str],
     ) -> None:
         results = await self._fetch_search_results(search_queries, per_query_results)
         for (search_query, search_source), result in zip(search_queries, results, strict=True):
@@ -216,9 +175,31 @@ class TavilySearchProvider:
                 url = item.get("url")
                 if not url:
                     continue
+                if search_source.source_type == "wiki":
+                    result_domain = urlparse(str(url)).netloc.lower()
+                    known_database = any(
+                        result_domain == domain or result_domain.endswith(f".{domain}")
+                        for domain in database_domains
+                    )
+                    title_url = f"{item.get('title') or ''} {url}".lower()
+                    if not known_database and not self._matches_game_name(
+                        text=title_url,
+                        game_names=[game, *game_aliases],
+                    ):
+                        continue
                 search_context = f"{query} {search_query} {' '.join(aliases)}"
+                raw_content = str(item.get("raw_content") or "")
+                evidence = self._best_evidence_passage(
+                    raw_content or str(item.get("content") or ""),
+                    question=search_context,
+                    max_chars=self.settings.evidence_passage_max_chars,
+                )
+                searchable_item = {
+                    **item,
+                    "content": f"{item.get('content') or ''} {evidence}",
+                }
                 relevance_score = self._result_relevance_score(
-                    item=item,
+                    item=searchable_item,
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
@@ -232,15 +213,15 @@ class TavilySearchProvider:
                 version_score = self._version_safety_score(
                     intent=intent,
                     source_type=search_source.source_type,
-                    text=f"{item.get('title') or ''} {item.get('url') or ''} {item.get('content') or ''}",
+                    text=f"{item.get('title') or ''} {item.get('url') or ''} {evidence}",
                 )
                 weighted_score = (
-                    raw_score * 0.25
-                    + search_source.trust_score * 0.25
-                    + relevance_score * 0.35
-                    + intent_score * 0.1
-                    + domain_score * 0.03
-                    + version_score * 0.02
+                    raw_score * SEARCH_RESULT_WEIGHTS.retrieval
+                    + search_source.trust_score * SEARCH_RESULT_WEIGHTS.trust
+                    + relevance_score * SEARCH_RESULT_WEIGHTS.relevance
+                    + intent_score * SEARCH_RESULT_WEIGHTS.intent
+                    + domain_score * SEARCH_RESULT_WEIGHTS.domain
+                    + version_score * SEARCH_RESULT_WEIGHTS.version
                 )
                 source = Source(
                     title=item.get("title") or url,
@@ -250,11 +231,11 @@ class TavilySearchProvider:
                     source_type=search_source.source_type,
                     trust_score=search_source.trust_score,
                     trust_label=search_source.trust_label,
-                    evidence=item.get("content"),
+                    evidence=evidence,
                     published_at=self._parse_source_datetime(item.get("published_date") or item.get("published_at")),
                     fetched_at=datetime.now(timezone.utc),
                     game_version=self._extract_game_version(
-                        f"{item.get('title') or ''} {item.get('content') or ''}"
+                        f"{item.get('title') or ''} {item.get('content') or ''} {evidence}"
                     ),
                 )
                 source_key = self._canonical_source_key(str(url))
@@ -262,7 +243,7 @@ class TavilySearchProvider:
                 if current is None or (source.score or 0) > (current.score or 0):
                     relaxed_sources_by_url[source_key] = source
                 if self._is_high_quality_source(
-                    item=item,
+                    item=searchable_item,
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
@@ -274,28 +255,60 @@ class TavilySearchProvider:
 
     async def _fetch_search_results(
         self,
-        search_queries: list[tuple[str, SearchSource]],
+        search_queries: list[tuple[str, SourcePolicy]],
         per_query_results: int,
     ) -> list[dict[str, Any]]:
         semaphore = asyncio.Semaphore(self.settings.tavily_max_concurrency)
 
         async def fetch(query: str) -> dict[str, Any]:
-            try:
-                async with semaphore:
-                    return await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._client.search,
-                            query=query,
-                            max_results=per_query_results,
-                            include_answer=False,
-                            include_raw_content=False,
-                        ),
-                        timeout=self.settings.external_request_timeout_seconds,
-                    )
-            except Exception:
-                return {"results": []}
+            for attempt in range(EXTERNAL_SEARCH_ATTEMPTS):
+                try:
+                    async with semaphore:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._client.search,
+                                query=query,
+                                max_results=per_query_results,
+                                include_answer=False,
+                                include_raw_content=self.settings.search_include_raw_content,
+                            ),
+                            timeout=self.settings.external_request_timeout_seconds,
+                        )
+                except Exception:
+                    if attempt + 1 < EXTERNAL_SEARCH_ATTEMPTS:
+                        await asyncio.sleep(0.15)
+            return {"results": []}
 
         return await asyncio.gather(*(fetch(query) for query, _ in search_queries))
+
+    @staticmethod
+    def _best_evidence_passage(content: str, *, question: str, max_chars: int = 1600) -> str:
+        """Return a compact passage around the best entity matches in a page."""
+        cleaned = re.sub(r"\s+", " ", content).strip()
+        if not cleaned or len(cleaned) <= max_chars:
+            return cleaned
+
+        tokens = question_relevance_tokens(question)
+        candidates: list[str] = [cleaned[:max_chars]]
+        lowered = cleaned.lower()
+        for token in tokens:
+            start = 0
+            for _ in range(3):
+                position = lowered.find(token, start)
+                if position < 0:
+                    break
+                window_start = max(0, position - max_chars // 4)
+                window_end = min(len(cleaned), window_start + max_chars)
+                candidates.append(cleaned[window_start:window_end].strip())
+                start = position + len(token)
+
+        def passage_score(passage: str) -> tuple[int, int]:
+            lowered_passage = passage.lower()
+            matched = sum(1 for token in tokens if token in lowered_passage)
+            occurrences = sum(lowered_passage.count(token) for token in tokens)
+            return matched, occurrences
+
+        return max(candidates, key=passage_score)
 
     def _build_search_queries(
         self,
@@ -305,10 +318,10 @@ class TavilySearchProvider:
         plan: SearchPlan | None,
         database_domains: tuple[str, ...] = (),
         game_aliases: tuple[str, ...] = (),
-    ) -> list[tuple[str, SearchSource]]:
+    ) -> list[tuple[str, SourcePolicy]]:
         planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
         aliases = list((plan.aliases if plan else [])[:3])
-        built: list[tuple[str, SearchSource]] = []
+        built: list[tuple[str, SourcePolicy]] = []
         seen: set[str] = set()
 
         for planned in planned_queries:
@@ -318,10 +331,26 @@ class TavilySearchProvider:
             candidates: list[str] = []
             if source.source_type == "wiki":
                 candidates.extend(f"site:{domain} {game} {query}" for domain in database_domains)
-            candidates.extend(f"site:{domain} {game} {query}" for domain in source.domains)
+                for alias in aliases:
+                    if alias.lower() not in query.lower():
+                        candidates.extend(
+                            f"site:{domain} {game} {alias} {query}"
+                            for domain in database_domains
+                        )
+                for game_alias in game_aliases[:3]:
+                    if game_alias.lower() != game.lower():
+                        candidates.extend(f"site:{domain} {game_alias} {query}" for domain in database_domains)
+            for domain_index, domain in enumerate(source.domains):
+                candidates.append(f"site:{domain} {game} {query}")
+                if domain_index == 0:
+                    for alias in aliases:
+                        if alias.lower() not in query.lower():
+                            candidates.append(f"site:{domain} {game} {alias} {query}")
+                for game_alias in game_aliases[:3]:
+                    if game_alias.lower() != game.lower():
+                        candidates.append(f"site:{domain} {game_alias} {query}")
             for game_alias in game_aliases[:3]:
                 if game_alias.lower() != game.lower():
-                    candidates.extend(f"site:{domain} {game_alias} {query}" for domain in source.domains)
                     candidates.extend(template.format(game=game_alias, query=query) for template in source.query_templates)
             candidates.extend(template.format(game=game, query=query) for template in source.query_templates)
             if not candidates:
@@ -330,14 +359,18 @@ class TavilySearchProvider:
                 if alias.lower() not in query.lower():
                     candidates.append(f"{game} {alias} {query}")
 
+            added_for_plan = 0
             for candidate in candidates:
                 normalized = " ".join(candidate.split())
                 if normalized in seen:
                     continue
                 built.append((normalized, source))
                 seen.add(normalized)
-                if len(built) >= 8:
+                added_for_plan += 1
+                if len(built) >= MAX_SEARCH_QUERIES:
                     return built
+                if added_for_plan >= MAX_QUERIES_PER_PLANNED_QUERY:
+                    break
 
         return built
 
@@ -362,30 +395,54 @@ class TavilySearchProvider:
         if TavilySearchProvider._is_low_value_page(text=text, question=question):
             return 0
 
-        game_tokens = relevance_tokens(" ".join([game, *(game_aliases or [])]))
-        game_token_set = set(game_tokens)
+        game_names = [game, *(game_aliases or [])]
+        game_token_set = set(relevance_tokens(" ".join(game_names)))
         question_tokens = [
             token
             for token in question_relevance_tokens(question)
             if token not in game_token_set and token not in TavilySearchProvider.search_noise_tokens
         ]
 
-        has_game_match = not game_tokens or any(token in text for token in game_tokens)
+        has_game_match = TavilySearchProvider._matches_game_name(
+            text=text,
+            game_names=game_names,
+        )
         if not has_game_match:
             return 0
 
         if not question_tokens:
-            return 0.45
+            return RELEVANCE_SCORE_POLICY.no_entity_score
 
         matched = sum(1 for token in question_tokens if token in text)
-        if matched == 0:
+        latin_entity_tokens = [token for token in question_tokens if re.fullmatch(r"[a-z0-9]+", token)]
+        minimum_matches = 2 if len(latin_entity_tokens) >= 2 else 1
+        if matched < minimum_matches:
             return 0
 
         title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
         focused_matches = sum(1 for token in question_tokens if token in title_url)
         coverage = matched / max(len(question_tokens), 1)
-        focus_bonus = min(focused_matches * 0.12, 0.3)
-        return min(1.0, 0.35 + coverage * 0.45 + focus_bonus)
+        focus_bonus = min(
+            focused_matches * RELEVANCE_SCORE_POLICY.title_match_bonus,
+            RELEVANCE_SCORE_POLICY.title_bonus_cap,
+        )
+        return min(
+            1.0,
+            RELEVANCE_SCORE_POLICY.base_score
+            + coverage * RELEVANCE_SCORE_POLICY.coverage_weight
+            + focus_bonus,
+        )
+
+    @staticmethod
+    def _matches_game_name(*, text: str, game_names: list[str]) -> bool:
+        for game_name in game_names:
+            normalized = game_name.lower().strip()
+            if normalized and normalized in text:
+                return True
+            tokens = [token for token in relevance_tokens(normalized) if token != normalized]
+            if tokens and all(token in text for token in tokens):
+                return True
+        return not any(game_name.strip() for game_name in game_names)
 
     @staticmethod
     def _is_same_game_surface(*, text: str, game: str, question: str) -> bool:
@@ -454,7 +511,7 @@ class TavilySearchProvider:
         domain_counts: dict[str, int] = {}
         for source in sources:
             domain = urlparse(str(source.url)).netloc.lower()
-            limit = 2 if any(value in domain for value in ("reddit.com", "steamcommunity.com")) else 3
+            limit = source_domain_limit(domain)
             if domain_counts.get(domain, 0) >= limit:
                 continue
             selected.append(source)
@@ -487,45 +544,26 @@ class TavilySearchProvider:
 
     @staticmethod
     def _intent_source_boost(*, intent: str, source_type: str) -> float:
-        preferred = {
-            "boss_strategy": {"wiki": 0.8, "community": 1.0, "web": 0.45, "official": 0.2},
-            "item_location": {"wiki": 1.0, "web": 0.65, "community": 0.35, "official": 0.2},
-            "quest_step": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.2},
-            "item_usage": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.25},
-            "build": {"community": 1.0, "wiki": 0.65, "web": 0.45, "official": 0.2},
-            "patch": {"official": 1.0, "wiki": 0.55, "web": 0.45, "community": 0.25},
-            "lore": {"wiki": 0.9, "web": 0.65, "community": 0.35, "official": 0.2},
-        }
-        return preferred.get(intent, {}).get(source_type, 0.4)
+        return intent_source_preference(intent, source_type)
 
     @staticmethod
     def _domain_quality_score(url: str) -> float:
-        domain = urlparse(url).netloc.lower()
-        if any(value in domain for value in ("wiki.gg", "fandom.com", "fextralife.com")):
-            return 0.9
-        if any(value in domain for value in ("bandainamco", "playstation.com", "steampowered.com")):
-            return 0.85
-        if any(value in domain for value in ("reddit.com", "steamcommunity.com")):
-            return 0.55
-        return 0.4
+        return domain_quality(urlparse(url).netloc)
 
     @staticmethod
     def _version_safety_score(*, intent: str, source_type: str, text: str) -> float:
         lowered = text.lower()
-        has_version_signal = any(
-            token in lowered
-            for token in ("patch", "version", "update", "1.", "版本", "补丁", "更新")
-        )
-        version_sensitive = intent in {"patch", "build", "boss_strategy"}
+        has_version_signal = any(token in lowered for token in VERSION_SIGNAL_TOKENS)
+        version_sensitive = intent in VERSION_SENSITIVE_INTENTS
         if version_sensitive and source_type == "official":
-            return 1.0
+            return VERSION_SCORE_POLICY.official_sensitive
         if version_sensitive and has_version_signal:
-            return 0.85
+            return VERSION_SCORE_POLICY.versioned_sensitive
         if version_sensitive:
-            return 0.45
-        if intent in {"item_location", "item_usage", "quest_step", "lore"}:
-            return 0.75
-        return 0.55
+            return VERSION_SCORE_POLICY.undated_sensitive
+        if intent in STABLE_FACT_INTENTS:
+            return VERSION_SCORE_POLICY.stable_fact
+        return VERSION_SCORE_POLICY.default
 
     @staticmethod
     def _extract_game_version(text: str) -> str | None:

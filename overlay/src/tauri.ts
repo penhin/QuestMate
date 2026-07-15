@@ -6,7 +6,7 @@ export type OverlayPlacement = "bottom-right" | "bottom-left" | "center";
 
 const OVERLAY_PLACEMENT_STORAGE_KEY = "questmate.overlayPlacement";
 
-export type ActiveGame = {
+type ActiveGame = {
   processName: string | null;
   windowTitle: string | null;
   detectedGame: string | null;

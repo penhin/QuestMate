@@ -5,6 +5,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from quality_policy import GAME_RESOLUTION_POLICY
+
 
 class Source(BaseModel):
     title: str
@@ -47,7 +49,9 @@ class GameResolution(BaseModel):
 
     @property
     def is_confirmed(self) -> bool:
-        return self.confidence >= 0.55 and bool(self.confirmed_name or self.aliases or self.platform_urls or self.database_domains)
+        return self.confidence >= GAME_RESOLUTION_POLICY.confirmed_threshold and bool(
+            self.confirmed_name or self.aliases or self.platform_urls or self.database_domains
+        )
 
 
 SearchIntent = Literal[

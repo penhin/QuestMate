@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from typing import Literal, TypedDict
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
@@ -7,6 +8,13 @@ from langgraph.graph import END, StateGraph
 from knowledge import KnowledgeStore, knowledge_store
 from config import get_settings
 from llm import GuideLLM
+from quality_policy import (
+    EVIDENCE_POOL_WEIGHTS,
+    HIGH_TRUST_THRESHOLD,
+    VERSION_SENSITIVE_INTENTS,
+    source_domain_limit,
+)
+from query_tokens import question_relevance_tokens
 from schemas import ChatRequest, ChatResponse, GameResolution, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -202,7 +210,7 @@ class QuestAgent:
         plan: SearchPlan,
         game_resolution: GameResolution,
     ) -> list[Source]:
-        """Blend curated local evidence with fresh web results, retaining URL diversity."""
+        """Rank local and live evidence in one pool, retaining URL diversity."""
         local_sources = await self.knowledge.retrieve(game=game, query=question)
         web_sources = await self.search_provider.search(
             question,
@@ -210,15 +218,51 @@ class QuestAgent:
             plan=plan,
             game_resolution=game_resolution,
         )
-        selected: list[Source] = []
-        seen_urls: set[str] = set()
+        query = f"{question} {' '.join(plan.aliases)}".strip()
+        ranked_by_url: dict[str, tuple[float, Source]] = {}
         for source in [*local_sources, *web_sources]:
-            key = str(source.url).rstrip("/").lower()
-            if key in seen_urls:
+            key = self._canonical_source_url(str(source.url))
+            rank = self._source_rank(source=source, query=query, intent=plan.intent)
+            current = ranked_by_url.get(key)
+            if current is None or rank > current[0]:
+                ranked_by_url[key] = (rank, source)
+
+        ranked = sorted(ranked_by_url.values(), key=lambda item: item[0], reverse=True)
+        selected: list[Source] = []
+        domain_counts: dict[str, int] = {}
+        for _rank, source in ranked:
+            domain = urlparse(str(source.url)).netloc.lower()
+            domain_limit = source_domain_limit(domain)
+            if domain_counts.get(domain, 0) >= domain_limit:
                 continue
             selected.append(source)
-            seen_urls.add(key)
-        return selected[: get_settings().search_max_results]
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+            if len(selected) >= get_settings().search_max_results:
+                break
+        return selected
+
+    @staticmethod
+    def _canonical_source_url(url: str) -> str:
+        parsed = urlparse(url)
+        return urlunparse(
+            (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "", "")
+        )
+
+    @staticmethod
+    def _source_rank(*, source: Source, query: str, intent: str) -> float:
+        text = f"{source.title} {source.evidence or source.snippet or ''}".lower()
+        tokens = question_relevance_tokens(query)
+        coverage = sum(1 for token in tokens if token in text) / max(len(tokens), 1)
+        retrieval_score = min(max(source.score or 0.5, 0), 1)
+        version_score = 1.0 if source.game_version or source.published_at else 0.0
+        if intent not in VERSION_SENSITIVE_INTENTS:
+            version_score = 0.5
+        return (
+            coverage * EVIDENCE_POOL_WEIGHTS.relevance
+            + retrieval_score * EVIDENCE_POOL_WEIGHTS.retrieval
+            + source.trust_score * EVIDENCE_POOL_WEIGHTS.trust
+            + version_score * EVIDENCE_POOL_WEIGHTS.version
+        )
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
@@ -297,7 +341,7 @@ class QuestAgent:
     def _status_for_sources(sources: list[Source]) -> str:
         if not sources:
             return "来源筛选：未找到强相关资料"
-        trusted_count = sum(1 for source in sources if source.trust_score >= 0.8)
+        trusted_count = sum(1 for source in sources if source.trust_score >= HIGH_TRUST_THRESHOLD)
         if trusted_count:
             return f"来源筛选：保留 {len(sources)} 个，{trusted_count} 个高可信"
         return f"来源筛选：保留 {len(sources)} 个，交叉核对"

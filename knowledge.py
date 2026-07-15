@@ -20,6 +20,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Table, Text, delete, func, insert, select, text, update
 
 from config import Settings, get_settings
+from quality_policy import KNOWLEDGE_SCORE_POLICY, KNOWLEDGE_SOURCE_TRUST
 from schemas import KnowledgeDocumentStatus, Source
 from storage import Database, metadata
 
@@ -223,7 +224,11 @@ class KnowledgeStore:
                 return document_id
 
     async def _fetch_and_extract(self, url: str) -> tuple[str | None, str, datetime | None]:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers={"User-Agent": "QuestMateIndexer/0.1"}) as client:
+        async with httpx.AsyncClient(
+            timeout=self.settings.external_request_timeout_seconds,
+            follow_redirects=True,
+            headers={"User-Agent": "QuestMateIndexer/0.1"},
+        ) as client:
             response = await client.get(url)
             response.raise_for_status()
         downloaded = response.text
@@ -261,8 +266,16 @@ class KnowledgeStore:
     @staticmethod
     def _source_from_row(row: dict[str, Any]) -> Source:
         source_type = row["source_type"] if row["source_type"] in {"official", "wiki", "community", "web"} else "web"
-        trust = {"official": (0.95, "官方"), "wiki": (0.8, "百科"), "community": (0.55, "社区"), "web": (0.65, "知识库")}[source_type]
-        score = 1 - float(row["distance"]) if row.get("distance") is not None else min(0.95, 0.5 + row.get("keyword_score", 0) * 0.08)
+        trust = KNOWLEDGE_SOURCE_TRUST[source_type]
+        score = (
+            1 - float(row["distance"])
+            if row.get("distance") is not None
+            else min(
+                KNOWLEDGE_SCORE_POLICY.keyword_cap,
+                KNOWLEDGE_SCORE_POLICY.keyword_base
+                + row.get("keyword_score", 0) * KNOWLEDGE_SCORE_POLICY.keyword_increment,
+            )
+        )
         evidence = row["content"][:900]
         return Source(
             title=row.get("title") or urlparse(row["url"]).netloc,

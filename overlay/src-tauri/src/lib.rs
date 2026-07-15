@@ -43,6 +43,10 @@ fn set_overlay_layout(
     window
         .set_always_on_top(true)
         .map_err(|err| err.to_string())?;
+    // Re-apply this after resizing as Windows can recreate the native surface
+    // while switching between the bubble and panel layouts.
+    #[cfg(target_os = "windows")]
+    window.set_shadow(false).map_err(|err| err.to_string())?;
     window.show().map_err(|err| err.to_string())?;
 
     Ok(())
@@ -97,17 +101,20 @@ pub fn run() {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::ActiveGame;
-    use std::collections::BTreeSet;
+    use serde::Deserialize;
+    use std::collections::{BTreeSet, HashMap};
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM, MAX_PATH};
-    use windows_sys::Win32::System::ProcessStatus::K32GetModuleBaseNameW;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsWindowVisible,
+        EnumChildWindows, EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongW,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        GWL_EXSTYLE, GW_OWNER, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
     };
 
     pub fn get_active_game() -> ActiveGame {
@@ -144,33 +151,91 @@ mod platform {
     }
 
     unsafe extern "system" fn collect_taskbar_process(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        if IsWindowVisible(hwnd) == 0 || GetWindowTextLengthW(hwnd) <= 0 {
+        if !is_taskbar_window(hwnd) {
             return 1;
         }
 
-        let mut process_id = 0;
-        GetWindowThreadProcessId(hwnd, &mut process_id);
-        if let Some(process_name) = read_process_name(process_id) {
+        if let Some(process_name) = read_window_process_name(hwnd) {
             let name = strip_exe_suffix(&process_name);
-            if !is_system_process(&name) {
+            if !is_overlay_process(&name) {
                 (*(lparam as *mut BTreeSet<String>)).insert(name);
             }
         }
         1
     }
 
-    fn is_system_process(name: &str) -> bool {
-        matches!(
-            name.to_ascii_lowercase().as_str(),
-            "applicationframehost"
-                | "dwm"
-                | "explorer"
-                | "searchhost"
-                | "sihost"
-                | "startmenuexperiencehost"
-                | "textinputhost"
-                | "questmate-overlay"
-        )
+    unsafe fn is_taskbar_window(hwnd: HWND) -> bool {
+        if IsWindowVisible(hwnd) == 0 {
+            return false;
+        }
+
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            &mut cloaked as *mut u32 as *mut _,
+            std::mem::size_of::<u32>() as u32,
+        ) >= 0
+            && cloaked != 0
+        {
+            return false;
+        }
+
+        let extended_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let is_app_window = extended_style & WS_EX_APPWINDOW != 0;
+        let is_tool_window = extended_style & WS_EX_TOOLWINDOW != 0;
+
+        // Windows uses this owner/style combination to decide whether a
+        // top-level window receives its own taskbar button.
+        (!is_tool_window && GetWindow(hwnd, GW_OWNER).is_null()) || is_app_window
+    }
+
+    unsafe fn read_window_process_name(hwnd: HWND) -> Option<String> {
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+        let process_name = read_process_name(process_id)?;
+
+        if !process_name.eq_ignore_ascii_case("ApplicationFrameHost.exe") {
+            return Some(process_name);
+        }
+
+        // UWP apps are hosted by ApplicationFrameHost. Their actual process is
+        // attached as a child window, so prefer it when available.
+        let mut context = ChildProcessContext {
+            host_process_id: process_id,
+            process_name: None,
+        };
+        EnumChildWindows(
+            hwnd,
+            Some(find_uwp_child_process),
+            &mut context as *mut ChildProcessContext as LPARAM,
+        );
+        context.process_name.or(Some(process_name))
+    }
+
+    struct ChildProcessContext {
+        host_process_id: u32,
+        process_name: Option<String>,
+    }
+
+    unsafe extern "system" fn find_uwp_child_process(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let context = &mut *(lparam as *mut ChildProcessContext);
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, &mut process_id);
+
+        if process_id == 0 || process_id == context.host_process_id {
+            return 1;
+        }
+
+        if let Some(process_name) = read_process_name(process_id) {
+            context.process_name = Some(process_name);
+            return 0;
+        }
+        1
+    }
+
+    fn is_overlay_process(name: &str) -> bool {
+        name.eq_ignore_ascii_case("questmate-overlay")
     }
 
     fn strip_exe_suffix(value: &str) -> String {
@@ -201,46 +266,59 @@ mod platform {
     }
 
     unsafe fn read_process_name(process_id: u32) -> Option<String> {
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id);
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
         if handle.is_null() {
             return None;
         }
 
-        let mut buffer = vec![0u16; MAX_PATH as usize];
-        let copied = K32GetModuleBaseNameW(
-            handle,
-            std::ptr::null_mut(),
-            buffer.as_mut_ptr(),
-            buffer.len() as u32,
-        );
+        let mut buffer = vec![0u16; 32_768];
+        let mut copied = buffer.len() as u32;
+        let succeeded = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut copied);
         let _ = CloseHandle(handle);
 
-        if copied == 0 {
+        if succeeded == 0 || copied == 0 {
             return None;
         }
 
-        Some(
-            OsString::from_wide(&buffer[..copied as usize])
-                .to_string_lossy()
-                .to_string(),
-        )
+        let path = OsString::from_wide(&buffer[..copied as usize])
+            .to_string_lossy()
+            .to_string();
+        path.rsplit(['\\', '/']).next().map(str::to_string)
+    }
+
+    #[derive(Deserialize)]
+    struct GameRegistry {
+        games: Vec<GameRegistryEntry>,
+    }
+
+    #[derive(Deserialize)]
+    struct GameRegistryEntry {
+        name: String,
+        processes: Vec<String>,
+    }
+
+    fn game_process_map() -> &'static HashMap<String, String> {
+        static PROCESS_MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+        PROCESS_MAP.get_or_init(|| {
+            let registry: GameRegistry =
+                serde_json::from_str(include_str!("../../src/config/games.json"))
+                    .expect("embedded game registry must be valid JSON");
+            registry
+                .games
+                .into_iter()
+                .flat_map(|game| {
+                    game.processes
+                        .into_iter()
+                        .map(move |process| (process.to_ascii_lowercase(), game.name.clone()))
+                })
+                .collect()
+        })
     }
 
     fn detect_game(process_name: &str) -> Option<&'static str> {
-        match process_name.to_ascii_lowercase().as_str() {
-            "eldenring.exe" => Some("Elden Ring"),
-            "eldenringnightreign.exe" => Some("Elden Ring Nightreign"),
-            "blackmythwukong.exe" => Some("Black Myth: Wukong"),
-            "sekiro.exe" => Some("Sekiro: Shadows Die Twice"),
-            "monsterhunterwilds.exe" => Some("Monster Hunter Wilds"),
-            "monsterhunterworld.exe" => Some("Monster Hunter: World"),
-            "re4.exe" => Some("Resident Evil 4"),
-            "cyberpunk2077.exe" => Some("Cyberpunk 2077"),
-            "baldursgate3.exe" => Some("Baldur's Gate 3"),
-            "genshinimpact.exe" => Some("Genshin Impact"),
-            "starrail.exe" => Some("Honkai: Star Rail"),
-            _ => None,
-        }
+        game_process_map()
+            .get(&process_name.to_ascii_lowercase())
+            .map(String::as_str)
     }
 
     fn empty() -> ActiveGame {

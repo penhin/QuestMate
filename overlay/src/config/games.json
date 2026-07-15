@@ -1,0 +1,15 @@
+{
+  "games": [
+    { "name": "Elden Ring", "processes": ["eldenring.exe"] },
+    { "name": "Elden Ring Nightreign", "processes": ["eldenringnightreign.exe"] },
+    { "name": "Black Myth: Wukong", "processes": ["blackmythwukong.exe"] },
+    { "name": "Sekiro: Shadows Die Twice", "processes": ["sekiro.exe"] },
+    { "name": "Monster Hunter Wilds", "processes": ["monsterhunterwilds.exe"] },
+    { "name": "Monster Hunter: World", "processes": ["monsterhunterworld.exe"] },
+    { "name": "Resident Evil 4", "processes": ["re4.exe"] },
+    { "name": "Cyberpunk 2077", "processes": ["cyberpunk2077.exe"] },
+    { "name": "Baldur's Gate 3", "processes": ["baldursgate3.exe"] },
+    { "name": "Genshin Impact", "processes": ["genshinimpact.exe"] },
+    { "name": "Honkai: Star Rail", "processes": ["starrail.exe"] }
+  ]
+}

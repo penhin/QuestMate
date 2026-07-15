@@ -3,6 +3,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from query_tokens import relevance_tokens
+from quality_policy import FAST_GAME_IDENTITY_MAX_RESULTS, GAME_RESOLUTION_POLICY
 from schemas import GameCandidate, GameResolution
 
 
@@ -20,6 +21,22 @@ class GameResolver:
         self._client = client
 
     def resolve(self, *, game: str, question: str | None = None) -> GameResolution:
+        fast_resolution = self.discover_game_identity(game=game)
+        if fast_resolution.is_confirmed:
+            if not fast_resolution.database_domains:
+                database_domains = list(self.discover_database_identity(game=game))
+                if database_domains:
+                    confidence = self.resolution_confidence(
+                        game=game,
+                        aliases=fast_resolution.aliases,
+                        platform_urls=[str(url) for url in fast_resolution.platform_urls],
+                        database_domains=database_domains,
+                    )
+                    return fast_resolution.model_copy(
+                        update={"database_domains": database_domains, "confidence": confidence}
+                    )
+            return fast_resolution
+
         candidates = list(self.discover_game_candidates(game=game))
         aliases = list(self.discover_game_aliases(game=game))
         for candidate in candidates:
@@ -30,13 +47,29 @@ class GameResolver:
         database_domains = list(self.discover_database_domains(game=game, game_aliases=aliases))
         platform_urls = list(self.discover_platform_urls(game=game, game_aliases=aliases))
         confirmed_name = candidates[0].name if candidates else (aliases[0] if aliases else game)
+        candidates_by_key: dict[str, GameCandidate] = {}
+        for candidate in candidates:
+            key = candidate_key(name=candidate.name, url=str(candidate.platform_urls[0]))
+            existing = candidates_by_key.get(key)
+            if existing is None or candidate.confidence > existing.confidence:
+                candidates_by_key[key] = candidate
+        candidates = sorted(
+            candidates_by_key.values(),
+            key=lambda candidate: candidate.confidence,
+            reverse=True,
+        )
+
         confidence = self.resolution_confidence(
             game=game,
             aliases=aliases,
             platform_urls=platform_urls,
             database_domains=database_domains,
         )
-        ambiguous = len(candidates) > 1 and candidates[0].confidence - candidates[1].confidence < 0.2
+        ambiguous = (
+            len(candidates) > 1
+            and candidates[0].confidence - candidates[1].confidence
+            < GAME_RESOLUTION_POLICY.ambiguity_margin
+        )
         return GameResolution(
             input_name=game,
             confirmed_name=confirmed_name,
@@ -44,6 +77,105 @@ class GameResolver:
             platform_urls=platform_urls,
             database_domains=database_domains,
             candidates=candidates,
+            confidence=confidence,
+            ambiguous=ambiguous,
+        )
+
+    def discover_game_identity(self, *, game: str) -> GameResolution:
+        """Confirm an exact store/wiki identity with one broad search request."""
+        result = self._client.search(
+            query=f'"{game}" game Steam itch.io GOG wiki',
+            max_results=FAST_GAME_IDENTITY_MAX_RESULTS,
+            include_answer=False,
+            include_raw_content=False,
+        )
+        aliases: list[str] = []
+        platform_urls: list[str] = []
+        database_domains: list[str] = []
+        candidates: list[GameCandidate] = []
+
+        for item in result.get("results", []):
+            title = str(item.get("title") or "")
+            url = str(item.get("url") or "")
+            domain = urlparse(url).netloc.lower()
+            if not identity_matches_game(title=title, url=url, game=game):
+                continue
+
+            if self.is_supported_database_domain(domain) and domain not in database_domains:
+                database_domains.append(domain)
+
+            if is_supported_platform_domain(domain):
+                # Article titles describe mechanics, characters, or items and
+                # must never become aliases for the game itself. Only store
+                # identity pages are authoritative enough to supply aliases.
+                item_aliases = list(title_alias_candidates(title))
+                if is_low_value_game_candidate(title=title, url=url):
+                    continue
+                if url not in platform_urls:
+                    platform_urls.append(url)
+                name = item_aliases[0] if item_aliases else game
+                raw_score = float(item.get("score") or 0.5)
+                candidates.append(
+                    GameCandidate(
+                        name=name,
+                        aliases=[alias for alias in item_aliases if alias != name][:6],
+                        tags=infer_game_tags(self.result_text(item)),
+                        platform_urls=[url],
+                        confidence=min(
+                            1.0,
+                            GAME_RESOLUTION_POLICY.candidate_base
+                            + raw_score * GAME_RESOLUTION_POLICY.candidate_search_weight
+                            + (GAME_RESOLUTION_POLICY.candidate_alias_bonus if item_aliases else 0),
+                        ),
+                    )
+                )
+
+        confidence = self.resolution_confidence(
+            game=game,
+            aliases=aliases,
+            platform_urls=platform_urls,
+            database_domains=database_domains,
+        )
+        if candidates:
+            # Every candidate in the fast path has already passed an exact
+            # identity check for the requested game. Store mirrors and
+            # marketing-title variants therefore describe one game, not
+            # multiple ambiguous games.
+            primary = min(candidates, key=lambda candidate: len(candidate.name))
+            exact_name = next(
+                (candidate.name for candidate in candidates if candidate.name.casefold() == game.casefold()),
+                primary.name,
+            )
+            merged_aliases = list(
+                dict.fromkeys(
+                    alias
+                    for candidate in candidates
+                    for alias in [candidate.name, *candidate.aliases]
+                    if alias.casefold() != exact_name.casefold()
+                )
+            )
+            candidates = [
+                GameCandidate(
+                    name=exact_name,
+                    aliases=merged_aliases[:6],
+                    tags=list(dict.fromkeys(tag for candidate in candidates for tag in candidate.tags))[:5],
+                    platform_urls=platform_urls[:6],
+                    confidence=max(candidate.confidence for candidate in candidates),
+                )
+            ]
+        confirmed_name = candidates[0].name if candidates else game
+        ambiguous = (
+            len(candidates) > 1
+            and candidates[0].confidence - candidates[1].confidence
+            < GAME_RESOLUTION_POLICY.ambiguity_margin
+        )
+        return GameResolution(
+            input_name=game,
+            confirmed_name=confirmed_name,
+            aliases=aliases[:8],
+            platform_urls=platform_urls[:6],
+            database_domains=database_domains[:8],
+            candidates=candidates[:6],
             confidence=confidence,
             ambiguous=ambiguous,
         )
@@ -76,6 +208,30 @@ class GameResolver:
                 if len(domains) >= 4:
                     return tuple(domains)
         return tuple(domains)
+
+    def discover_database_identity(self, *, game: str) -> tuple[str, ...]:
+        """Find a game-specific wiki with one exact identity query."""
+        result = self._client.search(
+            query=f'"{game}" wiki fandom wiki.gg',
+            max_results=4,
+            include_answer=False,
+            include_raw_content=False,
+        )
+        domains: list[str] = []
+        for item in result.get("results", []):
+            url = str(item.get("url") or "")
+            domain = urlparse(url).netloc.lower()
+            if not self.is_supported_database_domain(domain):
+                continue
+            if not identity_matches_game(
+                title=str(item.get("title") or ""),
+                url=url,
+                game=game,
+            ):
+                continue
+            if domain not in domains:
+                domains.append(domain)
+        return tuple(domains[:4])
 
     def discover_game_aliases(self, *, game: str) -> tuple[str, ...]:
         queries = (
@@ -162,7 +318,13 @@ class GameResolver:
                 canonical_key = candidate_key(name=name, url=url)
                 tags = infer_game_tags(text)
                 raw_score = float(item.get("score") or 0.5)
-                confidence = min(1.0, 0.45 + raw_score * 0.35 + (0.15 if aliases else 0) + (0.05 if tags else 0))
+                confidence = min(
+                    1.0,
+                    GAME_RESOLUTION_POLICY.candidate_base
+                    + raw_score * GAME_RESOLUTION_POLICY.candidate_search_weight
+                    + (GAME_RESOLUTION_POLICY.candidate_alias_bonus if aliases else 0)
+                    + (GAME_RESOLUTION_POLICY.candidate_tag_bonus if tags else 0),
+                )
                 existing = candidates_by_key.get(canonical_key)
                 platform_urls = [url]
                 if existing:
@@ -201,15 +363,15 @@ class GameResolver:
         platform_urls: list[str],
         database_domains: list[str],
     ) -> float:
-        score = 0.25
+        score = GAME_RESOLUTION_POLICY.base_confidence
         if aliases:
-            score += 0.25
+            score += GAME_RESOLUTION_POLICY.alias_bonus
         if platform_urls:
-            score += 0.35
+            score += GAME_RESOLUTION_POLICY.platform_bonus
         if database_domains:
-            score += 0.25
+            score += GAME_RESOLUTION_POLICY.database_bonus
         if not relevance_tokens(game):
-            score -= 0.2
+            score -= GAME_RESOLUTION_POLICY.invalid_name_penalty
         return max(0, min(1, score))
 
 
@@ -249,6 +411,7 @@ def is_low_value_game_candidate(*, title: str, url: str) -> bool:
         "collection",
         "steam 上购买",
         "on sale",
+        "games like",
     )
     return any(pattern in lowered for pattern in low_value_patterns)
 
@@ -304,3 +467,9 @@ def title_alias_candidates(title: str) -> tuple[str, ...]:
 def matches_game_text(*, text: str, game: str, game_aliases: list[str]) -> bool:
     game_tokens = relevance_tokens(" ".join([game, *game_aliases]))
     return not game_tokens or any(token in text for token in game_tokens)
+
+
+def identity_matches_game(*, title: str, url: str, game: str) -> bool:
+    compact_game = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", game.lower())
+    compact_surface = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", f"{title} {url}".lower())
+    return len(compact_game) >= 3 and compact_game in compact_surface

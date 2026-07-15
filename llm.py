@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from config import Settings, get_settings
 from model_providers import ModelProvider, create_model_provider
-from query_tokens import is_query_entity_token, relevance_tokens
+from query_tokens import is_query_entity_token, question_relevance_tokens
 from schemas import ChatRequest, GameResolution, PlannedSearchQuery, SearchIntent, SearchPlan, SessionMessage, Source
 
 
@@ -401,23 +401,39 @@ class GuideLLM:
             ),
             "general": "直接回答问题，给出简洁可执行步骤；只有在确实有帮助时才说明不确定性。",
         }
-        return shapes[intent]
+        return (
+            "以下结构只在问题前提成立时使用；如果来源显示用户误认了角色、物品、任务或机制，"
+            "先简洁纠正前提并说明正确状态，不要为了填满结构而编造不存在的步骤、分支、奖励或故障排查。"
+            + shapes[intent]
+        )
 
     @staticmethod
     def _has_question_specific_sources(*, question: str, sources: list[Source]) -> bool:
+        primary_question, separator, alias_text = question.partition("\nALIASES:")
         tokens = [
             token
-            for token in GuideLLM._question_tokens(question)
+            for token in GuideLLM._question_tokens(primary_question)
             if is_query_entity_token(token)
         ]
-        if not tokens:
+        alias_groups = [
+            [token for token in GuideLLM._question_tokens(alias) if is_query_entity_token(token)]
+            for alias in alias_text.split("|")
+            if separator and alias.strip()
+        ]
+        alias_groups = [group for group in alias_groups if group]
+        if not tokens and not alias_groups:
             return False
 
-        source_text = " ".join(
-            f"{source.title} {source.url} {source.snippet or ''}".lower()
-            for source in sources
-        )
-        return any(token in source_text for token in tokens)
+        minimum_matches = 1 if len(tokens) <= 1 else max(2, (len(tokens) + 2) // 3)
+        for source in sources:
+            source_text = (
+                f"{source.title} {source.url} {source.evidence or source.snippet or ''}"
+            ).lower()
+            primary_match = tokens and sum(1 for token in tokens if token in source_text) >= minimum_matches
+            alias_match = any(all(token in source_text for token in group) for group in alias_groups)
+            if primary_match or alias_match:
+                return True
+        return False
 
     @staticmethod
     def _evidence_level(*, question: str, sources: list[Source]) -> str:
@@ -485,8 +501,10 @@ class GuideLLM:
 
     @staticmethod
     def _evidence_question(*, request: ChatRequest, plan: SearchPlan | None) -> str:
-        aliases = " ".join((plan.aliases if plan else [])[:6])
-        return f"{request.question} {aliases}".strip()
+        aliases = " | ".join((plan.aliases if plan else [])[:6])
+        if not aliases:
+            return request.question
+        return f"{request.question}\nALIASES:{aliases}"
 
     @staticmethod
     def _is_context_confirmation(question: str) -> bool:
@@ -504,7 +522,7 @@ class GuideLLM:
 
     @staticmethod
     def _question_tokens(question: str) -> list[str]:
-        return relevance_tokens(question)
+        return question_relevance_tokens(question)
 
     @staticmethod
     def _has_unsupported_specifics(*, answer: str, sources: list[Source], question: str) -> bool:
@@ -592,10 +610,16 @@ class GuideLLM:
             "summarize what was actually checked when useful, and ask for a screenshot, original title, area name, or "
             "more context. You may list possible search directions only when clearly labeled as unverified, not as an "
             "answer. "
+            "Preserve action semantics exactly: giving or handing over an item is not a battle, minigame, or automatic "
+            "equipment effect unless the evidence explicitly says so. Do not add collectible numbers, chapter numbers, "
+            "consumption behavior, repeatability, or intermediate rewards unless those exact details appear in evidence. "
             "If the question is unrelated to the game or impossible to understand, say so briefly and ask for the missing "
             "game detail. "
             "Keep the answer concise and actionable: start with the direct answer, then give ordered steps or bullets, "
-            "then mention important caveats only when needed."
+            "then mention important caveats only when needed. Cite every concrete factual claim, number, location, item "
+            "effect, quest step, version statement, and tactical recommendation with the supporting source index in "
+            "square brackets, for example [1] or [1][3]. Use only source indexes provided in <sources>. Do not add a "
+            "separate source list because the client renders it."
         )
 
     @staticmethod
@@ -608,8 +632,13 @@ class GuideLLM:
             "Apply the version policy: stable locations and quest steps may rely on older mature sources, while balance, "
             "builds, bugs, and patch mechanics require newer high-trust support or an uncertainty note. "
             "Return only the improved final answer, not a critique. "
+            "If evidence disproves the question's premise, correct it concisely and do not force the intent template or "
+            "invent irrelevant steps, branches, rewards, or troubleshooting. "
+            "Preserve the evidence's action semantics and remove inferred battles, minigames, item consumption, chapter "
+            "numbers, collectible numbers, or rewards that are not explicitly stated. "
             "If sources do not directly support concrete locations, materials, NPC names, steps, numbers, or effects, "
-            "remove those details and return a conservative answer that says what is verified and what is still missing."
+            "remove those details and return a conservative answer that says what is verified and what is still missing. "
+            "Every retained concrete claim must cite one or more valid source indexes such as [1]."
         )
 
     @classmethod
@@ -635,8 +664,22 @@ class GuideLLM:
         if not sanitized_queries:
             return cls._fallback_search_plan(question=fallback_question)
 
+        intent = plan.intent or "general"
+        if (
+            intent in {"item_location", "item_usage", "quest_step", "game_mechanic"}
+            and not any(query.source_type == "web" for query in sanitized_queries)
+        ):
+            web_query = PlannedSearchQuery(
+                source_type="web",
+                query=cls._fallback_search_subject(cls._sanitize_search_text(fallback_question)),
+            )
+            if len(sanitized_queries) >= 4:
+                sanitized_queries[-1] = web_query
+            else:
+                sanitized_queries.append(web_query)
+
         return SearchPlan(
-            intent=plan.intent or "general",
+            intent=intent,
             aliases=cls._sanitize_aliases(plan.aliases),
             queries=sanitized_queries,
             missing_info=plan.missing_info[:4],
@@ -646,61 +689,79 @@ class GuideLLM:
     def _fallback_search_plan(*, question: str) -> SearchPlan:
         safe_question = GuideLLM._sanitize_search_text(question)
         intent = GuideLLM._infer_intent(safe_question)
+        search_subject = GuideLLM._fallback_search_subject(safe_question)
         queries: list[PlannedSearchQuery] = []
 
         if intent == "patch":
-            queries.append(PlannedSearchQuery(source_type="official", query=f"{safe_question} patch notes update"))
+            queries.append(PlannedSearchQuery(source_type="official", query=f"{search_subject} patch notes update"))
         elif intent == "boss_strategy":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} boss weakness phase"),
-                    PlannedSearchQuery(source_type="community", query=f"{safe_question} strategy dodge timing build"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} boss weakness phase"),
+                    PlannedSearchQuery(source_type="community", query=f"{search_subject} strategy dodge timing build"),
                 ]
             )
         elif intent == "item_location":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} item location merchant drop"),
-                    PlannedSearchQuery(source_type="web", query=f"{safe_question} map location guide"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} item location merchant drop"),
+                    PlannedSearchQuery(source_type="web", query=f"{search_subject} map location guide"),
                 ]
             )
         elif intent == "item_usage":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} item use effect where to use puzzle"),
-                    PlannedSearchQuery(source_type="community", query=f"{safe_question} what does it do how to use"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} item use effect where to use puzzle"),
+                    PlannedSearchQuery(source_type="community", query=f"{search_subject} what does it do how to use"),
                 ]
             )
         elif intent == "quest_step":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} questline step location reward"),
-                    PlannedSearchQuery(source_type="web", query=f"{safe_question} walkthrough guide"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} questline step location reward"),
+                    PlannedSearchQuery(source_type="web", query=f"{search_subject} walkthrough guide"),
                 ]
             )
         elif intent == "game_mechanic":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} mode mechanic unlock enable trigger"),
-                    PlannedSearchQuery(source_type="community", query=f"{safe_question} how to enable unlock trigger"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} mode mechanic unlock enable trigger"),
+                    PlannedSearchQuery(source_type="community", query=f"{search_subject} how to enable unlock trigger"),
                 ]
             )
         elif intent == "build":
             queries.extend(
                 [
-                    PlannedSearchQuery(source_type="community", query=f"{safe_question} build stats weapons talismans"),
-                    PlannedSearchQuery(source_type="wiki", query=f"{safe_question} weapon skill scaling"),
+                    PlannedSearchQuery(source_type="community", query=f"{search_subject} build stats weapons talismans"),
+                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} weapon skill scaling"),
                 ]
             )
 
         queries.extend(
             [
-                PlannedSearchQuery(source_type="wiki", query=f"{safe_question} wiki guide"),
-                PlannedSearchQuery(source_type="web", query=safe_question),
+                PlannedSearchQuery(source_type="wiki", query=f"{search_subject} wiki guide"),
+                PlannedSearchQuery(source_type="web", query=search_subject),
             ]
         )
 
-        return SearchPlan(intent=intent, aliases=[], queries=queries[:4], missing_info=[])
+        aliases = [search_subject] if search_subject.casefold() != safe_question.casefold() else []
+        return SearchPlan(intent=intent, aliases=aliases, queries=queries[:4], missing_info=[])
+
+    @staticmethod
+    def _fallback_search_subject(question: str) -> str:
+        """Keep entity names while dropping natural-language search instructions."""
+        latin_phrases = [
+            " ".join(phrase.split()).strip(" -_'\"")
+            for phrase in re.findall(r"[A-Za-z0-9][A-Za-z0-9'_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'_.-]*)*", question)
+        ]
+        latin_phrases = [phrase for phrase in latin_phrases if len(phrase) >= 3]
+        if latin_phrases:
+            return max(latin_phrases, key=len)
+
+        entity_tokens = question_relevance_tokens(question)
+        if entity_tokens:
+            return entity_tokens[0].removeprefix("开启").removeprefix("打开").removeprefix("解锁")
+        return question
 
     @staticmethod
     def _sanitize_search_text(value: str) -> str:
@@ -745,7 +806,10 @@ class GuideLLM:
             return "item_usage"
         if any(token in lowered for token in ("在哪", "哪里", "获得", "获取", "钥匙", "位置", "location", "where")):
             return "item_location"
-        if any(token in lowered for token in ("任务", "支线", "下一步", "npc", "quest", "questline")):
+        if any(
+            token in lowered
+            for token in ("任务", "支线", "下一步", "加入队伍", "入队", "招募", "npc", "quest", "questline", "recruit")
+        ):
             return "quest_step"
         if any(
             token in lowered
@@ -806,11 +870,24 @@ class GuideLLM:
         if GuideLLM._has_unsupported_specifics(answer=cleaned, sources=sources, question=request.question):
             return True
 
+        evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
+        if (
+            sources
+            and GuideLLM._evidence_level(question=evidence_question, sources=sources) == "direct"
+            and not GuideLLM._has_valid_citation(answer=cleaned, source_count=len(sources))
+        ):
+            return True
+
         if intent in {"boss_strategy", "item_location", "item_usage", "quest_step", "game_mechanic", "build"}:
             action_markers = ("1.", "1、", "-", "•", "先", "然后", "推荐", "位置", "步骤")
             if not any(marker in cleaned for marker in action_markers):
                 return True
         return False
+
+    @staticmethod
+    def _has_valid_citation(*, answer: str, source_count: int) -> bool:
+        cited = [int(value) for value in re.findall(r"\[(\d+)\]", answer)]
+        return bool(cited) and all(1 <= index <= source_count for index in cited)
 
     @staticmethod
     def _required_answer_markers(intent: SearchIntent | str) -> list[tuple[str, ...]]:

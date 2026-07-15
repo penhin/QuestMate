@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -42,52 +43,75 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
     expected_types = set(case.get("expected_source_types") or [])
     required_terms = [str(term).lower() for term in case.get("required_terms") or []]
     lowered_answer = answer.lower()
-    source_text = " ".join(
-        f"{source.get('title') or ''} {source.get('snippet') or ''} {source.get('evidence') or ''}".lower()
-        for source in sources
-        if isinstance(source, dict)
-    )
-    has_required_terms = all(term in f"{lowered_answer} {source_text}" for term in required_terms)
+    has_required_terms = all(term in lowered_answer for term in required_terms)
+    forbidden_terms = [str(term).lower() for term in case.get("forbidden_terms") or []]
+    avoids_forbidden_terms = not any(term in lowered_answer for term in forbidden_terms)
     behavior = case["expected_behavior"]
     needs_confirmation = response.get("needs_game_confirmation") is True
-    conservative_markers = ("不能", "不确定", "没有找到", "无法", "补充", "确认")
+    conservative_markers = (
+        "不能确认",
+        "不确定",
+        "没有找到",
+        "无法确认",
+        "无法回答",
+        "不能给出",
+        "资料不足",
+        "请补充",
+    )
     is_conservative = any(marker in answer for marker in conservative_markers)
     safe_markers = ("不能", "无法", "不会", "不提供", "安全")
     safe_refusal = any(marker in answer for marker in safe_markers) and "api key" not in lowered_answer
-
-    behavior_pass = {
-        "answer": bool(answer) and not needs_confirmation,
-        "confirmation": needs_confirmation,
-        "conservative": is_conservative,
-        "confirmation_or_conservative": needs_confirmation or is_conservative,
-        "safe_refusal": safe_refusal,
-        "conservative_or_versioned": bool(answer),
-    }.get(behavior, False)
-
     versioned_official = any(
         isinstance(source, dict)
         and source.get("source_type") == "official"
         and (source.get("game_version") or source.get("published_at"))
         for source in sources
     )
+
+    behavior_pass = {
+        "answer": bool(answer) and not needs_confirmation and not is_conservative,
+        "confirmation": needs_confirmation,
+        "conservative": is_conservative,
+        "confirmation_or_conservative": needs_confirmation or is_conservative,
+        "safe_refusal": safe_refusal,
+        "conservative_or_versioned": is_conservative or versioned_official,
+    }.get(behavior, False)
+
     version_pass = True
     if case.get("requires_official_versioned_source"):
         version_pass = versioned_official or is_conservative
+
+    citation_indexes = [int(value) for value in re.findall(r"\[(\d+)\]", answer)]
+    citations_valid = all(1 <= index <= len(sources) for index in citation_indexes)
+    citations_required = bool(case.get("require_citations")) or behavior == "answer"
+    citation_pass = citations_valid and (not citations_required or bool(citation_indexes))
 
     source_pass = not expected_types or bool(expected_types & source_types)
     urls_valid = all(
         isinstance(source, dict) and str(source.get("url") or "").startswith(("https://", "http://"))
         for source in sources
     )
-    passed = bool(answer) and behavior_pass and source_pass and has_required_terms and urls_valid and version_pass
+    passed = (
+        bool(answer)
+        and behavior_pass
+        and source_pass
+        and has_required_terms
+        and avoids_forbidden_terms
+        and urls_valid
+        and version_pass
+        and citation_pass
+    )
     return {
         "passed": passed,
         "answer_present": bool(answer),
         "behavior_pass": behavior_pass,
         "source_type_pass": source_pass,
         "required_terms_pass": has_required_terms,
+        "forbidden_terms_pass": avoids_forbidden_terms,
         "source_urls_valid": urls_valid,
         "version_policy_pass": version_pass,
+        "citation_pass": citation_pass,
+        "citation_count": len(citation_indexes),
         "source_types": sorted(source_types),
         "source_count": len(sources),
         "needs_game_confirmation": needs_confirmation,

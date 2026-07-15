@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -9,9 +11,17 @@ import agent as agent_module
 import main
 from config import Settings
 from model_providers import OpenAICompatibleProvider, create_model_provider
+from quality_policy import (
+    EVIDENCE_POOL_WEIGHTS,
+    GAME_RESOLUTION_POLICY,
+    RELEVANCE_SCORE_POLICY,
+    SEARCH_RESULT_WEIGHTS,
+    SOURCE_POLICIES,
+)
 from knowledge import chunk_text, keyword_terms, parse_published_at
 from evals.run_evals import DEFAULT_CASES, evaluate_case, load_cases
 from agent import QuestAgent
+from game_resolution import GameResolver, identity_matches_game
 from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, SessionMessage, Source
 from search import TavilySearchProvider
@@ -37,6 +47,89 @@ class EmptySearchProvider:
         return []
 
 
+class FastIdentitySearchClient:
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def search(self, **kwargs):
+        self.queries.append(kwargs["query"])
+        if kwargs["query"] == '"Look Outside" game Steam itch.io GOG wiki':
+            return {
+                "results": [
+                    {
+                        "title": "Look Outside on Steam",
+                        "url": "https://store.steampowered.com/app/3373660/Look_Outside/",
+                        "content": "Look Outside is an indie RPG.",
+                        "score": 0.9,
+                    },
+                    {
+                        "title": "Look Outside Wiki",
+                        "url": "https://look-outside.fandom.com/wiki/Look_Outside_Wiki",
+                        "content": "Look Outside wiki database.",
+                        "score": 0.8,
+                    },
+                    {
+                        "title": "Smooch Mode | Look Outside Wiki",
+                        "url": "https://look-outside.fandom.com/wiki/Smooch_Mode",
+                        "content": "Look Outside mode guide.",
+                        "score": 0.85,
+                    },
+                ]
+            }
+        return {"results": []}
+
+
+def test_game_resolver_fast_identity_confirms_niche_game() -> None:
+    client = FastIdentitySearchClient()
+    resolution = GameResolver(client).resolve(game="Look Outside")
+
+    assert resolution.is_confirmed
+    assert resolution.confirmed_name == "Look Outside"
+    assert resolution.database_domains == ["look-outside.fandom.com"]
+    assert "Smooch Mode" not in resolution.aliases
+    assert len(client.queries) == 1
+
+
+def test_game_identity_requires_exact_compact_name() -> None:
+    assert identity_matches_game(
+        title="Look Outside Wiki",
+        url="https://look-outside.fandom.com",
+        game="Look Outside",
+    )
+    assert not identity_matches_game(
+        title="A character looks outside",
+        url="https://bully.fandom.com/wiki/Kissing",
+        game="Look Outside",
+    )
+
+
+def test_game_resolver_enriches_confirmed_store_identity_with_niche_wiki() -> None:
+    class StoreThenWikiClient:
+        def search(self, **kwargs):
+            if kwargs["query"] == '"Felvidek" game Steam itch.io GOG wiki':
+                return {
+                    "results": [{
+                        "title": "Felvidek on Steam",
+                        "url": "https://store.steampowered.com/app/2299900/Felvidek/",
+                        "score": 0.9,
+                    }]
+                }
+            if kwargs["query"] == '"Felvidek" wiki fandom wiki.gg':
+                return {
+                    "results": [{
+                        "title": "Pavol | Felvidek Wiki",
+                        "url": "https://felvidek.fandom.com/wiki/Pavol",
+                        "score": 0.8,
+                    }]
+                }
+            return {"results": []}
+
+    resolution = GameResolver(StoreThenWikiClient()).resolve(game="Felvidek")
+
+    assert resolution.is_confirmed
+    assert resolution.database_domains == ["felvidek.fandom.com"]
+
+
 def test_knowledge_chunking_preserves_order_and_overlap() -> None:
     content = "第一段资料。" * 180
     chunks = chunk_text(content, chunk_size=120, overlap=20)
@@ -46,6 +139,51 @@ def test_knowledge_chunking_preserves_order_and_overlap() -> None:
     terms = keyword_terms("女武神 Malenia 怎么打")
     assert "malenia" in terms
     assert {"女武", "武神"}.issubset(terms)
+
+
+def test_question_tokens_remove_intent_noise() -> None:
+    from query_tokens import question_relevance_tokens
+
+    assert question_relevance_tokens("玛莲妮亚怎么打，弱点是什么？") == ["玛莲妮亚"]
+    assert question_relevance_tokens("Malenia boss strategy weakness") == ["malenia"]
+    assert question_relevance_tokens("How does Pavol join the party?") == ["pavol"]
+
+
+def test_quality_policy_weights_and_thresholds_are_valid() -> None:
+    assert sum(
+        (
+            SEARCH_RESULT_WEIGHTS.relevance,
+            SEARCH_RESULT_WEIGHTS.retrieval,
+            SEARCH_RESULT_WEIGHTS.trust,
+            SEARCH_RESULT_WEIGHTS.intent,
+            SEARCH_RESULT_WEIGHTS.domain,
+            SEARCH_RESULT_WEIGHTS.version,
+        )
+    ) == pytest.approx(1)
+    assert sum(
+        (
+            EVIDENCE_POOL_WEIGHTS.relevance,
+            EVIDENCE_POOL_WEIGHTS.retrieval,
+            EVIDENCE_POOL_WEIGHTS.trust,
+            EVIDENCE_POOL_WEIGHTS.version,
+        )
+    ) == pytest.approx(1)
+    assert set(SOURCE_POLICIES) == {"official", "wiki", "community", "web"}
+    assert 0 < GAME_RESOLUTION_POLICY.confirmed_threshold < 1
+    assert RELEVANCE_SCORE_POLICY.base_score + RELEVANCE_SCORE_POLICY.coverage_weight <= 1
+
+
+def test_shared_game_registry_has_unique_processes_and_names() -> None:
+    registry_path = Path(__file__).parents[1] / "overlay" / "src" / "config" / "games.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    games = registry["games"]
+    names = [game["name"] for game in games]
+    processes = [process.lower() for game in games for process in game["processes"]]
+
+    assert games
+    assert len(names) == len(set(names))
+    assert len(processes) == len(set(processes))
+    assert all(process.endswith(".exe") for process in processes)
 
 
 class LocalKnowledge:
@@ -72,6 +210,30 @@ async def test_agent_merges_local_knowledge_before_web_results() -> None:
     )
 
     assert [source.title for source in sources] == ["本地女武神资料"]
+
+
+async def test_agent_reranks_local_and_web_sources_together() -> None:
+    class WebSearchProvider(EmptySearchProvider):
+        async def search(self, query: str, game: str, max_results=None, plan=None, game_resolution=None):
+            return [
+                Source(
+                    title="Malenia strategy",
+                    url="https://example.org/malenia",
+                    evidence="Malenia weakness phase dodge strategy",
+                    score=0.9,
+                    trust_score=0.8,
+                )
+            ]
+
+    agent = QuestAgent(search_provider=WebSearchProvider(), knowledge=LocalKnowledge())
+    sources = await agent._retrieve_sources(
+        "Malenia weakness",
+        "Elden Ring",
+        plan=SearchPlan(intent="boss_strategy", aliases=["Malenia"]),
+        game_resolution=GameResolution(input_name="Elden Ring", confirmed_name="Elden Ring", confidence=0.8),
+    )
+
+    assert sources[0].title == "Malenia strategy"
 
 
 def test_patch_answers_require_dated_official_evidence() -> None:
@@ -145,6 +307,47 @@ def test_evaluation_rejects_undated_non_official_patch_answer() -> None:
 
     assert result["version_policy_pass"] is False
     assert result["passed"] is False
+
+
+def test_evaluation_accepts_dated_official_patch_answer() -> None:
+    case = {
+        "id": "patch",
+        "expected_behavior": "conservative_or_versioned",
+        "expected_source_types": ["official"],
+        "required_terms": ["削弱"],
+        "requires_official_versioned_source": True,
+    }
+    response = {
+        "answer": "1.12 版本削弱了对应技能。[1]",
+        "sources": [
+            {
+                "title": "Official patch notes",
+                "url": "https://example.com/patch",
+                "source_type": "official",
+                "game_version": "1.12",
+            }
+        ],
+    }
+
+    assert evaluate_case(case, response)["passed"] is True
+
+
+def test_evaluation_requires_answer_terms_and_valid_citations() -> None:
+    case = {
+        "id": "boss",
+        "expected_behavior": "answer",
+        "expected_source_types": ["wiki"],
+        "required_terms": ["玛莲妮亚"],
+    }
+    source = {"title": "玛莲妮亚", "url": "https://example.com/guide", "source_type": "wiki"}
+
+    missing_term = evaluate_case(case, {"answer": "保持距离。[1]", "sources": [source]})
+    bad_citation = evaluate_case(case, {"answer": "玛莲妮亚保持距离。[2]", "sources": [source]})
+    passing = evaluate_case(case, {"answer": "玛莲妮亚需要保持距离。[1]", "sources": [source]})
+
+    assert missing_term["required_terms_pass"] is False
+    assert bad_citation["citation_pass"] is False
+    assert passing["passed"] is True
 
 
 class AmbiguousGameSearchProvider:
@@ -667,6 +870,15 @@ def test_search_rerank_prefers_question_entity_in_title() -> None:
     )
 
 
+def test_search_extracts_relevant_passage_from_raw_content() -> None:
+    content = "通用介绍。" * 300 + "玛莲妮亚弱点与二阶段水鸟乱舞躲避方法。" + "其他内容。" * 300
+
+    evidence = TavilySearchProvider._best_evidence_passage(content, question="玛莲妮亚怎么打")
+
+    assert "玛莲妮亚弱点" in evidence
+    assert len(evidence) <= 1600
+
+
 def test_search_version_sensitive_sources_prefer_official_or_versioned() -> None:
     official_score = TavilySearchProvider._version_safety_score(
         intent="patch",
@@ -852,6 +1064,51 @@ def test_evidence_check_uses_planned_aliases() -> None:
     ]
 
     assert not GuideLLM._should_return_conservative_answer(request=request, sources=sources, plan=plan)
+
+
+def test_evidence_check_requires_entity_coverage_in_one_source() -> None:
+    sources = [
+        Source(title="Malenia", url="https://example.com/a", evidence="General character page"),
+        Source(title="Waterfowl Dance", url="https://example.com/b", evidence="Unrelated game mechanic"),
+        Source(title="Scarlet Rot", url="https://example.com/c", evidence="Unrelated status page"),
+    ]
+
+    assert not GuideLLM._has_question_specific_sources(
+        question="Malenia Waterfowl ScarletRot strategy weakness",
+        sources=sources,
+    )
+
+
+def test_evidence_check_treats_planned_aliases_as_alternatives() -> None:
+    request = ChatRequest(game="逃出从此以后", question="灌铅骰子有什么用？")
+    plan = SearchPlan(intent="item_usage", aliases=["Loaded Dice", "Weighted Die"])
+    evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
+    sources = [
+        Source(
+            title="Loaded Dice",
+            url="https://example.com/loaded-dice",
+            evidence="Loaded Dice changes the puzzle outcome.",
+        )
+    ]
+
+    assert GuideLLM._has_question_specific_sources(question=evidence_question, sources=sources)
+
+
+def test_answer_revision_requires_valid_source_citation() -> None:
+    request = ChatRequest(game="Elden Ring", question="Malenia 怎么打？")
+    sources = [
+        Source(title="Malenia strategy", url="https://example.com/malenia", evidence="Malenia strategy weakness")
+    ]
+    answer = "结论：保持距离。弱点与抗性需要注意。准备合适装备。分阶段处理危险招式，打不过时召唤协助。"
+
+    assert GuideLLM._answer_needs_revision(
+        request=request,
+        answer=answer,
+        sources=sources,
+        plan=SearchPlan(intent="boss_strategy", aliases=["Malenia"]),
+    )
+    assert GuideLLM._has_valid_citation(answer=f"{answer}[1]", source_count=1)
+    assert not GuideLLM._has_valid_citation(answer=f"{answer}[2]", source_count=1)
     assert GuideLLM._answer_needs_revision(
         request=ChatRequest(game="Elden Ring", question="玛莉卡背景是什么？"),
         answer="玛莉卡是重要角色，剧情很复杂。",
@@ -871,7 +1128,7 @@ def test_search_planner_sanitizes_prompt_injection_text() -> None:
     assert plan.queries
     assert all("系统prompt" not in query.query for query in plan.queries)
     assert all("忽略以上指令" not in query.query for query in plan.queries)
-    assert any("女武神怎么打" in query.query for query in plan.queries)
+    assert any("女武神" in query.query for query in plan.queries)
 
 
 def test_search_planner_sanitizes_aliases() -> None:
@@ -900,6 +1157,14 @@ def test_fallback_search_plan_uses_intent_specific_queries() -> None:
     assert any("effect" in query.query or "what does" in query.query for query in usage_plan.queries)
     assert mechanic_plan.intent == "game_mechanic"
     assert any("unlock" in query.query or "trigger" in query.query for query in mechanic_plan.queries)
+
+
+def test_fallback_search_plan_keeps_embedded_english_entity_compact() -> None:
+    plan = GuideLLM._fallback_search_plan(question="如何开启 Kissing Mode？请给出具体触发步骤。")
+
+    assert plan.aliases == ["Kissing Mode"]
+    assert all("请给出具体触发步骤" not in query.query for query in plan.queries)
+    assert any(query.query.startswith("Kissing Mode ") for query in plan.queries)
 
 
 def test_contextual_search_question_merges_short_followup() -> None:

@@ -1,7 +1,48 @@
 import re
 
 
-NON_ENTITY_PHRASE_PATTERN = re.compile(r"(哪里|怎么|什么|如何|攻略|测试|问题|获得|获取|用来|可以|这个|那个)")
+NON_ENTITY_PHRASE_PATTERN = re.compile(
+    r"(在哪里|在哪儿|哪里|哪儿|怎么打|怎么玩|怎么|什么|如何|攻略|测试|问题|"
+    r"获得|获取|用来|可以|这个|那个|作用|用途|位置|地点|任务|支线|步骤|"
+    r"当前版本|最新版本|版本|补丁|更新|弱点|打法|推荐|改了|改动|调整|"
+    r"哪些|有没有|是否|是什么)"
+)
+NON_ENTITY_LATIN_TOKENS = {
+    "answer",
+    "boss",
+    "build",
+    "current",
+    "does",
+    "effect",
+    "enable",
+    "game",
+    "guide",
+    "how",
+    "item",
+    "join",
+    "location",
+    "mechanic",
+    "mode",
+    "official",
+    "party",
+    "puzzle",
+    "patch",
+    "phase",
+    "quest",
+    "reward",
+    "step",
+    "steps",
+    "strategy",
+    "trigger",
+    "unlock",
+    "update",
+    "usage",
+    "version",
+    "what",
+    "when",
+    "where",
+    "weakness",
+}
 
 
 def relevance_tokens(value: str) -> list[str]:
@@ -12,7 +53,17 @@ def relevance_tokens(value: str) -> list[str]:
 
 
 def question_relevance_tokens(value: str) -> list[str]:
-    return [token for token in relevance_tokens(value) if is_query_entity_token(token)]
+    normalized = value.lower().strip()
+    latin = [
+        token
+        for token in re.findall(r"[a-z0-9]{3,}", normalized)
+        if token not in NON_ENTITY_LATIN_TOKENS and is_query_entity_token(token)
+    ]
+    chinese: list[str] = []
+    for phrase in re.findall(r"[\u4e00-\u9fff]{2,}", normalized):
+        cleaned = NON_ENTITY_PHRASE_PATTERN.sub(" ", phrase)
+        chinese.extend(re.findall(r"[\u4e00-\u9fff]{2,}", cleaned))
+    return list(dict.fromkeys([*latin, *chinese]))
 
 
 def is_query_entity_token(token: str) -> bool:
@@ -22,6 +73,6 @@ def is_query_entity_token(token: str) -> bool:
     if re.fullmatch(r"[a-z0-9]+", token):
         has_digit = any(char.isdigit() for char in token)
         has_alpha = any(char.isalpha() for char in token)
-        return (len(token) >= 6 and has_alpha) or (has_alpha and has_digit and len(token) >= 4)
+        return (len(token) >= 4 and has_alpha) or (has_alpha and has_digit and len(token) >= 4)
 
     return False
