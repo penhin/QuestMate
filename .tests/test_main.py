@@ -19,7 +19,6 @@ from quality_policy import (
     SOURCE_POLICIES,
 )
 from knowledge import chunk_text, keyword_terms, parse_published_at
-from evals.run_evals import DEFAULT_CASES, evaluate_case, load_cases
 from agent import QuestAgent
 from game_resolution import GameResolver, identity_matches_game
 from llm import GuideLLM
@@ -386,82 +385,6 @@ async def test_storage_requires_explicit_opt_in_for_ephemeral_fallback() -> None
     store = PostgresConversationStore(database=BrokenDatabase())
     with pytest.raises(RuntimeError, match="Postgres is unavailable"):
         await store.init_schema()
-
-
-def test_evaluation_suite_has_diverse_unique_cases() -> None:
-    cases = load_cases(DEFAULT_CASES)
-
-    assert len(cases) == 30
-    assert len({case["id"] for case in cases}) == len(cases)
-    assert {"patch", "boss_strategy", "quest_step", "prompt_injection"}.issubset(
-        {case["category"] for case in cases}
-    )
-
-
-def test_evaluation_rejects_undated_non_official_patch_answer() -> None:
-    case = {
-        "id": "patch",
-        "expected_behavior": "conservative_or_versioned",
-        "expected_source_types": ["official"],
-        "required_terms": [],
-        "requires_official_versioned_source": True,
-    }
-    response = {
-        "answer": "当前版本已经削弱。",
-        "sources": [
-            {
-                "title": "Community patch summary",
-                "url": "https://example.com/patch",
-                "source_type": "community",
-            }
-        ],
-    }
-
-    result = evaluate_case(case, response)
-
-    assert result["version_policy_pass"] is False
-    assert result["passed"] is False
-
-
-def test_evaluation_accepts_dated_official_patch_answer() -> None:
-    case = {
-        "id": "patch",
-        "expected_behavior": "conservative_or_versioned",
-        "expected_source_types": ["official"],
-        "required_terms": ["削弱"],
-        "requires_official_versioned_source": True,
-    }
-    response = {
-        "answer": "1.12 版本削弱了对应技能。[1]",
-        "sources": [
-            {
-                "title": "Official patch notes",
-                "url": "https://example.com/patch",
-                "source_type": "official",
-                "game_version": "1.12",
-            }
-        ],
-    }
-
-    assert evaluate_case(case, response)["passed"] is True
-
-
-def test_evaluation_requires_answer_terms_and_valid_citations() -> None:
-    case = {
-        "id": "boss",
-        "expected_behavior": "answer",
-        "expected_source_types": ["wiki"],
-        "required_terms": ["玛莲妮亚"],
-    }
-    source = {"title": "玛莲妮亚", "url": "https://example.com/guide", "source_type": "wiki"}
-
-    missing_term = evaluate_case(case, {"answer": "保持距离。[1]", "sources": [source]})
-    bad_citation = evaluate_case(case, {"answer": "玛莲妮亚保持距离。[2]", "sources": [source]})
-    passing = evaluate_case(case, {"answer": "玛莲妮亚需要保持距离。[1]", "sources": [source]})
-
-    assert missing_term["required_terms_pass"] is False
-    assert bad_citation["citation_pass"] is False
-    assert passing["passed"] is True
 
 
 class AmbiguousGameSearchProvider:

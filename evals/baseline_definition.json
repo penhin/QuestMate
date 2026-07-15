@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "status": "ready_for_first_model_run",
+  "dataset": {
+    "sha256": "865ab2241c2489a8f63eddf678994b15cd4329ead61b4ddec7b89b08aaf674f5",
+    "case_count": 50,
+    "dev_cases": 30,
+    "validation_cases": 20,
+    "mainstream_cases": 25,
+    "niche_cases": 19,
+    "safety_cases": 6,
+    "hard_cases": 14
+  },
+  "quality_dimensions": [
+    "answer_present",
+    "behavior_pass",
+    "source_type_pass",
+    "required_terms_pass",
+    "forbidden_terms_pass",
+    "source_urls_valid",
+    "version_policy_pass",
+    "citation_pass"
+  ],
+  "segments": [
+    "category",
+    "split",
+    "tier",
+    "difficulty"
+  ],
+  "policy": {
+    "dev_split": "用于日常定位和调参",
+    "validation_split": "只用于回归确认，不针对单个失败案例调提示词",
+    "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定"
+  }
+}

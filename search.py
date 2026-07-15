@@ -1,17 +1,9 @@
 import asyncio
-from collections import OrderedDict
-from copy import deepcopy
 from datetime import datetime, timezone
-from hashlib import sha256
-import json
 import re
-from threading import Lock
-from time import monotonic
-from urllib.parse import quote, urlencode, urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse, urlunparse
 from typing import Any, Protocol
 
-from redis import Redis
 import structlog
 from tavily import TavilyClient
 
@@ -37,171 +29,11 @@ from quality_policy import (
 )
 from query_tokens import question_relevance_tokens, relevance_tokens
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
+from mediawiki_client import MediaWikiClient
+from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
 
 
 logger = structlog.get_logger()
-
-
-class TTLSearchCache:
-    """Small thread-safe LRU cache for paid search responses."""
-
-    def __init__(self, *, ttl_seconds: int, max_entries: int) -> None:
-        self.ttl_seconds = ttl_seconds
-        self.max_entries = max_entries
-        self._values: OrderedDict[str, tuple[float, Any]] = OrderedDict()
-        self._lock = Lock()
-
-    def get(self, key: str) -> Any | None:
-        if self.ttl_seconds <= 0:
-            return None
-        now = monotonic()
-        with self._lock:
-            cached = self._values.get(key)
-            if cached is None:
-                return None
-            expires_at, value = cached
-            if expires_at <= now:
-                self._values.pop(key, None)
-                return None
-            self._values.move_to_end(key)
-            return deepcopy(value)
-
-    def set(self, key: str, value: Any) -> None:
-        if self.ttl_seconds <= 0:
-            return
-        with self._lock:
-            self._values[key] = (monotonic() + self.ttl_seconds, deepcopy(value))
-            self._values.move_to_end(key)
-            while len(self._values) > self.max_entries:
-                self._values.popitem(last=False)
-
-
-class RedisSearchCache:
-    """Persistent JSON cache with a local fallback when Redis is unavailable."""
-
-    def __init__(self, *, redis_url: str, fallback: TTLSearchCache) -> None:
-        self._redis = Redis.from_url(
-            redis_url,
-            decode_responses=True,
-            socket_connect_timeout=0.5,
-            socket_timeout=0.5,
-        )
-        self._fallback = fallback
-
-    @staticmethod
-    def _redis_key(key: str) -> str:
-        digest = sha256(key.encode("utf-8")).hexdigest()
-        return f"questmate:search:v1:{digest}"
-
-    def get(self, key: str) -> Any | None:
-        local = self._fallback.get(key)
-        if local is not None:
-            return local
-        try:
-            payload = self._redis.get(self._redis_key(key))
-            if payload is None:
-                return None
-            value = json.loads(payload)
-        except Exception:
-            return None
-        self._fallback.set(key, value)
-        return value
-
-    def set(self, key: str, value: Any) -> None:
-        self._fallback.set(key, value)
-        if self._fallback.ttl_seconds <= 0:
-            return
-        try:
-            self._redis.setex(
-                self._redis_key(key),
-                self._fallback.ttl_seconds,
-                json.dumps(value, ensure_ascii=False, default=str),
-            )
-        except Exception:
-            return
-
-
-class CachedSearchClient:
-    """Cache identical Tavily calls and expose credit-relevant counters."""
-
-    def __init__(self, client: Any, cache: Any) -> None:
-        self._client = client
-        self._cache = cache
-        self.upstream_calls = 0
-        self.cache_hits = 0
-
-    def search(self, **kwargs: Any) -> dict[str, Any]:
-        key = json.dumps(kwargs, ensure_ascii=False, sort_keys=True, default=str)
-        cached = self._cache.get(key)
-        if cached is not None:
-            self.cache_hits += 1
-            return cached
-        result = self._client.search(**kwargs)
-        self.upstream_calls += 1
-        self._cache.set(key, result)
-        return result
-
-
-class MediaWikiClient:
-    """Query game-specific MediaWiki installations without paid search."""
-
-    user_agent = "QuestMate/0.1 (local game guide search)"
-
-    def search(self, *, domain: str, query: str, max_results: int) -> dict[str, Any]:
-        search_query = " ".join(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", query)) or query
-        params = urlencode(
-            {
-                "action": "query",
-                "generator": "search",
-                "gsrsearch": search_query,
-                "gsrlimit": max_results,
-                "prop": "revisions",
-                "rvprop": "content",
-                "rvslots": "main",
-                "format": "json",
-                "formatversion": 2,
-                "origin": "*",
-            }
-        )
-        request = Request(
-            f"https://{domain}/api.php?{params}",
-            headers={"User-Agent": self.user_agent},
-        )
-        with urlopen(request, timeout=15) as response:
-            payload = json.load(response)
-        pages = sorted(
-            payload.get("query", {}).get("pages", []),
-            key=lambda page: int(page.get("index") or 9999),
-        )
-        results = []
-        for page in pages:
-            title = str(page.get("title") or "").strip()
-            if not title:
-                continue
-            revisions = page.get("revisions") or []
-            content = ""
-            if revisions:
-                content = str(revisions[0].get("slots", {}).get("main", {}).get("content") or "")
-            results.append(
-                {
-                    "title": title,
-                    "url": f"https://{domain}/wiki/{quote(title.replace(' ', '_'))}",
-                    "content": self._clean_wikitext(content)[:6000],
-                    "score": 0.9,
-                }
-            )
-        return {"results": results}
-
-    @staticmethod
-    def _clean_wikitext(content: str) -> str:
-        cleaned = re.sub(r"<!--.*?-->|<ref\b[^>]*>.*?</ref>|<ref\b[^>]*/>", " ", content, flags=re.S | re.I)
-        cleaned = re.sub(r"\[\[(?:File|Image):[^\]]+\]\]", " ", cleaned, flags=re.I)
-        cleaned = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", cleaned)
-        cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
-        for _ in range(3):
-            cleaned = re.sub(r"\{\{[^{}]*\}\}", " ", cleaned)
-        cleaned = re.sub(r"'{2,}|={2,}|\[https?://\S+\s*([^\]]*)\]", r" \1 ", cleaned)
-        return re.sub(r"\s+", " ", cleaned).strip()
 
 
 class SearchProvider(Protocol):
