@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{LogicalSize, Manager, Size};
+use tauri::{LogicalSize, Manager, PhysicalPosition, Position, Size};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,7 +15,16 @@ fn get_active_game() -> ActiveGame {
 }
 
 #[tauri::command]
-fn set_overlay_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
+fn list_processes() -> Vec<String> {
+    platform::list_processes()
+}
+
+#[tauri::command]
+fn set_overlay_layout(
+    app: tauri::AppHandle,
+    mode: String,
+    placement: String,
+) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "main window not found".to_string())?;
@@ -30,6 +39,7 @@ fn set_overlay_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     window
         .set_size(Size::Logical(LogicalSize { width, height }))
         .map_err(|err| err.to_string())?;
+    position_overlay(&window, &placement)?;
     window
         .set_always_on_top(true)
         .map_err(|err| err.to_string())?;
@@ -38,11 +48,48 @@ fn set_overlay_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+fn position_overlay(window: &tauri::WebviewWindow, placement: &str) -> Result<(), String> {
+    let monitor = window
+        .current_monitor()
+        .map_err(|err| err.to_string())?
+        .or(window.primary_monitor().map_err(|err| err.to_string())?)
+        .ok_or_else(|| "no monitor available".to_string())?;
+    let work_area = monitor.work_area();
+    let window_size = window.outer_size().map_err(|err| err.to_string())?;
+    let horizontal_space = work_area.size.width.saturating_sub(window_size.width);
+    let vertical_space = work_area.size.height.saturating_sub(window_size.height);
+    let inset = 24;
+
+    let (offset_x, offset_y) = match placement {
+        "bottom-right" => (
+            horizontal_space.saturating_sub(inset),
+            vertical_space.saturating_sub(inset),
+        ),
+        "bottom-left" => (
+            inset.min(horizontal_space),
+            vertical_space.saturating_sub(inset),
+        ),
+        "center" => (horizontal_space / 2, vertical_space / 2),
+        _ => return Err(format!("unsupported overlay placement: {placement}")),
+    };
+
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(
+            work_area.position.x + offset_x as i32,
+            work_area.position.y + offset_y as i32,
+        )))
+        .map_err(|err| err.to_string())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_active_game, set_overlay_mode])
+        .invoke_handler(tauri::generate_handler![
+            get_active_game,
+            list_processes,
+            set_overlay_layout
+        ])
         .run(tauri::generate_context!())
         .expect("error while running QuestMate overlay");
 }
@@ -50,9 +97,14 @@ pub fn run() {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::ActiveGame;
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::{CloseHandle, HWND, MAX_PATH};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::System::ProcessStatus::K32GetModuleBaseNameW;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
@@ -81,6 +133,55 @@ mod platform {
                 detected_game: detected_game.map(str::to_string),
             }
         }
+    }
+
+    pub fn list_processes() -> Vec<String> {
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                return Vec::new();
+            }
+
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                cntUsage: 0,
+                th32ProcessID: 0,
+                th32DefaultHeapID: 0,
+                th32ModuleID: 0,
+                cntThreads: 0,
+                th32ParentProcessID: 0,
+                pcPriClassBase: 0,
+                dwFlags: 0,
+                szExeFile: [0; 260],
+            };
+            let mut processes = BTreeSet::new();
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    let end = entry
+                        .szExeFile
+                        .iter()
+                        .position(|value| *value == 0)
+                        .unwrap_or(entry.szExeFile.len());
+                    let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+                    if !name.is_empty() {
+                        processes.insert(strip_exe_suffix(&name));
+                    }
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
+                    }
+                }
+            }
+            let _ = CloseHandle(snapshot);
+            processes.into_iter().collect()
+        }
+    }
+
+    fn strip_exe_suffix(value: &str) -> String {
+        value
+            .strip_suffix(".exe")
+            .or_else(|| value.strip_suffix(".EXE"))
+            .unwrap_or(value)
+            .to_string()
     }
 
     unsafe fn read_window_title(hwnd: HWND) -> Option<String> {
@@ -164,5 +265,9 @@ mod platform {
             window_title: None,
             detected_game: None,
         }
+    }
+
+    pub fn list_processes() -> Vec<String> {
+        Vec::new()
     }
 }

@@ -1,3 +1,11 @@
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  background-color: transparent !important;
+}
+
 :root {
   color: #182027;
   background: transparent;
@@ -39,8 +47,8 @@ a:focus-visible {
 
 .bubble {
   position: fixed;
-  right: 20px;
-  bottom: 24px;
+  inset: 0;
+  margin: auto;
   display: grid;
   width: 62px;
   height: 62px;
@@ -272,32 +280,12 @@ a:focus-visible {
 
 .workspace-bar {
   display: grid;
-  grid-template-columns: minmax(118px, 0.62fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: end;
   padding: 12px 14px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
   background: #f8fafc;
-}
-
-.game-meta {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.game-meta span {
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.game-meta strong {
-  overflow: hidden;
-  color: #182027;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .game-control {
@@ -724,6 +712,19 @@ a:focus-visible {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.placement-heading {
+  margin-top: 4px;
+}
+
+.placement-control {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.placement-control button {
+  padding-inline: 6px;
+  white-space: nowrap;
 }
 
 .segmented-control button {

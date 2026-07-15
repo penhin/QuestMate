@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_AI_MODEL,
   DEFAULT_DEEPSEEK_MODEL,
@@ -15,8 +15,15 @@ import {
   type GameCandidate,
   type SessionSummary,
 } from "./api";
-import { GAME_NAMES } from "./config/games";
-import { getActiveGame, setOverlayMode, type ActiveGame, type OverlayMode } from "./tauri";
+import {
+  getActiveGame,
+  getOverlayPlacement,
+  listProcesses,
+  setOverlayLayout,
+  setOverlayPlacement,
+  type OverlayMode,
+  type OverlayPlacement,
+} from "./tauri";
 import { installStartupUpdate } from "./updater";
 
 type Message = {
@@ -39,6 +46,10 @@ type Copy = {
   closeSettings: string;
   preferences: string;
   displayMode: string;
+  windowPosition: string;
+  bottomRight: string;
+  bottomLeft: string;
+  center: string;
   compactMode: string;
   drawerMode: string;
   minimize: string;
@@ -85,6 +96,10 @@ const COPY = {
     closeSettings: "关闭设置",
     preferences: "偏好",
     displayMode: "显示模式",
+    windowPosition: "窗口位置",
+    bottomRight: "右下角",
+    bottomLeft: "左下角",
+    center: "屏幕中央",
     compactMode: "小弹窗",
     drawerMode: "右侧抽屉",
     minimize: "最小化到悬浮球",
@@ -129,6 +144,10 @@ const COPY = {
     closeSettings: "Close settings",
     preferences: "Preferences",
     displayMode: "Display mode",
+    windowPosition: "Window position",
+    bottomRight: "Bottom right",
+    bottomLeft: "Bottom left",
+    center: "Center",
     compactMode: "Popover",
     drawerMode: "Drawer",
     minimize: "Minimize to bubble",
@@ -178,10 +197,11 @@ const SETTINGS_TABS: Array<{ id: SettingsTab; label: keyof Copy; icon: IconName 
 export default function App() {
   const [language, setLanguage] = useState<Language>("zh");
   const [mode, setMode] = useState<OverlayMode>("bubble");
+  const [placement, setPlacement] = useState<OverlayPlacement>(() => getOverlayPlacement());
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("preferences");
   const [backendOnline, setBackendOnline] = useState(false);
-  const [activeGame, setActiveGame] = useState<ActiveGame | null>(null);
+  const [processes, setProcesses] = useState<string[]>([]);
   const [game, setGame] = useState("");
   const [question, setQuestion] = useState("");
   const [sessionId, setSessionId] = useState<string>();
@@ -201,24 +221,17 @@ export default function App() {
   const manualGameOverrideRef = useRef(false);
   const text = COPY[language];
 
-  const detectedLabel = useMemo(() => {
-    if (activeGame?.detectedGame) {
-      return activeGame.detectedGame;
-    }
-    if (activeGame?.processName) {
-      return activeGame.processName;
-    }
-    return text.notDetected;
-  }, [activeGame, text.notDetected]);
-
   useEffect(() => {
+    void setOverlayLayout("bubble", placement);
     void checkBackend().then(setBackendOnline);
     void installStartupUpdate();
     void refreshActiveGame();
+    void refreshProcesses();
     void refreshSessions();
 
     const activeGameTimer = window.setInterval(() => {
       void refreshActiveGame();
+      void refreshProcesses();
     }, 5000);
 
     return () => window.clearInterval(activeGameTimer);
@@ -232,10 +245,13 @@ export default function App() {
 
   async function refreshActiveGame() {
     const value = await getActiveGame();
-    setActiveGame(value);
-    if (value.detectedGame && !manualGameOverrideRef.current) {
-      setGame(value.detectedGame);
+    if (value.processName && !manualGameOverrideRef.current && !isOverlayProcess(value.processName)) {
+      setGame(displayProcessName(value.processName));
     }
+  }
+
+  async function refreshProcesses() {
+    setProcesses((await listProcesses()).filter((process) => !isOverlayProcess(process)));
   }
 
   function changeGame(value: string) {
@@ -246,12 +262,18 @@ export default function App() {
   async function switchMode(nextMode: OverlayMode) {
     setSettingsOpen(false);
     setMode(nextMode);
-    await setOverlayMode(nextMode);
+    await setOverlayLayout(nextMode, placement);
   }
 
   async function changeDisplayMode(nextMode: Extract<OverlayMode, "popover" | "drawer">) {
     setMode(nextMode);
-    await setOverlayMode(nextMode);
+    await setOverlayLayout(nextMode, placement);
+  }
+
+  async function changePlacement(nextPlacement: OverlayPlacement) {
+    setPlacement(nextPlacement);
+    setOverlayPlacement(nextPlacement);
+    await setOverlayLayout(mode, nextPlacement);
   }
 
   function clearSession() {
@@ -629,6 +651,35 @@ export default function App() {
                     {text.drawerMode}
                   </button>
                 </div>
+                <div className="section-heading placement-heading">
+                  <h3>{text.windowPosition}</h3>
+                </div>
+                <div className="segmented-control placement-control" role="group" aria-label={text.windowPosition}>
+                  <button
+                    type="button"
+                    className={placement === "bottom-right" ? "active" : ""}
+                    onClick={() => void changePlacement("bottom-right")}
+                    aria-pressed={placement === "bottom-right"}
+                  >
+                    {text.bottomRight}
+                  </button>
+                  <button
+                    type="button"
+                    className={placement === "bottom-left" ? "active" : ""}
+                    onClick={() => void changePlacement("bottom-left")}
+                    aria-pressed={placement === "bottom-left"}
+                  >
+                    {text.bottomLeft}
+                  </button>
+                  <button
+                    type="button"
+                    className={placement === "center" ? "active" : ""}
+                    onClick={() => void changePlacement("center")}
+                    aria-pressed={placement === "center"}
+                  >
+                    {text.center}
+                  </button>
+                </div>
                 <div className="setting-row">
                   <div>
                     <h3>{text.language}</h3>
@@ -856,15 +907,11 @@ export default function App() {
       ) : (
         <>
           <section className="workspace-bar">
-            <div className="game-meta">
-              <span>{text.subtitle}</span>
-              <strong title={activeGame?.windowTitle ?? ""}>{detectedLabel}</strong>
-            </div>
             <GameField
               game={game}
               label={text.game}
               placeholder={text.gamePlaceholder}
-              windowTitle={activeGame?.windowTitle ?? ""}
+              processes={processes}
               onGameChange={changeGame}
               open={gameOpen}
               onOpenChange={setGameOpen}
@@ -1008,12 +1055,14 @@ function GameField(props: {
   game: string;
   label: string;
   placeholder: string;
-  windowTitle: string;
+  processes: string[];
   onGameChange: (value: string) => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const options = GAME_NAMES.filter((name) => name.toLowerCase().includes(props.game.trim().toLowerCase()));
+  const options = props.processes
+    .filter((name) => name.toLowerCase().includes(props.game.trim().toLowerCase()))
+    .slice(0, 50);
 
   return (
     <div
@@ -1035,7 +1084,7 @@ function GameField(props: {
             }}
             onFocus={() => props.onOpenChange(true)}
             placeholder={props.placeholder}
-            title={props.windowTitle}
+            title={props.game}
             role="combobox"
             aria-expanded={props.open}
             aria-controls="questmate-game-options"
@@ -1073,4 +1122,12 @@ function GameField(props: {
       </label>
     </div>
   );
+}
+
+function displayProcessName(processName: string) {
+  return processName.replace(/\.exe$/i, "");
+}
+
+function isOverlayProcess(processName: string) {
+  return /questmate-overlay/i.test(processName);
 }
