@@ -2,10 +2,11 @@
   "version": 1,
   "status": "performance_baseline_refresh_required",
   "dataset": {
-    "sha256": "277fd498df2b64b588c61406fd26073ac049789d7fb926308a72b96c5377f477",
+    "sha256": "a41221046dc6d6cc4bdba3b8fd9c748400cf92a09e6260c3914f3ddf26f03ad6",
     "case_count": 52,
     "dev_cases": 30,
-    "validation_cases": 22,
+    "validation_cases": 17,
+    "holdout_cases": 5,
     "mainstream_cases": 25,
     "niche_cases": 21,
     "safety_cases": 6,
@@ -33,6 +34,7 @@
   "policy": {
     "dev_split": "用于日常定位和调参",
     "validation_split": "只用于回归确认，不针对单个失败案例调提示词",
+    "holdout_split": "按整个游戏留出，与开发及验证游戏不重叠，只用于检查跨游戏泛化",
     "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定"
   },
   "observed_baselines": [

@@ -5,10 +5,32 @@ import re
 from typing import Any
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 
 class MediaWikiClient:
     user_agent = "QuestMate/0.1 (local game guide search)"
+
+    api_paths = ("/api.php", "/w/api.php")
+
+    def _request_payload(self, *, domain: str, params: str) -> dict[str, Any]:
+        """Probe common MediaWiki endpoints so independent wikis are supported."""
+        last_error: Exception | None = None
+        for path in self.api_paths:
+            request = Request(
+                f"https://{domain}{path}?{params}",
+                headers={"User-Agent": self.user_agent},
+            )
+            try:
+                with urlopen(request, timeout=15) as response:
+                    payload = json.load(response)
+                if isinstance(payload, dict) and ("query" in payload or "error" in payload):
+                    return payload
+            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+                last_error = error
+        if last_error is not None:
+            raise last_error
+        return {}
 
     def search(self, *, domain: str, query: str, max_results: int) -> dict[str, Any]:
         search_query = " ".join(re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", query)) or query
@@ -28,12 +50,7 @@ class MediaWikiClient:
                 "origin": "*",
             }
         )
-        request = Request(
-            f"https://{domain}/api.php?{params}",
-            headers={"User-Agent": self.user_agent},
-        )
-        with urlopen(request, timeout=15) as response:
-            payload = json.load(response)
+        payload = self._request_payload(domain=domain, params=params)
         pages = sorted(
             payload.get("query", {}).get("pages", []),
             key=lambda page: int(page.get("index") or 9999),
@@ -80,12 +97,7 @@ class MediaWikiClient:
                 "origin": "*",
             }
         )
-        request = Request(
-            f"https://{domain}/api.php?{params}",
-            headers={"User-Agent": self.user_agent},
-        )
-        with urlopen(request, timeout=15) as response:
-            payload = json.load(response)
+        payload = self._request_payload(domain=domain, params=params)
         results = []
         for page in payload.get("query", {}).get("pages", []):
             title = str(page.get("title") or "").strip()

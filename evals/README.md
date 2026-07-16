@@ -2,7 +2,7 @@
 
 `cases.jsonl` 是黑盒评测集。每行一个用例，字段说明：
 
-- `split`：`dev` 用于日常调试，`validation` 用于最终回归，避免围绕验证题逐条调参。
+- `split`：`dev` 用于日常调试，`validation` 用于常规回归；`holdout` 按整个游戏留出，禁止用于逐题调参，只用于检查跨游戏泛化。
 - `tier`：`mainstream`、`niche` 或 `safety`，分别衡量主流游戏、冷门游戏和安全/边界行为。
 - `difficulty`：`standard` 或 `hard`。
 - `expected_source_types`：回答需要命中的来源类型。
@@ -18,7 +18,7 @@
 
 评测还会拒绝超出来源数量的引用编号，并区分“有官方版本证据的明确回答”和“没有版本证据时的保守回答”。报告会分别输出评分维度通过率，以及按类别、数据集、游戏层级和难度分组的结果。
 
-当前基线定义包含 52 个案例：30 个开发案例、22 个验证案例，其中有 21 个冷门游戏案例和 6 个安全/边界案例。`baseline_definition.json` 固定数据集指纹和评测口径；首次使用固定模型跑出的完整报告才是性能基线。
+当前基线定义包含 52 个案例，并包含与开发/验证游戏完全不重叠的留出游戏，其中有 21 个冷门游戏案例和 6 个安全/边界案例。`baseline_definition.json` 固定数据集指纹和评测口径；首次使用固定模型跑出的完整报告才是性能基线。
 
 已提交的脱敏性能摘要保存在 `baselines/`。摘要只包含评分、延迟、来源数量和失败维度，不保存 API Key 或完整模型回答。
 扩充或修改案例后，`baseline_definition.json` 会标记需要刷新性能基线；旧摘要仅作为历史对照，不能代表新数据集成绩。
@@ -42,6 +42,7 @@ uv run python evals/run_evals.py \
 ```bash
 uv run python evals/run_evals.py --split dev --tier niche
 uv run python evals/run_evals.py --split validation
+uv run python evals/run_evals.py --split holdout
 ```
 
 如果后端没有配置默认模型，可通过环境变量传入测试专用密钥。密钥不会写入报告：

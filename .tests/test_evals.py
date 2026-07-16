@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from evals.dataset import dataset_metadata, filter_cases, load_cases
@@ -15,6 +16,10 @@ def test_evaluation_suite_has_diverse_unique_cases() -> None:
     )
     assert len(filter_cases(cases, tier="niche")) >= 21
     assert len(filter_cases(cases, split="validation")) >= 10
+    holdout_games = {case["game"] for case in filter_cases(cases, split="holdout")}
+    tuned_games = {case["game"] for case in cases if case["split"] != "holdout"}
+    assert len(holdout_games) >= 5
+    assert holdout_games.isdisjoint(tuned_games)
 
 
 def test_dataset_metadata_is_reproducible() -> None:
@@ -24,6 +29,16 @@ def test_dataset_metadata_is_reproducible() -> None:
     assert metadata["case_count"] == 52
     assert len(metadata["sha256"]) == 64
     assert metadata["by_tier"]["niche"] >= 21
+
+
+def test_baseline_definition_tracks_current_holdout_dataset() -> None:
+    cases = load_cases(DEFAULT_CASES)
+    metadata = dataset_metadata(DEFAULT_CASES, cases)
+    definition = json.loads(Path("evals/baseline_definition.json").read_text(encoding="utf-8"))
+
+    assert definition["dataset"]["sha256"] == metadata["sha256"]
+    assert definition["dataset"]["case_count"] == metadata["case_count"]
+    assert definition["dataset"]["holdout_cases"] == metadata["by_split"]["holdout"]
 
 
 def test_dataset_rejects_invalid_split(tmp_path: Path) -> None:

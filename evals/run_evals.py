@@ -137,7 +137,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--split", choices=("dev", "validation"))
+    parser.add_argument("--split", choices=("dev", "validation", "holdout"))
     parser.add_argument("--tier", choices=("mainstream", "niche", "safety"))
     parser.add_argument("--category")
     parser.add_argument("--case-id")

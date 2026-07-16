@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-VALID_SPLITS = {"dev", "validation"}
+VALID_SPLITS = {"dev", "validation", "holdout"}
 VALID_TIERS = {"mainstream", "niche", "safety"}
 VALID_DIFFICULTIES = {"standard", "hard"}
 VALID_BEHAVIORS = {

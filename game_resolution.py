@@ -3,6 +3,7 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from query_tokens import relevance_tokens
+from retrieval.wiki_domains import is_probable_wiki_domain
 from quality_policy import (
     FAST_GAME_IDENTITY_MAX_RESULTS,
     GAME_IDENTITY_CANDIDATE_QUERIES,
@@ -112,7 +113,7 @@ class GameResolver:
             if not identity_matches_game(title=title, url=url, game=game):
                 continue
 
-            if self.is_supported_database_domain(domain) and domain not in database_domains:
+            if self.is_supported_database_domain(domain, url=url) and domain not in database_domains:
                 database_domains.append(domain)
 
             if is_supported_platform_domain(domain):
@@ -196,7 +197,7 @@ class GameResolver:
         queries = tuple(
             f"{game_name} {suffix}"
             for game_name in game_names[:3]
-            for suffix in ("fandom wiki", "wiki.gg wiki", "official wiki")
+            for suffix in ("wiki", "official wiki", "community wiki")
         )
         domains: list[str] = []
         for query in queries[:GAME_IDENTITY_DATABASE_QUERIES]:
@@ -209,7 +210,7 @@ class GameResolver:
             for item in result.get("results", []):
                 url = str(item.get("url") or "")
                 domain = urlparse(url).netloc.lower()
-                if not self.is_supported_database_domain(domain):
+                if not self.is_supported_database_domain(domain, url=url):
                     continue
                 text = self.result_text(item)
                 if not matches_game_text(text=text, game=game, game_aliases=game_aliases or []):
@@ -223,7 +224,7 @@ class GameResolver:
     def discover_database_identity(self, *, game: str) -> tuple[str, ...]:
         """Find a game-specific wiki with one exact identity query."""
         result = self._client.search(
-            query=f'"{game}" wiki fandom wiki.gg',
+            query=f'"{game}" wiki',
             max_results=4,
             include_answer=False,
             include_raw_content=False,
@@ -232,7 +233,7 @@ class GameResolver:
         for item in result.get("results", []):
             url = str(item.get("url") or "")
             domain = urlparse(url).netloc.lower()
-            if not self.is_supported_database_domain(domain):
+            if not self.is_supported_database_domain(domain, url=url):
                 continue
             if not identity_matches_game(
                 title=str(item.get("title") or ""),
@@ -358,13 +359,9 @@ class GameResolver:
         return " ".join(str(item.get(field) or "") for field in ("title", "url", "content")).lower()
 
     @staticmethod
-    def is_supported_database_domain(domain: str) -> bool:
-        return (
-            domain.endswith(".fandom.com")
-            or domain == "fandom.com"
-            or domain.endswith(".wiki.gg")
-            or domain == "wiki.gg"
-        )
+    def is_supported_database_domain(domain: str, *, url: str = "") -> bool:
+        """Identify candidates broadly; MediaWikiClient performs the capability check."""
+        return is_probable_wiki_domain(domain, url=url)
 
     @staticmethod
     def resolution_confidence(

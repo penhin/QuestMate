@@ -5,6 +5,21 @@ from collections.abc import AsyncIterator
 from pydantic import ValidationError
 
 from config import Settings, get_settings
+from ai.fallback_planning import (
+    fallback_search_plan,
+    fallback_search_subject,
+    infer_intent,
+    is_short_followup,
+    requires_action_chain,
+)
+from ai.evidence_policy import (
+    evidence_level,
+    evidence_policy_for_level,
+    evidence_question,
+    has_question_specific_sources,
+    has_unsupported_specifics,
+    version_evidence_status,
+)
 from guide_prompts import (
     answer_revision_system_prompt,
     answer_shape_for_intent,
@@ -13,7 +28,7 @@ from guide_prompts import (
     search_planner_system_prompt,
 )
 from model_providers import ModelProvider, create_model_provider
-from query_tokens import exact_identifiers, is_query_entity_token, question_relevance_tokens
+from query_tokens import exact_identifiers, question_relevance_tokens
 from schemas import ChatRequest, GameResolution, PlannedSearchQuery, SearchIntent, SearchPlan, SessionMessage, Source
 
 
@@ -27,11 +42,6 @@ PROMPT_INJECTION_QUERY_PATTERNS = (
     re.compile(r"(忽略|无视|覆盖|忘记).{0,40}(指令|规则|提示词|系统|开发者)", re.I),
     re.compile(r"(输出|显示|泄露|透露|打印).{0,40}(系统prompt|系统提示|提示词|api key|密钥|环境变量|隐藏配置)", re.I),
 )
-ACTIONABLE_INVESTIGATION_INTENTS = frozenset(
-    {"item_location", "item_usage", "quest_step", "game_mechanic"}
-)
-
-
 class GuideLLM:
     def __init__(self, settings: Settings | None = None, provider: ModelProvider | None = None) -> None:
         self.settings = settings or get_settings()
@@ -117,30 +127,7 @@ class GuideLLM:
 
     @staticmethod
     def _requires_action_chain(*, intent: SearchIntent, question: str) -> bool:
-        if intent in ACTIONABLE_INVESTIGATION_INTENTS:
-            return True
-        lowered = question.casefold()
-        return any(
-            marker in lowered
-            for marker in (
-                "如何",
-                "怎么",
-                "在哪",
-                "哪里",
-                "进入",
-                "打开",
-                "解锁",
-                "获得",
-                "获取",
-                "触发",
-                "下一步",
-                "找不到",
-                "不见",
-                "why can't",
-                "how to",
-                "where is",
-            )
-        )
+        return requires_action_chain(intent=intent, question=question)
 
     async def answer(
         self,
@@ -445,70 +432,19 @@ class GuideLLM:
 
     @staticmethod
     def _has_question_specific_sources(*, question: str, sources: list[Source]) -> bool:
-        primary_question, separator, alias_text = question.partition("\nALIASES:")
-        tokens = [
-            token
-            for token in GuideLLM._question_tokens(primary_question)
-            if is_query_entity_token(token)
-        ]
-        alias_groups = [
-            [token for token in GuideLLM._question_tokens(alias) if is_query_entity_token(token)]
-            for alias in alias_text.split("|")
-            if separator and alias.strip()
-        ]
-        alias_groups = [group for group in alias_groups if group]
-        if not tokens and not alias_groups:
-            return False
-
-        minimum_matches = 1 if len(tokens) <= 1 else max(2, (len(tokens) + 2) // 3)
-        for source in sources:
-            source_text = (
-                f"{source.title} {source.url} {source.evidence or source.snippet or ''}"
-            ).lower()
-            primary_match = tokens and sum(1 for token in tokens if token in source_text) >= minimum_matches
-            alias_match = any(all(token in source_text for token in group) for group in alias_groups)
-            if primary_match or alias_match:
-                return True
-        return False
+        return has_question_specific_sources(question=question, sources=sources)
 
     @staticmethod
     def _evidence_level(*, question: str, sources: list[Source]) -> str:
-        if not sources:
-            return "none"
-        if GuideLLM._has_question_specific_sources(question=question, sources=sources):
-            return "direct"
-        return "game_only"
+        return evidence_level(question=question, sources=sources)
 
     @staticmethod
     def _evidence_policy_for_level(evidence_level: str) -> str:
-        if evidence_level == "direct":
-            return "Sources directly mention the requested entity. Answer with sourced concrete details and note uncertainty where needed."
-        if evidence_level == "game_only":
-            return (
-                "Sources appear to cover the game but not the requested entity. Do not provide concrete item effects, "
-                "locations, materials, NPCs, or step-by-step instructions. Say the direct evidence was not found and ask "
-                "for more context."
-            )
-        return (
-            "No usable sources were found. Do not infer a gameplay answer from genre conventions. Say reliable "
-            "information was not found and ask for the original title, screenshot, area name, or more context."
-        )
+        return evidence_policy_for_level(evidence_level)
 
     @staticmethod
     def _version_evidence_status(*, intent: SearchIntent, sources: list[Source]) -> str:
-        if intent not in {"patch", "build", "boss_strategy", "game_mechanic"}:
-            return "not_version_sensitive"
-        versioned = [source for source in sources if source.game_version or source.published_at]
-        official_versioned = [source for source in versioned if source.source_type == "official"]
-        if intent == "patch":
-            if official_versioned:
-                return "verified_official_version"
-            return "insufficient: no official source with a version number or publication date"
-        if official_versioned:
-            return "official_version_context"
-        if versioned:
-            return "dated_non_official_context: state that the recommendation may differ by version"
-        return "unknown_version: do not describe balance, AI behavior, or build strength as current fact"
+        return version_evidence_status(intent=intent, sources=sources)
 
     @staticmethod
     def _should_return_conservative_answer(
@@ -537,10 +473,7 @@ class GuideLLM:
 
     @staticmethod
     def _evidence_question(*, request: ChatRequest, plan: SearchPlan | None) -> str:
-        aliases = " | ".join((plan.aliases if plan else [])[:6])
-        if not aliases:
-            return request.question
-        return f"{request.question}\nALIASES:{aliases}"
+        return evidence_question(request=request, plan=plan)
 
     @staticmethod
     def _is_context_confirmation(question: str) -> bool:
@@ -562,44 +495,7 @@ class GuideLLM:
 
     @staticmethod
     def _has_unsupported_specifics(*, answer: str, sources: list[Source], question: str) -> bool:
-        if GuideLLM._evidence_level(question=question, sources=sources) == "direct":
-            return False
-
-        lowered = answer.lower()
-        uncertainty_markers = (
-            "通常",
-            "一般",
-            "可能",
-            "推断",
-            "合理推断",
-            "常规设计",
-            "based on",
-            "usually",
-            "likely",
-            "probably",
-        )
-        concrete_markers = (
-            "npc",
-            "材料",
-            "地点",
-            "区域",
-            "房间",
-            "机关",
-            "交互",
-            "步骤",
-            "路线",
-            "地标",
-            "奖励",
-            "数值",
-            "最大值",
-            "指定",
-            "先",
-            "然后",
-            "再",
-        )
-        return any(marker in lowered for marker in uncertainty_markers) and any(
-            marker in lowered for marker in concrete_markers
-        )
+        return has_unsupported_specifics(answer=answer, sources=sources, question=question)
 
     @staticmethod
     def _search_planner_system_prompt() -> str:
@@ -704,83 +600,11 @@ class GuideLLM:
     @staticmethod
     def _fallback_search_plan(*, question: str) -> SearchPlan:
         safe_question = GuideLLM._sanitize_search_text(question)
-        intent = GuideLLM._infer_intent(safe_question)
-        search_subject = GuideLLM._fallback_search_subject(safe_question)
-        queries: list[PlannedSearchQuery] = []
-
-        if intent == "patch":
-            queries.append(PlannedSearchQuery(source_type="official", query=f"{search_subject} patch notes update"))
-        elif intent == "boss_strategy":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} boss weakness phase"),
-                    PlannedSearchQuery(source_type="community", query=f"{search_subject} strategy dodge timing build"),
-                ]
-            )
-        elif intent == "item_location":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} item location merchant drop"),
-                    PlannedSearchQuery(source_type="web", query=f"{search_subject} map location guide"),
-                ]
-            )
-        elif intent == "item_usage":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} item use effect where to use puzzle"),
-                    PlannedSearchQuery(source_type="community", query=f"{search_subject} what does it do how to use"),
-                ]
-            )
-        elif intent == "quest_step":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} questline step location reward"),
-                    PlannedSearchQuery(source_type="web", query=f"{search_subject} walkthrough guide"),
-                ]
-            )
-        elif intent == "game_mechanic":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} mode mechanic unlock enable trigger"),
-                    PlannedSearchQuery(source_type="community", query=f"{search_subject} how to enable unlock trigger"),
-                ]
-            )
-        elif intent == "build":
-            queries.extend(
-                [
-                    PlannedSearchQuery(source_type="community", query=f"{search_subject} build stats weapons talismans"),
-                    PlannedSearchQuery(source_type="wiki", query=f"{search_subject} weapon skill scaling"),
-                ]
-            )
-
-        queries.extend(
-            [
-                PlannedSearchQuery(source_type="wiki", query=f"{search_subject} wiki guide"),
-                PlannedSearchQuery(source_type="web", query=search_subject),
-            ]
-        )
-
-        aliases = [search_subject] if search_subject.casefold() != safe_question.casefold() else []
-        return SearchPlan(intent=intent, aliases=aliases, queries=queries[:4], missing_info=[])
+        return fallback_search_plan(question=safe_question)
 
     @staticmethod
     def _fallback_search_subject(question: str) -> str:
-        """Keep entity names while dropping natural-language search instructions."""
-        normalized_question = question.translate(
-            str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"'})
-        )
-        latin_phrases = [
-            " ".join(phrase.split()).strip(" -_'\"")
-            for phrase in re.findall(
-                r"[A-Za-z0-9][A-Za-z0-9'_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'_.-]*)*",
-                normalized_question,
-            )
-        ]
-        latin_phrases = [phrase for phrase in latin_phrases if len(phrase) >= 3]
-        if latin_phrases:
-            return max(latin_phrases, key=len)
-
-        return " ".join(question.split()).strip("。！？?!") or question
+        return fallback_search_subject(question)
 
     @staticmethod
     def _sanitize_search_text(value: str) -> str:
@@ -816,47 +640,7 @@ class GuideLLM:
 
     @staticmethod
     def _infer_intent(question: str) -> str:
-        lowered = question.lower()
-        if any(token in lowered for token in ("patch", "version", "update", "版本", "补丁", "更新", "削弱", "增强")):
-            return "patch"
-        if any(token in lowered for token in ("boss", "打法", "怎么打", "打不过", "弱点", "二阶段", "phase")):
-            return "boss_strategy"
-        if any(token in lowered for token in ("有什么用", "有啥用", "作用", "用途", "用来", "在哪里用", "怎么用", "what does", "use for")):
-            return "item_usage"
-        if any(token in lowered for token in ("在哪", "哪里", "获得", "获取", "钥匙", "位置", "location", "where")):
-            return "item_location"
-        if any(
-            token in lowered
-            for token in ("任务", "支线", "下一步", "加入队伍", "入队", "招募", "npc", "quest", "questline", "recruit")
-        ):
-            return "quest_step"
-        if any(
-            token in lowered
-            for token in (
-                "模式",
-                "开启",
-                "打开",
-                "解锁",
-                "隐藏",
-                "触发",
-                "机制",
-                "功能",
-                "设置",
-                "mode",
-                "unlock",
-                "enable",
-                "activate",
-                "trigger",
-                "mechanic",
-                "setting",
-            )
-        ):
-            return "game_mechanic"
-        if any(token in lowered for token in ("build", "配装", "加点", "装备", "武器", "护符", "流派")):
-            return "build"
-        if any(token in lowered for token in ("剧情", "结局", "背景", "lore", "ending")):
-            return "lore"
-        return "general"
+        return infer_intent(question)
 
     @staticmethod
     def _answer_needs_revision(
@@ -995,27 +779,4 @@ class GuideLLM:
 
     @staticmethod
     def _is_short_followup(question: str) -> bool:
-        lowered = question.lower().strip()
-        followup_markers = (
-            "就是",
-            "我说的是",
-            "这个",
-            "那个",
-            "该钥匙",
-            "该区域",
-            "该物品",
-            "该任务",
-            "该npc",
-            "那里",
-            "它",
-            "上面",
-            "刚才",
-            "为什么没有",
-            "怎么去",
-            "然后呢",
-            "接下来",
-            "it is",
-            "i mean",
-            "same game",
-        )
-        return any(marker in lowered for marker in followup_markers)
+        return is_short_followup(question)

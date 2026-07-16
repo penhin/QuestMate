@@ -10,24 +10,25 @@ from tavily import TavilyClient
 from config import Settings, get_settings
 from game_resolution import GameResolver
 from quality_policy import (
-    RELEVANCE_SCORE_POLICY,
     EXTERNAL_SEARCH_ATTEMPTS,
-    MAX_QUERIES_PER_PLANNED_QUERY,
-    MAX_SEARCH_QUERIES,
     PROGRESSIVE_STRICT_SOURCE_TARGET,
     SEARCH_NOISE_TOKENS,
-    SEARCH_RESULT_WEIGHTS,
     SOURCE_POLICIES,
     SourcePolicy,
     STABLE_FACT_INTENTS,
     VERSION_SCORE_POLICY,
     VERSION_SENSITIVE_INTENTS,
     VERSION_SIGNAL_TOKENS,
-    domain_quality,
-    intent_source_preference,
     source_domain_limit,
 )
-from query_tokens import question_relevance_tokens, relevance_tokens
+from query_tokens import question_relevance_tokens
+from retrieval import (
+    build_search_queries,
+    is_high_quality_source,
+    matches_game_name,
+)
+from retrieval.mediawiki_retriever import MediaWikiRetriever
+from retrieval.source_builder import build_source
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
 from mediawiki_client import MediaWikiClient
 from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
@@ -105,6 +106,16 @@ class TavilySearchProvider:
         if self._mediawiki_client is None and client is None and self.settings.mediawiki_direct_search:
             self._mediawiki_client = MediaWikiClient()
         self._mediawiki_cache = shared_cache
+        self._wiki_retriever = MediaWikiRetriever(
+            client=self._mediawiki_client,
+            cache=self._mediawiki_cache,
+            settings=self.settings,
+            source_policy=self.sources["wiki"],
+            content_index=self._content_index,
+            best_passage=self._best_evidence_passage,
+            canonical_key=self._canonical_source_key,
+            extract_version=self._extract_game_version,
+        )
 
     async def search(
         self,
@@ -240,209 +251,14 @@ class TavilySearchProvider:
         intent: str,
         max_results: int,
     ) -> list[Source]:
-        if self._mediawiki_client is None or not database_domains:
-            return []
-        wiki_domains = [
-            domain
-            for domain in database_domains
-            if self._game_resolver is not None and self._game_resolver.is_supported_database_domain(domain)
-        ][:2]
-        if not wiki_domains:
-            return []
-
-        wiki_query = " ".join(aliases[:2]).strip() or (planned_queries[0] if planned_queries else question)
-
-        async def fetch(domain: str) -> dict[str, Any]:
-            cache_key = f"mediawiki:{domain}:{wiki_query.casefold()}:{max_results}"
-            cached = self._mediawiki_cache.get(cache_key)
-            if cached is not None:
-                cached["_domain"] = domain
-                return cached
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._mediawiki_client.search,
-                        domain=domain,
-                        query=wiki_query,
-                        max_results=max_results,
-                    ),
-                    timeout=self.settings.external_request_timeout_seconds,
-                )
-            except Exception:
-                return {"results": []}
-            result["_domain"] = domain
-            self._mediawiki_cache.set(cache_key, result)
-            return result
-
-        results = await asyncio.gather(*(fetch(domain) for domain in wiki_domains))
-        search_context = f"{question} {' '.join(aliases)}"
-        expanded_results = await self._expand_mediawiki_results(
-            results=results,
-            search_context=search_context,
+        return await self._wiki_retriever.search(
             game=game,
+            question=question,
+            aliases=aliases,
+            planned_queries=planned_queries,
             game_aliases=game_aliases,
-        )
-        results = [*results, *expanded_results]
-        sources_by_url: dict[str, Source] = {}
-        page_content_by_url: dict[str, str] = {}
-        wiki_policy = self.sources["wiki"]
-        for result in results:
-            for item in result.get("results", []):
-                evidence = self._best_evidence_passage(
-                    str(item.get("content") or ""),
-                    question=search_context,
-                    max_chars=self.settings.evidence_passage_max_chars,
-                )
-                searchable_item = {**item, "content": evidence}
-                relevance_score = self._result_relevance_score(
-                    item=searchable_item,
-                    game=game,
-                    game_aliases=game_aliases,
-                    question=search_context,
-                )
-                if relevance_score <= 0 or not self._is_high_quality_source(
-                    item=searchable_item,
-                    game=game,
-                    game_aliases=game_aliases,
-                    question=search_context,
-                    source_type="wiki",
-                ):
-                    continue
-                url = str(item.get("url") or "")
-                source = Source(
-                    title=str(item.get("title") or url),
-                    url=url,
-                    snippet=str(item.get("content") or "")[:600],
-                    score=min(1, 0.7 + relevance_score * 0.3),
-                    source_type="wiki",
-                    trust_score=wiki_policy.trust_score,
-                    trust_label=wiki_policy.trust_label,
-                    evidence=evidence,
-                    fetched_at=datetime.now(timezone.utc),
-                    game_version=self._extract_game_version(evidence),
-                )
-                sources_by_url[self._canonical_source_key(url)] = source
-                page_content_by_url[self._canonical_source_key(url)] = str(item.get("content") or "")
-        ranked_sources = sorted(
-            sources_by_url.values(),
-            key=lambda source: source.score or 0,
-            reverse=True,
-        )
-        await self._auto_index_wiki_pages(
-            game=game,
-            sources=ranked_sources,
-            page_content_by_url=page_content_by_url,
-        )
-        return ranked_sources
-
-    async def _expand_mediawiki_results(
-        self,
-        *,
-        results: list[dict[str, Any]],
-        search_context: str,
-        game: str,
-        game_aliases: list[str],
-    ) -> list[dict[str, Any]]:
-        limit = self.settings.wiki_link_expansion_pages_per_query
-        if limit <= 0 or not hasattr(self._mediawiki_client, "fetch_pages"):
-            return []
-        game_tokens = set(relevance_tokens(" ".join([game, *game_aliases])))
-        query_tokens = [
-            token
-            for token in question_relevance_tokens(search_context)
-            if token not in game_tokens and token not in self.search_noise_tokens
-        ]
-        if not query_tokens:
-            return []
-
-        candidates: list[tuple[int, str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for result in results:
-            domain = str(result.get("_domain") or "")
-            if not domain:
-                continue
-            for item in result.get("results", []):
-                for title in item.get("links") or []:
-                    normalized_title = str(title).strip()
-                    key = (domain, normalized_title.casefold())
-                    if not normalized_title or key in seen:
-                        continue
-                    seen.add(key)
-                    lowered_title = normalized_title.casefold()
-                    score = sum(1 for token in query_tokens if token in lowered_title)
-                    if score:
-                        candidates.append((score, domain, normalized_title))
-        candidates.sort(reverse=True)
-        selected = candidates[:limit]
-        if not selected:
-            return []
-
-        titles_by_domain: dict[str, list[str]] = {}
-        for _score, domain, title in selected:
-            titles_by_domain.setdefault(domain, []).append(title)
-
-        async def fetch_linked(domain: str, titles: list[str]) -> dict[str, Any]:
-            cache_key = f"mediawiki-pages:{domain}:{'|'.join(title.casefold() for title in titles)}"
-            cached = self._mediawiki_cache.get(cache_key)
-            if cached is not None:
-                return cached
-            try:
-                payload = await asyncio.wait_for(
-                    asyncio.to_thread(self._mediawiki_client.fetch_pages, domain=domain, titles=titles),
-                    timeout=self.settings.external_request_timeout_seconds,
-                )
-            except Exception:
-                return {"results": []}
-            payload["_domain"] = domain
-            self._mediawiki_cache.set(cache_key, payload)
-            return payload
-
-        expanded = await asyncio.gather(
-            *(fetch_linked(domain, titles) for domain, titles in titles_by_domain.items())
-        )
-        logger.info(
-            "mediawiki.expanded",
-            selected_links=len(selected),
-            fetched_pages=sum(len(result.get("results", [])) for result in expanded),
-        )
-        return list(expanded)
-
-    async def _auto_index_wiki_pages(
-        self,
-        *,
-        game: str,
-        sources: list[Source],
-        page_content_by_url: dict[str, str],
-    ) -> None:
-        if self._content_index is None or not self.settings.wiki_auto_index_enabled:
-            return
-        selected = sources[: self.settings.wiki_auto_index_pages_per_query]
-        results = await asyncio.gather(
-            *(
-                self._content_index.index_content(
-                    url=str(source.url),
-                    game=game,
-                    content=page_content_by_url.get(self._canonical_source_key(str(source.url)), ""),
-                    title=source.title,
-                    source_type="wiki",
-                    game_version=source.game_version,
-                    published_at=source.published_at,
-                    skip_if_fresh=True,
-                )
-                for source in selected
-            ),
-            return_exceptions=True,
-        )
-        logger.info(
-            "knowledge.wiki_auto_index",
-            game=game,
-            attempted=len(selected),
-            ready=sum(
-                1
-                for result in results
-                if isinstance(result, dict) and result.get("status") in {"ready", "cached"}
-            ),
-            failed=sum(1 for result in results if isinstance(result, BaseException)),
+            database_domains=database_domains,
+            max_results=max_results,
         )
 
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
@@ -489,8 +305,6 @@ class TavilySearchProvider:
         for (search_query, search_source), result in zip(search_queries, results, strict=True):
             for item in result.get("results", []):
                 url = str(item.get("url") or "").strip()
-                if not url.startswith(("https://", "http://")):
-                    continue
                 if search_source.source_type == "wiki":
                     result_domain = urlparse(str(url)).netloc.lower()
                     known_database = any(
@@ -498,68 +312,34 @@ class TavilySearchProvider:
                         for domain in database_domains
                     )
                     title_url = f"{item.get('title') or ''} {url}".lower()
-                    if not known_database and not self._matches_game_name(
+                    if not known_database and not matches_game_name(
                         text=title_url,
                         game_names=[game, *game_aliases],
                     ):
                         continue
                 search_context = f"{query} {search_query} {' '.join(aliases)}"
-                raw_content = str(item.get("raw_content") or "")
-                evidence = self._best_evidence_passage(
-                    raw_content or str(item.get("content") or ""),
-                    question=search_context,
-                    max_chars=self.settings.evidence_passage_max_chars,
-                )
-                searchable_item = {
-                    **item,
-                    "content": f"{item.get('content') or ''} {evidence}",
-                }
-                relevance_score = self._result_relevance_score(
-                    item=searchable_item,
+                built = build_source(
+                    item=item,
+                    source_policy=search_source,
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
-                )
-                if relevance_score <= 0:
-                    continue
-
-                raw_score = float(item.get("score") or 0)
-                intent_score = self._intent_source_boost(intent=intent, source_type=search_source.source_type)
-                domain_score = self._domain_quality_score(str(url))
-                version_score = self._version_safety_score(
                     intent=intent,
-                    source_type=search_source.source_type,
-                    text=f"{item.get('title') or ''} {item.get('url') or ''} {evidence}",
+                    best_passage=self._best_evidence_passage,
+                    evidence_max_chars=self.settings.evidence_passage_max_chars,
+                    version_safety_score=self._version_safety_score,
+                    extract_version=self._extract_game_version,
+                    parse_datetime=self._parse_source_datetime,
                 )
-                weighted_score = (
-                    raw_score * SEARCH_RESULT_WEIGHTS.retrieval
-                    + search_source.trust_score * SEARCH_RESULT_WEIGHTS.trust
-                    + relevance_score * SEARCH_RESULT_WEIGHTS.relevance
-                    + intent_score * SEARCH_RESULT_WEIGHTS.intent
-                    + domain_score * SEARCH_RESULT_WEIGHTS.domain
-                    + version_score * SEARCH_RESULT_WEIGHTS.version
-                )
-                source = Source(
-                    title=item.get("title") or url,
-                    url=url,
-                    snippet=item.get("content"),
-                    score=weighted_score,
-                    source_type=search_source.source_type,
-                    trust_score=search_source.trust_score,
-                    trust_label=search_source.trust_label,
-                    evidence=evidence,
-                    published_at=self._parse_source_datetime(item.get("published_date") or item.get("published_at")),
-                    fetched_at=datetime.now(timezone.utc),
-                    game_version=self._extract_game_version(
-                        f"{item.get('title') or ''} {item.get('content') or ''} {evidence}"
-                    ),
-                )
+                if built is None:
+                    continue
+                source = built.source
                 source_key = self._canonical_source_key(str(url))
                 current = relaxed_sources_by_url.get(source_key)
                 if current is None or (source.score or 0) > (current.score or 0):
                     relaxed_sources_by_url[source_key] = source
-                if self._is_high_quality_source(
-                    item=searchable_item,
+                if is_high_quality_source(
+                    item=built.searchable_item,
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
@@ -635,185 +415,17 @@ class TavilySearchProvider:
         database_domains: tuple[str, ...] = (),
         game_aliases: tuple[str, ...] = (),
     ) -> list[tuple[str, SourcePolicy]]:
-        planned_queries = list((plan or self.fallback_plan).queries)[:4] or list(self.fallback_plan.queries)
-        aliases = list((plan.aliases if plan else [])[:3])
-        per_planned_query_limit = 1 if plan and plan.refinement else MAX_QUERIES_PER_PLANNED_QUERY
-        built: list[tuple[str, SourcePolicy]] = []
-        seen: set[str] = set()
-
-        for planned in planned_queries:
-            source = self.sources.get(planned.source_type, self.sources["web"])
-            query = planned.query.replace("{question}", question).strip()
-
-            candidates: list[str] = []
-            if source.source_type == "wiki":
-                candidates.extend(f"site:{domain} {game} {query}" for domain in database_domains)
-                for alias in aliases:
-                    if alias.lower() not in query.lower():
-                        candidates.extend(
-                            f"site:{domain} {game} {alias} {query}"
-                            for domain in database_domains
-                        )
-                for game_alias in game_aliases[:3]:
-                    if game_alias.lower() != game.lower():
-                        candidates.extend(f"site:{domain} {game_alias} {query}" for domain in database_domains)
-            for domain_index, domain in enumerate(source.domains):
-                candidates.append(f"site:{domain} {game} {query}")
-                if domain_index == 0:
-                    for alias in aliases:
-                        if alias.lower() not in query.lower():
-                            candidates.append(f"site:{domain} {game} {alias} {query}")
-                for game_alias in game_aliases[:3]:
-                    if game_alias.lower() != game.lower():
-                        candidates.append(f"site:{domain} {game_alias} {query}")
-            for game_alias in game_aliases[:3]:
-                if game_alias.lower() != game.lower():
-                    candidates.extend(template.format(game=game_alias, query=query) for template in source.query_templates)
-            candidates.extend(template.format(game=game, query=query) for template in source.query_templates)
-            if not candidates:
-                candidates.append(f"{game} {query}")
-            for alias in aliases:
-                if alias.lower() not in query.lower():
-                    candidates.append(f"{game} {alias} {query}")
-
-            added_for_plan = 0
-            for candidate in candidates:
-                normalized = " ".join(candidate.split())
-                if normalized in seen:
-                    continue
-                built.append((normalized, source))
-                seen.add(normalized)
-                added_for_plan += 1
-                if len(built) >= MAX_SEARCH_QUERIES:
-                    return built
-                if added_for_plan >= per_planned_query_limit:
-                    break
-
-        return built
-
-    @staticmethod
-    def _is_relevant_result(*, item: dict[str, Any], game: str, question: str) -> bool:
-        return TavilySearchProvider._result_relevance_score(item=item, game=game, question=question) > 0
-
-    @staticmethod
-    def _result_relevance_score(
-        *,
-        item: dict[str, Any],
-        game: str,
-        question: str,
-        game_aliases: list[str] | None = None,
-    ) -> float:
-        text = " ".join(
-            str(item.get(field) or "")
-            for field in ("title", "url", "content")
-        ).lower()
-        if not TavilySearchProvider._is_same_game_surface(text=text, game=game, question=question):
-            return 0
-        if TavilySearchProvider._is_low_value_page(text=text, question=question):
-            return 0
-
-        game_names = [game, *(game_aliases or [])]
-        game_token_set = set(relevance_tokens(" ".join(game_names)))
-        question_tokens = [
-            token
-            for token in question_relevance_tokens(question)
-            if token not in game_token_set and token not in TavilySearchProvider.search_noise_tokens
-        ]
-
-        has_game_match = TavilySearchProvider._matches_game_name(
-            text=text,
-            game_names=game_names,
+        selected_plan = plan or self.fallback_plan
+        if not selected_plan.queries:
+            selected_plan = self.fallback_plan
+        return build_search_queries(
+            game=game,
+            question=question,
+            plan=selected_plan,
+            sources=self.sources,
+            database_domains=database_domains,
+            game_aliases=game_aliases,
         )
-        if not has_game_match:
-            return 0
-
-        if not question_tokens:
-            return RELEVANCE_SCORE_POLICY.no_entity_score
-
-        matched = sum(1 for token in question_tokens if token in text)
-        latin_entity_tokens = [token for token in question_tokens if re.fullmatch(r"[a-z0-9]+", token)]
-        minimum_matches = 2 if len(latin_entity_tokens) >= 2 else 1
-        if matched < minimum_matches:
-            return 0
-
-        title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
-        focused_matches = sum(1 for token in question_tokens if token in title_url)
-        coverage = matched / max(len(question_tokens), 1)
-        focus_bonus = min(
-            focused_matches * RELEVANCE_SCORE_POLICY.title_match_bonus,
-            RELEVANCE_SCORE_POLICY.title_bonus_cap,
-        )
-        return min(
-            1.0,
-            RELEVANCE_SCORE_POLICY.base_score
-            + coverage * RELEVANCE_SCORE_POLICY.coverage_weight
-            + focus_bonus,
-        )
-
-    @staticmethod
-    def _matches_game_name(*, text: str, game_names: list[str]) -> bool:
-        for game_name in game_names:
-            normalized = game_name.lower().strip()
-            if normalized and normalized in text:
-                return True
-            tokens = [token for token in relevance_tokens(normalized) if token != normalized]
-            if tokens and all(token in text for token in tokens):
-                return True
-        return not any(game_name.strip() for game_name in game_names)
-
-    @staticmethod
-    def _is_same_game_surface(*, text: str, game: str, question: str) -> bool:
-        normalized_game = game.lower()
-        normalized_question = question.lower()
-        if "elden ring" in normalized_game and "nightreign" in text and "nightreign" not in normalized_question:
-            return False
-        return True
-
-    @staticmethod
-    def _is_low_value_page(*, text: str, question: str) -> bool:
-        lowered_question = question.lower()
-        if "villains.fandom.com" in text and not any(token in lowered_question for token in ("lore", "剧情", "背景")):
-            return True
-        if any(value in text for value in ("all-fiction-battles", "vs battles wiki", "battle wiki")) and not any(
-            token in lowered_question for token in ("lore", "剧情", "背景")
-        ):
-            return True
-        if "reddit - the heart of the internet" in text:
-            return True
-        if "reddit.com/r/eldenring/comments" not in text and any(
-            value in text for value in ("reddit.com/r/eldenring", "reddit - the heart of the internet")
-        ):
-            return True
-        if "steamcommunity.com/app" in text and "/discussions/" not in text:
-            return True
-        return False
-
-    @staticmethod
-    def _is_high_quality_source(
-        *,
-        item: dict[str, Any],
-        game: str,
-        question: str,
-        source_type: str,
-        game_aliases: list[str] | None = None,
-    ) -> bool:
-        if source_type == "official":
-            return True
-
-        title_url = " ".join(str(item.get(field) or "") for field in ("title", "url")).lower()
-        game_token_set = set(relevance_tokens(" ".join([game, *(game_aliases or [])])))
-        entity_tokens = [
-            token
-            for token in question_relevance_tokens(question)
-            if token not in game_token_set and token not in TavilySearchProvider.search_noise_tokens
-        ]
-        title_entity_matches = sum(1 for token in entity_tokens if token in title_url)
-
-        if source_type == "wiki":
-            return title_entity_matches > 0
-        if source_type == "community":
-            return title_entity_matches > 0 and any(value in title_url for value in ("comments", "discussions"))
-        return title_entity_matches > 0
 
     @staticmethod
     def _canonical_source_key(url: str) -> str:
@@ -858,14 +470,6 @@ class TavilySearchProvider:
         ]
         combined = selected + fill_sources
         return cls._limit_source_diversity(combined, total_results=total_results)
-
-    @staticmethod
-    def _intent_source_boost(*, intent: str, source_type: str) -> float:
-        return intent_source_preference(intent, source_type)
-
-    @staticmethod
-    def _domain_quality_score(url: str) -> float:
-        return domain_quality(urlparse(url).netloc)
 
     @staticmethod
     def _version_safety_score(*, intent: str, source_type: str, text: str) -> float:

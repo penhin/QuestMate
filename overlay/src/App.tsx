@@ -25,7 +25,11 @@ import {
   type OverlayPlacement,
 } from "./tauri";
 import { installStartupUpdate } from "./updater";
-import { COPY, GameField, Icon, SETTINGS_TABS, displayProcessName, formatCandidateHost, formatMessageCount, isOverlayProcess, providerLabel, updateLastAssistantMessage, type Language, type Message, type SettingsTab } from "./ui";
+import { ConversationPanel } from "./components/ConversationPanel";
+import { PreferencesSettings } from "./components/PreferencesSettings";
+import { ApiSettings } from "./components/ApiSettings";
+import { SessionSettings } from "./components/SessionSettings";
+import { COPY, GameField, Icon, SETTINGS_TABS, displayProcessName, isOverlayProcess, updateLastAssistantMessage, type Language, type Message, type SettingsTab } from "./ui";
 
 export default function App() {
   const [language, setLanguage] = useState<Language>("zh");
@@ -471,278 +475,50 @@ export default function App() {
 
           <div className="settings-detail">
             {settingsTab === "preferences" && (
-              <section className="settings-section">
-                <div className="section-heading">
-                  <h2>{text.preferences}</h2>
-                  <p>{text.displayMode}</p>
-                </div>
-                <div className="segmented-control">
-                  <button
-                    type="button"
-                    className={mode === "popover" ? "active" : ""}
-                    onClick={() => void changeDisplayMode("popover")}
-                    aria-pressed={mode === "popover"}
-                  >
-                    {text.compactMode}
-                  </button>
-                  <button
-                    type="button"
-                    className={mode === "drawer" ? "active" : ""}
-                    onClick={() => void changeDisplayMode("drawer")}
-                    aria-pressed={mode === "drawer"}
-                  >
-                    {text.drawerMode}
-                  </button>
-                </div>
-                <div className="section-heading placement-heading">
-                  <h3>{text.windowPosition}</h3>
-                </div>
-                <div className="segmented-control placement-control" role="group" aria-label={text.windowPosition}>
-                  <button
-                    type="button"
-                    className={placement === "bottom-right" ? "active" : ""}
-                    onClick={() => void changePlacement("bottom-right")}
-                    aria-pressed={placement === "bottom-right"}
-                  >
-                    {text.bottomRight}
-                  </button>
-                  <button
-                    type="button"
-                    className={placement === "bottom-left" ? "active" : ""}
-                    onClick={() => void changePlacement("bottom-left")}
-                    aria-pressed={placement === "bottom-left"}
-                  >
-                    {text.bottomLeft}
-                  </button>
-                  <button
-                    type="button"
-                    className={placement === "center" ? "active" : ""}
-                    onClick={() => void changePlacement("center")}
-                    aria-pressed={placement === "center"}
-                  >
-                    {text.center}
-                  </button>
-                </div>
-                <div className="setting-row">
-                  <div>
-                    <h3>{text.language}</h3>
-                    <p>{language === "zh" ? "中文" : "English"}</p>
-                  </div>
-                  <label className="language-switch">
-                    <span>中文</span>
-                    <input
-                      type="checkbox"
-                      checked={language === "en"}
-                      onChange={(event) => setLanguage(event.target.checked ? "en" : "zh")}
-                    />
-                    <i />
-                    <span>EN</span>
-                  </label>
-                </div>
-              </section>
+              <PreferencesSettings
+                text={text}
+                mode={mode}
+                placement={placement}
+                language={language}
+                onModeChange={(nextMode) => void changeDisplayMode(nextMode)}
+                onPlacementChange={(nextPlacement) => void changePlacement(nextPlacement)}
+                onLanguageChange={setLanguage}
+              />
             )}
 
             {settingsTab === "api" && (
-              <section className="settings-section">
-                <div className="section-heading">
-                  <h2>{text.apiSettings}</h2>
-                </div>
-                <div className="field-stack provider-field">
-                  <span>{text.aiProvider}</span>
-                  <div
-                    className="custom-select"
-                    onBlur={(event) => {
-                      if (!event.currentTarget.contains(event.relatedTarget)) {
-                        setProviderOpen(false);
-                      }
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className={providerOpen ? "custom-select-trigger open" : "custom-select-trigger"}
-                      onClick={() => setProviderOpen((open) => !open)}
-                      aria-haspopup="listbox"
-                      aria-expanded={providerOpen}
-                    >
-                      <span>{providerLabel(aiSettings.provider)}</span>
-                      <Icon name="chevron" />
-                    </button>
-                    {providerOpen && (
-                      <div className="custom-select-menu" role="listbox">
-                        {(["anthropic", "deepseek"] as const).map((provider) => (
-                          <button
-                            key={provider}
-                            type="button"
-                            className={aiSettings.provider === provider ? "selected" : ""}
-                            onClick={() => changeProvider(provider)}
-                            role="option"
-                            aria-selected={aiSettings.provider === provider}
-                          >
-                            <span>{providerLabel(provider)}</span>
-                            {aiSettings.provider === provider && <span className="select-check">✓</span>}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <label className="field-stack">
-                  <span>
-                    {text.aiApiKey} <em>({text.required})</em>
-                  </span>
-                  <input
-                    className={apiError && !aiSettings.apiKey.trim() ? "invalid" : ""}
-                    value={aiSettings.apiKey}
-                    onChange={(event) => {
-                      setLocalAiSettings((current) => ({ ...current, apiKey: event.target.value }));
-                      setApiSaved(false);
-                      setApiError("");
-                    }}
-                    placeholder={aiSettings.provider === "deepseek" ? "sk-..." : "sk-ant-..."}
-                    type="password"
-                    required
-                    spellCheck={false}
-                  />
-                </label>
-                <label className="field-stack">
-                  <span>
-                    {text.aiModel} <em>({text.required})</em>
-                  </span>
-                  <input
-                    className={apiError && !aiSettings.model.trim() ? "invalid" : ""}
-                    value={aiSettings.model}
-                    onChange={(event) => {
-                      setLocalAiSettings((current) => ({ ...current, model: event.target.value }));
-                      setApiSaved(false);
-                      setApiError("");
-                    }}
-                    placeholder={aiSettings.provider === "deepseek" ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_AI_MODEL}
-                    required
-                    spellCheck={false}
-                  />
-                </label>
-                <label className="field-stack">
-                  <span>{text.aiBaseUrl}</span>
-                  <input
-                    value={aiSettings.baseUrl}
-                    onChange={(event) => {
-                      setLocalAiSettings((current) => ({ ...current, baseUrl: event.target.value }));
-                      setApiSaved(false);
-                    }}
-                    placeholder={
-                      aiSettings.provider === "deepseek" ? "https://api.deepseek.com" : "https://api.anthropic.com"
-                    }
-                    inputMode="url"
-                    spellCheck={false}
-                  />
-                </label>
-                {apiError && (
-                  <p className="field-error" role="alert">
-                    {apiError}
-                  </p>
-                )}
-                <div className="action-row">
-                  <button type="button" className="secondary-action" onClick={resetApiSettings}>
-                    {text.resetApi}
-                  </button>
-                  <button type="button" className="primary-action" onClick={saveApiSettings}>
-                    {apiSaved ? text.apiSaved : text.saveApi}
-                  </button>
-                </div>
-              </section>
+              <ApiSettings
+                text={text}
+                settings={aiSettings}
+                saved={apiSaved}
+                error={apiError}
+                providerOpen={providerOpen}
+                onSettingsChange={(nextSettings) => { setLocalAiSettings(nextSettings); setApiSaved(false); }}
+                onProviderOpenChange={setProviderOpen}
+                onProviderChange={changeProvider}
+                onSave={saveApiSettings}
+                onReset={resetApiSettings}
+                onClearError={() => { setApiSaved(false); setApiError(""); }}
+              />
             )}
 
             {settingsTab === "session" && (
-              <section className="settings-section">
-                <div className="section-heading">
-                  <h2>{text.sessionManagement}</h2>
-                </div>
-                <div className="session-panel">
-                  <div className="session-list">
-                    <button
-                      type="button"
-                      className="session-row session-new-row"
-                      onClick={clearSession}
-                      aria-label={text.newSession}
-                    >
-                      <Icon name="plus" />
-                    </button>
-                    {draftSession && (
-                      <div className="session-row session-draft active">
-                        <button type="button" className="session-open" onClick={clearSession}>
-                          <strong>{text.newSession}</strong>
-                          <span>{formatMessageCount(0, language)}</span>
-                        </button>
-                      </div>
-                    )}
-                    {sessions.map((session) => (
-                      <div
-                        key={session.session_id}
-                        className={session.session_id === sessionId ? "session-row active" : "session-row"}
-                        onBlur={(event) => {
-                          if (editingSessionId !== session.session_id) {
-                            return;
-                          }
-                          const nextTarget = event.relatedTarget;
-                          if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
-                            cancelSessionEdit();
-                          }
-                        }}
-                      >
-                        {editingSessionId === session.session_id ? (
-                          <>
-                            <input
-                              className="session-title-input"
-                              value={editingTitle}
-                              onChange={(event) => setEditingTitle(event.target.value)}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter") {
-                                  event.preventDefault();
-                                  void saveSessionTitle(session.session_id);
-                                }
-                                if (event.key === "Escape") {
-                                  cancelSessionEdit();
-                                }
-                              }}
-                              autoFocus
-                            />
-                            <div className="session-actions">
-                              <button type="button" onClick={() => void saveSessionTitle(session.session_id)}>
-                                {text.saveSession}
-                              </button>
-                              <button type="button" onClick={cancelSessionEdit}>
-                                {text.cancelEdit}
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              className="session-open"
-                              onClick={() => void openSession(session.session_id)}
-                            >
-                              <strong>{session.title}</strong>
-                              <span>{formatMessageCount(session.message_count, language)}</span>
-                            </button>
-                            <div className="session-actions">
-                              <button
-                                type="button"
-                                onClick={() => startSessionEdit(session.session_id, session.title)}
-                              >
-                                {text.editSession}
-                              </button>
-                              <button type="button" onClick={() => void removeSession(session.session_id)}>
-                                {text.deleteSession}
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </section>
+              <SessionSettings
+                text={text}
+                language={language}
+                sessions={sessions}
+                activeSessionId={sessionId}
+                draftSession={draftSession}
+                editingSessionId={editingSessionId}
+                editingTitle={editingTitle}
+                onNew={clearSession}
+                onOpen={(id) => void openSession(id)}
+                onStartEdit={startSessionEdit}
+                onEditingTitleChange={setEditingTitle}
+                onSaveEdit={(id) => void saveSessionTitle(id)}
+                onCancelEdit={cancelSessionEdit}
+                onDelete={(id) => void removeSession(id)}
+              />
             )}
 
           </div>
@@ -761,104 +537,19 @@ export default function App() {
             />
           </section>
 
-          <section className="messages" aria-live="polite">
-            {messages.length > 0 &&
-              messages.map((message, index) => (
-                <article
-                  key={`${message.role}-${index}`}
-                  className={`message ${message.role}${message.status ? " status" : ""}`}
-                >
-                  {message.status && message.progress && message.progress.length > 0 ? (
-                    <section className="search-progress" role="status" aria-live="polite" aria-atomic="true">
-                      <div className="search-progress-heading">
-                        <span className="progress-spinner" aria-hidden="true" />
-                        <h2>{text.searchProgress}</h2>
-                      </div>
-                      <ol>
-                        {message.progress.map((step, stepIndex) => {
-                          const isCurrent = stepIndex === message.progress!.length - 1;
-                          return (
-                            <li key={`${step}-${stepIndex}`} className={isCurrent ? "current" : "complete"}>
-                              <span className="progress-marker" aria-hidden="true" />
-                              <span>{step}</span>
-                            </li>
-                          );
-                        })}
-                      </ol>
-                    </section>
-                  ) : (
-                    <p>{message.content}</p>
-                  )}
-                  {message.gameCandidates && message.gameCandidates.length > 0 && (
-                    <div className="game-candidates" aria-label={text.chooseGame}>
-                      <span>{text.chooseGame}</span>
-                      <div className="candidate-list">
-                        {message.gameCandidates.map((candidate) => (
-                          <button
-                            type="button"
-                            key={`${candidate.name}-${candidate.platform_urls[0] ?? ""}`}
-                            className="candidate-card"
-                            onClick={() => confirmGameCandidate(candidate, message.pendingQuestion)}
-                          >
-                            <strong>{candidate.name}</strong>
-                            {candidate.tags.length > 0 && (
-                              <small>{candidate.tags.join(" / ")}</small>
-                            )}
-                            {candidate.platform_urls[0] && <em>{formatCandidateHost(candidate.platform_urls[0])}</em>}
-                          </button>
-                        ))}
-                        <button
-                          type="button"
-                          className="candidate-card none"
-                          onClick={() => rejectGameCandidates(message.pendingQuestion)}
-                        >
-                          <strong>{text.noneOfThese}</strong>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {message.sources && message.sources.length > 0 && (
-                    <div className="sources">
-                      <span>{text.sources}</span>
-                      <ul>
-                        {message.sources.map((source) => (
-                          <li key={source.url}>
-                            <a href={source.url} target="_blank" rel="noreferrer">
-                              {source.title}
-                            </a>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </article>
-              ))}
-          </section>
-
-          {error && (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          )}
-
-          <form className="ask-form" onSubmit={(event) => void submit(event)}>
-            <label>
-              <span>{text.question}</span>
-              <textarea
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                placeholder={text.questionPlaceholder}
-                rows={mode === "drawer" ? 4 : 3}
-              />
-            </label>
-            <button
-              className="submit"
-              disabled={loading || !game.trim() || !question.trim()}
-              aria-busy={loading}
-            >
-              {loading ? text.loading : text.ask}
-            </button>
-          </form>
+          <ConversationPanel
+            messages={messages}
+            error={error}
+            question={question}
+            game={game}
+            loading={loading}
+            mode={mode}
+            text={text}
+            onQuestionChange={setQuestion}
+            onSubmit={(event) => void submit(event)}
+            onConfirmGame={confirmGameCandidate}
+            onRejectGames={rejectGameCandidates}
+          />
         </>
       )}
     </main>

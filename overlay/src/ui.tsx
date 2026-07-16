@@ -13,7 +13,7 @@ export type Message = {
 export type Language = "zh" | "en";
 export type SettingsTab = "preferences" | "api" | "session";
 
-type Copy = {
+export type Copy = {
   open: string;
   title: string;
   subtitle: string;
