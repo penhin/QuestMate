@@ -29,7 +29,7 @@ from storage import conversation_store, shared_database
 from source_registry import game_source_registry
 from tasks import index_url
 from outbound_http import validate_public_https_url
-from uuid import UUID
+from uuid import UUID, uuid4
 
 logger = structlog.get_logger()
 
@@ -102,7 +102,22 @@ def create_app() -> FastAPI:
 
             return StreamingResponse(events(), media_type="text/event-stream")
 
-        response = await agent.run(request)
+        try:
+            response = await agent.run(request)
+        except Exception as exc:
+            # Search, storage, and model providers are external dependencies.
+            # A transient failure must not be represented as a fabricated game
+            # answer or an opaque HTTP 500 to interactive clients/evaluators.
+            logger.exception("chat.failed", error_type=type(exc).__name__)
+            return ChatResponse(
+                session_id=request.session_id or uuid4(),
+                answer=(
+                    "这次查询的资料服务暂时不可用，因此我无法可靠确认答案。"
+                    "请稍后重试；在恢复前我不会猜测具体地点、步骤或版本结论。"
+                ),
+                sources=[],
+                is_new=request.session_id is None,
+            )
         logger.info("chat.completed", session_id=str(response.session_id), source_count=len(response.sources))
         return response
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 from datetime import datetime, timezone
 import json
 import os
@@ -27,6 +28,82 @@ DEFAULT_CASES = ROOT / "cases.jsonl"
 
 
 EVALUATION_MODES = ("discovery", "retrieval")
+
+
+def error_category(exc: Exception) -> str:
+    """Return a stable diagnostic label without retaining request content."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"http_{exc.response.status_code}"
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.ConnectError):
+        return "connection_error"
+    if isinstance(exc, httpx.RequestError):
+        return "network_error"
+    if isinstance(exc, (json.JSONDecodeError, ValueError)):
+        return "response_decode_error"
+    return f"runtime_{type(exc).__name__}"
+
+
+def aggregate_error_categories(results: list[dict[str, Any]]) -> dict[str, int]:
+    return dict(sorted(Counter(
+        str(result.get("error_category", "runtime_unknown"))
+        for result in results
+        if "error" in result
+    ).items()))
+
+
+def sealed_holdout_report(
+    *,
+    metadata: dict[str, Any],
+    summary: dict[str, Any],
+    model: dict[str, Any],
+    evaluation_mode: str,
+) -> dict[str, Any]:
+    """Produce a report safe to share with implementers.
+
+    In particular, do not include questions, expected answers, URLs, case IDs,
+    or model responses.  A sealed dataset is only useful while those details
+    remain unavailable to the people tuning the agent.
+    """
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "report_kind": "sealed_holdout_aggregate",
+        "dataset": {
+            key: metadata[key]
+            for key in (
+                "schema_version",
+                "sha256",
+                "case_count",
+                "by_split",
+                "by_tier",
+                "by_difficulty",
+                "by_category",
+                "holdout_integrity",
+            )
+        },
+        "model": model,
+        "filters": {"mode": evaluation_mode, "split": "holdout"},
+        "summary": summary,
+    }
+
+
+def validate_sealed_holdout_run(
+    metadata: dict[str, Any],
+    cases: list[dict[str, Any]],
+    mode: str,
+) -> None:
+    """Reject configurations that would make a sealed result misleading."""
+    integrity = metadata["holdout_integrity"]
+    if not integrity["sealed"] or integrity["refresh_required"]:
+        raise ValueError(
+            "--sealed-holdout requires a manifest declaring sealed=true and "
+            "refresh_required=false"
+        )
+    if not cases or any(case["split"] != "holdout" for case in cases):
+        raise ValueError("--sealed-holdout may run only a non-empty holdout split")
+    if mode != "discovery":
+        raise ValueError("--sealed-holdout requires --mode discovery")
 
 
 def evaluation_database_domains(case: dict[str, Any]) -> list[str]:
@@ -97,6 +174,7 @@ async def run_case(
         return {
             "case": case,
             "error": str(exc),
+            "error_category": error_category(exc),
             "evaluation": {"passed": False},
             "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
         }
@@ -115,6 +193,8 @@ async def main_async(args: argparse.Namespace) -> int:
         all_cases,
         manifest_path=Path(args.dataset_manifest) if args.dataset_manifest else None,
     )
+    if args.sealed_holdout:
+        validate_sealed_holdout_run(metadata, cases, args.mode)
     if args.dataset_only:
         print(json.dumps(metadata, ensure_ascii=False, indent=2))
         return 0
@@ -136,17 +216,18 @@ async def main_async(args: argparse.Namespace) -> int:
             for case in cases
         ]
     summary = summarize(results)
+    model = {
+        "provider": args.ai_provider or "backend_default",
+        "model": args.ai_model or "backend_default",
+        "base_url": args.ai_base_url or "backend_default",
+        "request_api_key_configured": bool(api_key),
+    }
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "api_base_url": args.api_base_url,
         "dataset": metadata,
         "scoring_schema_version": SCORING_SCHEMA_VERSION,
-        "model": {
-            "provider": args.ai_provider or "backend_default",
-            "model": args.ai_model or "backend_default",
-            "base_url": args.ai_base_url or "backend_default",
-            "request_api_key_configured": bool(api_key),
-        },
+        "model": model,
         "filters": {
             "mode": args.mode,
             "split": args.split,
@@ -167,10 +248,25 @@ async def main_async(args: argparse.Namespace) -> int:
         "summary": summary,
         "results": results,
     }
+    sealed_error_categories: dict[str, int] | None = None
+    if args.sealed_holdout:
+        sealed_error_categories = aggregate_error_categories(results)
+        report = sealed_holdout_report(
+            metadata=metadata,
+            summary=summary,
+            model=model,
+            evaluation_mode=args.mode,
+        )
+        report["error_categories"] = sealed_error_categories
     output = Path(args.output) if args.output else ROOT / "reports" / f"eval-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"report": str(output), **summary}, ensure_ascii=False, indent=2))
+    if args.sealed_holdout:
+        output.chmod(0o600)
+    console_summary = {"report": str(output), **summary}
+    if sealed_error_categories is not None:
+        console_summary["error_categories"] = sealed_error_categories
+    print(json.dumps(console_summary, ensure_ascii=False, indent=2))
     return 0 if summary["pass_rate"] >= args.fail_under else 1
 
 
@@ -196,6 +292,14 @@ def parse_args() -> argparse.Namespace:
         help="discovery sends no hints (shared server caches may be warm); retrieval may use explicit case hints",
     )
     parser.add_argument("--dataset-only", action="store_true")
+    parser.add_argument(
+        "--sealed-holdout",
+        action="store_true",
+        help=(
+            "require a fresh sealed external holdout and emit an aggregate-only, "
+            "owner-readable report; requires --split holdout --mode discovery"
+        ),
+    )
     parser.add_argument("--ai-provider", choices=("anthropic", "deepseek"))
     parser.add_argument("--ai-model")
     parser.add_argument("--ai-base-url")

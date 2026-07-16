@@ -6,11 +6,16 @@ import httpx
 import pytest
 
 from evals.dataset import dataset_metadata, filter_cases, load_cases
+from evals.create_sealed_manifest import build_sealed_manifest
 from evals.run_evals import (
     DEFAULT_CASES,
+    aggregate_error_categories,
+    error_category,
     evaluation_database_domains,
     evaluation_request_metadata,
     run_case,
+    sealed_holdout_report,
+    validate_sealed_holdout_run,
 )
 from evals.scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
 
@@ -98,6 +103,86 @@ def test_external_manifest_or_explicit_override_can_declare_sealed_holdout(tmp_p
     assert from_manifest["holdout_integrity_source"] == "manifest"
     assert overridden["holdout_integrity"]["status"] == "internal_validation"
     assert overridden["holdout_integrity_source"] == "explicit_override"
+
+
+def test_manifest_builder_binds_and_restricts_private_holdout(tmp_path: Path) -> None:
+    path = tmp_path / "private-holdout.jsonl"
+    path.write_text(
+        '{"id":"private","game":"Unseen Game","question":"Question","expected_behavior":"answer","split":"holdout"}\n',
+        encoding="utf-8",
+    )
+
+    manifest = build_sealed_manifest(path)
+
+    assert manifest["dataset"] == path.name
+    assert manifest["dataset_sha256"] == sha256(path.read_bytes()).hexdigest()
+    assert manifest["holdout_integrity"]["sealed"] is True
+    path.write_text(
+        '{"id":"public","game":"Game","question":"Question","expected_behavior":"answer","split":"dev"}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="only split=holdout"):
+        build_sealed_manifest(path)
+
+
+def test_sealed_holdout_requires_fresh_discovery_only_holdout() -> None:
+    metadata = {
+        "holdout_integrity": {
+            "status": "sealed",
+            "sealed": True,
+            "refresh_required": False,
+            "usage": "unseen generalization estimate",
+        }
+    }
+    cases = [{"split": "holdout"}]
+
+    validate_sealed_holdout_run(metadata, cases, "discovery")
+    with pytest.raises(ValueError, match="mode discovery"):
+        validate_sealed_holdout_run(metadata, cases, "retrieval")
+    with pytest.raises(ValueError, match="non-empty holdout"):
+        validate_sealed_holdout_run(metadata, [], "discovery")
+
+
+def test_sealed_holdout_report_excludes_case_and_response_data() -> None:
+    report = sealed_holdout_report(
+        metadata={
+            "schema_version": 4,
+            "path": "/secure/holdout.jsonl",
+            "sha256": "a" * 64,
+            "case_count": 1,
+            "by_split": {"holdout": 1},
+            "by_tier": {"niche": 1},
+            "by_difficulty": {"hard": 1},
+            "by_category": {"quest_step": 1},
+            "holdout_integrity": {
+                "status": "sealed",
+                "sealed": True,
+                "refresh_required": False,
+                "usage": "unseen generalization estimate",
+            },
+        },
+        summary={"pass_rate": 0.5},
+        model={"model": "test"},
+        evaluation_mode="discovery",
+    )
+
+    serialized = json.dumps(report)
+    assert report["report_kind"] == "sealed_holdout_aggregate"
+    assert "path" not in serialized
+    assert "results" not in report
+    assert "response" not in serialized
+
+
+def test_sealed_error_categories_do_not_include_exception_message() -> None:
+    request = httpx.Request("POST", "https://questmate.test/api/chat")
+    response = httpx.Response(429, request=request)
+    error = httpx.HTTPStatusError("private question must not leak", request=request, response=response)
+
+    assert error_category(error) == "http_429"
+    assert aggregate_error_categories([
+        {"error": "private question must not leak", "error_category": error_category(error)},
+        {"error": "another private message", "error_category": "timeout"},
+    ]) == {"http_429": 1, "timeout": 1}
 
 
 def test_dataset_manifest_must_match_dataset_fingerprint(tmp_path: Path) -> None:

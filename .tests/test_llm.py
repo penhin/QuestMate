@@ -769,6 +769,33 @@ def test_deepseek_uses_openai_compatible_provider() -> None:
     assert isinstance(provider, OpenAICompatibleProvider)
 
 
+def test_deepseek_can_use_server_owned_default_credentials() -> None:
+    provider = create_model_provider(
+        request=ChatRequest(game="Example", question="Question", ai_provider="deepseek"),
+        settings=Settings(deepseek_api_key="server-deepseek-key", deepseek_model="deepseek-reasoner"),
+    )
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.api_key == "server-deepseek-key"
+    assert provider.model == "deepseek-reasoner"
+    assert provider.base_url == "https://api.deepseek.com"
+
+
+@pytest.mark.asyncio
+async def test_answer_provider_failure_returns_conservative_answer() -> None:
+    class FailingProvider:
+        async def complete(self, **kwargs):
+            raise RuntimeError("upstream failure")
+
+    llm = GuideLLM(provider=FailingProvider())
+    answer = await llm.answer(
+        request=ChatRequest(game="Example", question="Where is the hidden item?"),
+        sources=[],
+    )
+
+    assert "没有找到" in answer or "没有直接说明" in answer
+
+
 def test_server_model_key_never_uses_request_controlled_endpoint_or_model(monkeypatch) -> None:
     captured = {}
 

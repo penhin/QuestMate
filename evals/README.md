@@ -34,6 +34,26 @@ holdout 完整性来自与数据集同名的 sidecar manifest：例如 `cases.js
 已提交的脱敏性能摘要保存在 `baselines/`。摘要只包含评分、延迟、来源数量和失败维度，不保存 API Key 或完整模型回答。
 扩充或修改案例后，`baseline_definition.json` 会标记需要刷新性能基线；旧摘要仅作为历史对照，不能代表新数据集成绩。
 
+## 新性能基线与 sealed holdout
+
+新的正式基线应先在公开的 `validation` 上完成，且同一提交分别运行 `discovery` 和 `retrieval`。报告必须固定并记录模型、模型版本、服务镜像/提交、检索配置、数据集 SHA-256、评分 schema、延迟和来源调用量。两种模式回答的问题不同，不能比较或合并它们的通过率。
+
+新的 sealed holdout 不得提交到本仓库，也不得由正在调 Agent 的实现者编写或读取。建议由独立评测负责人维护私有数据集与同名 manifest；按游戏族、资料域名和任务/机制链进行分组切分，避免同一游戏或资料入口同时落入公开集与 holdout。题目、参考答案、来源 URL、case ID 和完整回答只能出现在受控执行环境。
+
+manifest 必须声明 `sealed: true`、`refresh_required: false`，并以 SHA-256 绑定数据文件。受控环境使用以下入口；它强制 holdout + discovery，只写入聚合报告，且将报告权限设为 owner-readable：
+
+```bash
+uv run python evals/run_evals.py \
+  --cases /secure/questmate-holdout.jsonl \
+  --dataset-manifest /secure/questmate-holdout.manifest.json \
+  --split holdout --mode discovery --sealed-holdout \
+  --output /secure/reports/holdout-$(date -u +%Y%m%dT%H%M%SZ).json
+```
+
+实现者只能收到聚合指标与失败维度分布。任何逐题排查、题目泄露或以失败题直接调优后，该版本 holdout 都要标记为污染并轮换；不能再作为未见泛化成绩。
+
+评测负责人可用 `create_sealed_manifest.py` 从私有 JSONL 创建内容绑定的 manifest；完整的权限、预检、运行和轮换步骤见 [SEALED_HOLDOUT_RUNBOOK.md](SEALED_HOLDOUT_RUNBOOK.md)。
+
 只检查数据集结构和覆盖分布，不调用模型或搜索服务：
 
 ```bash

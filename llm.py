@@ -254,19 +254,31 @@ class GuideLLM:
         if provider is None:
             return self._fallback_answer(game=request.game, question=request.question, sources=sources)
 
-        return await provider.complete(
-            max_tokens=2400,
-            temperature=0.2,
-            system=self._answer_system_prompt(),
-            user=self._answer_user_prompt(
+        try:
+            return await provider.complete(
+                max_tokens=2400,
+                temperature=0.2,
+                system=self._answer_system_prompt(),
+                user=self._answer_user_prompt(
+                    request=request,
+                    sources=sources,
+                    plan=plan,
+                    game_resolution=game_resolution,
+                    history=history or [],
+                    investigation=investigation,
+                ),
+            )
+        except Exception as exc:
+            # Provider failures (rate limit, malformed upstream response, or
+            # transient network errors) must not turn an ordinary guide query
+            # into an HTTP 500. Never log the prompt, sources, or API key.
+            logger.warning("llm.answer_failed", error_type=type(exc).__name__)
+            return self._conservative_answer(
                 request=request,
                 sources=sources,
                 plan=plan,
                 game_resolution=game_resolution,
-                history=history or [],
-                investigation=investigation,
-            ),
-        )
+            )
 
     async def improve_answer(
         self,
@@ -389,20 +401,29 @@ class GuideLLM:
             yield self._fallback_answer(game=request.game, question=request.question, sources=sources)
             return
 
-        async for chunk in provider.stream_complete(
-            max_tokens=2400,
-            temperature=0.2,
-            system=self._answer_system_prompt(),
-            user=self._answer_user_prompt(
+        try:
+            async for chunk in provider.stream_complete(
+                max_tokens=2400,
+                temperature=0.2,
+                system=self._answer_system_prompt(),
+                user=self._answer_user_prompt(
+                    request=request,
+                    sources=sources,
+                    plan=plan,
+                    game_resolution=game_resolution,
+                    history=history or [],
+                    investigation=investigation,
+                ),
+            ):
+                yield chunk
+        except Exception as exc:
+            logger.warning("llm.stream_answer_failed", error_type=type(exc).__name__)
+            yield self._conservative_answer(
                 request=request,
                 sources=sources,
                 plan=plan,
                 game_resolution=game_resolution,
-                history=history or [],
-                investigation=investigation,
-            ),
-        ):
-            yield chunk
+            )
 
     async def summarize_title(self, *, request: ChatRequest, answer: str) -> str:
         provider = self._model_provider(request)

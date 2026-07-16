@@ -12,6 +12,8 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
     custom_model_endpoint_hosts: str = ""
 
     tavily_api_key: str = ""

@@ -185,9 +185,18 @@ class OpenAICompatibleProvider:
 
 def create_model_provider(*, request: ChatRequest, settings: Settings) -> ModelProvider | None:
     if request.ai_provider == "deepseek":
-        if not request.ai_api_key:
+        # A request-owned key may select the built-in DeepSeek endpoint. When
+        # using a server-owned key, keep model and endpoint server-owned too.
+        if request.ai_api_key:
+            api_key = request.ai_api_key
+            model = request.ai_model or "deepseek-chat"
+            base_url = request.ai_base_url or "https://api.deepseek.com"
+        elif settings.deepseek_api_key:
+            api_key = settings.deepseek_api_key
+            model = settings.deepseek_model
+            base_url = "https://api.deepseek.com"
+        else:
             return None
-        base_url = request.ai_base_url or "https://api.deepseek.com"
         if not _model_endpoint_allowed(
             base_url,
             built_in_hosts={"api.deepseek.com"},
@@ -195,8 +204,8 @@ def create_model_provider(*, request: ChatRequest, settings: Settings) -> ModelP
         ):
             return None
         return OpenAICompatibleProvider(
-            api_key=request.ai_api_key,
-            model=request.ai_model or "deepseek-chat",
+            api_key=api_key,
+            model=model,
             base_url=base_url,
         )
 
