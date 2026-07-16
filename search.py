@@ -8,7 +8,7 @@ import structlog
 from tavily import TavilyClient
 
 from config import Settings, get_settings
-from game_resolution import GameResolver
+from game_resolution import GameResolver, is_candidate_identity_url, select_game_candidate
 from quality_policy import (
     EXTERNAL_SEARCH_ATTEMPTS,
     PROGRESSIVE_STRICT_SOURCE_TARGET,
@@ -18,7 +18,7 @@ from quality_policy import (
     STABLE_FACT_INTENTS,
     VERSION_SCORE_POLICY,
     VERSION_SENSITIVE_INTENTS,
-    VERSION_SIGNAL_TOKENS,
+    is_version_sensitive_question,
     source_domain_limit,
 )
 from query_tokens import question_relevance_tokens
@@ -29,6 +29,8 @@ from retrieval import (
 )
 from retrieval.mediawiki_retriever import MediaWikiRetriever
 from retrieval.source_builder import build_source
+from retrieval.source_quality import required_entity_groups_for_query
+from retrieval.wiki_domains import has_strong_wiki_page_signal
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
 from mediawiki_client import MediaWikiClient
 from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
@@ -134,16 +136,27 @@ class TavilySearchProvider:
         per_query_results = min(6, max(2, total_results))
         strict_sources_by_url: dict[str, Source] = {}
         relaxed_sources_by_url: dict[str, Source] = {}
+        confirmed_aliases = list(dict.fromkeys([
+            *(
+                [game_resolution.confirmed_name]
+                if game_resolution.confirmed_name
+                and game_resolution.confirmed_name.casefold() != game.casefold()
+                else []
+            ),
+            *game_resolution.aliases,
+        ]))
         search_queries = self._build_search_queries(
             game=game,
             question=query,
             plan=plan,
             database_domains=tuple(game_resolution.database_domains),
-            game_aliases=tuple(game_resolution.aliases),
+            game_aliases=tuple(confirmed_aliases),
         )
         intent = (plan.intent if plan else "general") or "general"
+        version_sensitive = bool(plan and plan.version_sensitive) or is_version_sensitive_question(query)
         aliases = list((plan.aliases if plan else [])[:6])
-        game_aliases = list(game_resolution.aliases)
+        named_entity_groups = list((plan.named_entity_groups if plan else [])[:4])
+        game_aliases = confirmed_aliases
         min_strict_results = min(PROGRESSIVE_STRICT_SOURCE_TARGET, total_results)
 
         direct_wiki_sources = await self._search_mediawiki_sources(
@@ -154,9 +167,20 @@ class TavilySearchProvider:
             game_aliases=game_aliases,
             database_domains=list(game_resolution.database_domains),
             intent=intent,
+            version_sensitive=version_sensitive,
             max_results=total_results,
+            named_entity_groups=named_entity_groups,
         )
-        if direct_wiki_sources:
+        # Stable fact lookups can finish on a sufficiently populated direct
+        # database result. Version-sensitive, strategic, mechanical, general,
+        # and refinement requests keep the independent open-web portfolio.
+        can_finish_on_database = (
+            intent in STABLE_FACT_INTENTS
+            and not version_sensitive
+            and len(direct_wiki_sources) >= min_strict_results
+            and not (plan and plan.refinement)
+        )
+        if can_finish_on_database:
             self._log_search_usage(
                 game=game,
                 usage_before=usage_before,
@@ -164,9 +188,30 @@ class TavilySearchProvider:
                 route="mediawiki",
             )
             return direct_wiki_sources[:total_results]
+        for source in direct_wiki_sources:
+            source_key = self._canonical_source_key(str(source.url))
+            current = relaxed_sources_by_url.get(source_key)
+            if current is None or (source.score or 0) > (current.score or 0):
+                relaxed_sources_by_url[source_key] = source
+                strict_sources_by_url[source_key] = source
 
-        first_wave_size = min(self.settings.tavily_first_wave_queries, len(search_queries))
+        if not search_queries:
+            selected = self._balanced_sources(
+                strict_sources=list(strict_sources_by_url.values()),
+                relaxed_sources=list(relaxed_sources_by_url.values()),
+                total_results=total_results,
+                min_strict_results=min_strict_results,
+            )
+            self._log_search_usage(
+                game=game,
+                usage_before=usage_before,
+                source_count=len(selected),
+                route="mediawiki",
+            )
+            return selected
+
         max_query_count = min(self.settings.tavily_max_queries_per_request, len(search_queries))
+        first_wave_size = min(self.settings.tavily_first_wave_queries, max_query_count)
 
         await self._collect_sources(
             search_queries=search_queries[:first_wave_size],
@@ -176,9 +221,12 @@ class TavilySearchProvider:
             aliases=aliases,
             game_aliases=game_aliases,
             intent=intent,
+            version_sensitive=version_sensitive,
             strict_sources_by_url=strict_sources_by_url,
             relaxed_sources_by_url=relaxed_sources_by_url,
             database_domains=list(game_resolution.database_domains),
+            official_domains=self._resolution_authority_domains(game_resolution),
+            named_entity_groups=named_entity_groups,
         )
 
         if len(strict_sources_by_url) < min_strict_results and first_wave_size < max_query_count:
@@ -190,9 +238,12 @@ class TavilySearchProvider:
                 aliases=aliases,
                 game_aliases=game_aliases,
                 intent=intent,
+                version_sensitive=version_sensitive,
                 strict_sources_by_url=strict_sources_by_url,
                 relaxed_sources_by_url=relaxed_sources_by_url,
                 database_domains=list(game_resolution.database_domains),
+                official_domains=self._resolution_authority_domains(game_resolution),
+                named_entity_groups=named_entity_groups,
             )
 
         strict_ranked_sources = sorted(
@@ -215,7 +266,7 @@ class TavilySearchProvider:
             game=game,
             usage_before=usage_before,
             source_count=len(selected_sources),
-            route="tavily",
+            route="mediawiki+tavily" if direct_wiki_sources else "tavily",
         )
         return selected_sources
 
@@ -249,7 +300,9 @@ class TavilySearchProvider:
         game_aliases: list[str],
         database_domains: list[str],
         intent: str,
+        version_sensitive: bool,
         max_results: int,
+        named_entity_groups: list[list[str]],
     ) -> list[Source]:
         return await self._wiki_retriever.search(
             game=game,
@@ -259,7 +312,11 @@ class TavilySearchProvider:
             game_aliases=game_aliases,
             database_domains=database_domains,
             max_results=max_results,
+            named_entity_groups=named_entity_groups,
         )
+
+    async def wait_for_background_tasks(self) -> None:
+        await self._wiki_retriever.wait_for_background_tasks()
 
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
@@ -283,9 +340,47 @@ class TavilySearchProvider:
             source_count=len(resolution.platform_urls) + len(resolution.database_domains),
             route="identity",
         )
-        if self._source_registry is not None:
+        if self._source_registry is not None and not resolution.ambiguous:
             await self._source_registry.upsert_resolution(resolution)
         return resolution
+
+    async def select_game_candidate(
+        self,
+        *,
+        game: str,
+        selected_url: str,
+        question: str | None = None,
+    ) -> GameResolution:
+        """Validate a UI candidate against a fresh identity result, bypassing registry ambiguity."""
+        if self._client is None or not is_candidate_identity_url(selected_url):
+            return GameResolution(input_name=game, confirmed_name=game, confidence=0)
+        usage_before = (self._client.upstream_calls, self._client.cache_hits)
+        try:
+            discovered = await asyncio.wait_for(
+                asyncio.to_thread(self._game_resolver.resolve, game=game, question=question),
+                timeout=self.settings.external_request_timeout_seconds,
+            )
+        except Exception:
+            discovered = GameResolution(input_name=game, confirmed_name=game, confidence=0)
+        selected = select_game_candidate(discovered, selected_url=selected_url)
+        self._log_search_usage(
+            game=game,
+            usage_before=usage_before,
+            source_count=len(selected.platform_urls) if selected is not None else 0,
+            route="identity-selection",
+        )
+        if selected is not None:
+            return selected
+        # The selected opaque identity disappeared from the fresh result set.
+        # Never reinterpret that user choice as a different currently-ranked
+        # game; return the fresh candidates for explicit confirmation instead.
+        return GameResolution(
+            input_name=game,
+            confirmed_name=game,
+            confidence=0,
+            candidates=discovered.candidates,
+            ambiguous=bool(discovered.candidates),
+        )
 
     async def _collect_sources(
         self,
@@ -297,21 +392,34 @@ class TavilySearchProvider:
         aliases: list[str],
         game_aliases: list[str],
         intent: str,
+        version_sensitive: bool,
         strict_sources_by_url: dict[str, Source],
         relaxed_sources_by_url: dict[str, Source],
         database_domains: list[str],
+        official_domains: list[str],
+        named_entity_groups: list[list[str]],
     ) -> None:
         results = await self._fetch_search_results(search_queries, per_query_results)
         for (search_query, search_source), result in zip(search_queries, results, strict=True):
+            required_entity_groups = required_entity_groups_for_query(
+                named_entity_groups,
+                search_query,
+            )
             for item in result.get("results", []):
                 url = str(item.get("url") or "").strip()
-                if search_source.source_type == "wiki":
+                effective_source = self._effective_source_policy(
+                    configured=search_source,
+                    url=url,
+                    database_domains=database_domains,
+                    official_domains=official_domains,
+                )
+                if effective_source.source_type == "wiki":
                     result_domain = urlparse(str(url)).netloc.lower()
                     known_database = any(
                         result_domain == domain or result_domain.endswith(f".{domain}")
                         for domain in database_domains
                     )
-                    title_url = f"{item.get('title') or ''} {url}".lower()
+                    title_url = f"{item.get('title') or ''} {url}"
                     if not known_database and not matches_game_name(
                         text=title_url,
                         game_names=[game, *game_aliases],
@@ -320,16 +428,18 @@ class TavilySearchProvider:
                 search_context = f"{query} {search_query} {' '.join(aliases)}"
                 built = build_source(
                     item=item,
-                    source_policy=search_source,
+                    source_policy=effective_source,
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
                     intent=intent,
+                    version_sensitive=version_sensitive,
                     best_passage=self._best_evidence_passage,
                     evidence_max_chars=self.settings.evidence_passage_max_chars,
                     version_safety_score=self._version_safety_score,
                     extract_version=self._extract_game_version,
                     parse_datetime=self._parse_source_datetime,
+                    required_entity_groups=required_entity_groups,
                 )
                 if built is None:
                     continue
@@ -343,11 +453,51 @@ class TavilySearchProvider:
                     game=game,
                     game_aliases=game_aliases,
                     question=search_context,
-                    source_type=search_source.source_type,
+                    source_type=effective_source.source_type,
+                    required_entity_groups=required_entity_groups,
                 ):
                     current = strict_sources_by_url.get(source_key)
                     if current is None or (source.score or 0) > (current.score or 0):
                         strict_sources_by_url[source_key] = source
+
+    def _effective_source_policy(
+        self,
+        *,
+        configured: SourcePolicy,
+        url: str,
+        database_domains: list[str],
+        official_domains: list[str],
+    ) -> SourcePolicy:
+        """Classify the actual result page; query intent is only a weak prior."""
+        parsed = urlparse(url)
+        domain = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
+
+        def matches_any(candidates: list[str]) -> bool:
+            normalized = [
+                value.casefold().split(":", 1)[0].strip(".").removeprefix("www.")
+                for value in candidates
+                if value
+            ]
+            return any(domain == value or domain.endswith(f".{value}") for value in normalized)
+
+        if matches_any(["reddit.com", "steamcommunity.com"]):
+            return self.sources["community"]
+        if has_strong_wiki_page_signal(domain, url=url):
+            return self.sources["wiki"]
+        if matches_any(official_domains):
+            return self.sources["official"]
+        if configured.source_type in {"official", "wiki", "community"}:
+            return self.sources["web"]
+        return configured
+
+    @staticmethod
+    def _resolution_authority_domains(resolution: GameResolution) -> list[str]:
+        domains: list[str] = []
+        for url in [*resolution.official_urls, *resolution.platform_urls]:
+            domain = urlparse(str(url)).netloc.casefold().split(":", 1)[0].removeprefix("www.")
+            if domain and domain not in domains:
+                domains.append(domain)
+        return domains
 
     async def _fetch_search_results(
         self,
@@ -561,10 +711,16 @@ class TavilySearchProvider:
         return cls._limit_source_diversity(combined, total_results=total_results)
 
     @staticmethod
-    def _version_safety_score(*, intent: str, source_type: str, text: str) -> float:
+    def _version_safety_score(
+        *,
+        intent: str,
+        source_type: str,
+        text: str,
+        version_sensitive: bool = False,
+    ) -> float:
         lowered = text.lower()
-        has_version_signal = any(token in lowered for token in VERSION_SIGNAL_TOKENS)
-        version_sensitive = intent in VERSION_SENSITIVE_INTENTS
+        has_version_signal = is_version_sensitive_question(lowered)
+        version_sensitive = version_sensitive or intent in VERSION_SENSITIVE_INTENTS
         if version_sensitive and source_type == "official":
             return VERSION_SCORE_POLICY.official_sensitive
         if version_sensitive and has_version_signal:

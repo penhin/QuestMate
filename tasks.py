@@ -4,7 +4,7 @@ from datetime import datetime
 from celery import Celery
 
 from config import get_settings
-from knowledge import knowledge_store
+from knowledge import KnowledgeStore
 
 settings = get_settings()
 
@@ -32,13 +32,22 @@ def index_url(
     published_at: str | None = None,
 ) -> dict[str, object]:
     """Fetch, extract, chunk and persist one guide page for retrieval."""
-    return asyncio.run(
-        knowledge_store.index_url(
-            url=url,
-            game=game,
-            title=title,
-            source_type=source_type,
-            game_version=game_version,
-            published_at=datetime.fromisoformat(published_at.replace("Z", "+00:00")) if published_at else None,
-        )
-    )
+    async def run_once() -> dict[str, object]:
+        # Celery invokes this synchronous task repeatedly in the same worker
+        # process, while asyncio.run creates a fresh event loop each time.  A
+        # per-task store prevents HTTP/DB pools created on an earlier loop from
+        # being reused after that loop has closed.
+        store = KnowledgeStore()
+        try:
+            return await store.index_url(
+                url=url,
+                game=game,
+                title=title,
+                source_type=source_type,
+                game_version=game_version,
+                published_at=datetime.fromisoformat(published_at.replace("Z", "+00:00")) if published_at else None,
+            )
+        finally:
+            await store.aclose()
+
+    return asyncio.run(run_once())

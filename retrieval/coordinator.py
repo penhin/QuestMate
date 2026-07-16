@@ -9,7 +9,7 @@ import structlog
 
 from quality_policy import MAX_INVESTIGATION_HOPS
 from retrieval.evidence_pool import canonical_source_url, rank_sources
-from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
+from schemas import ChatRequest, EvidenceGap, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
 logger = structlog.get_logger()
 
@@ -82,6 +82,10 @@ class RetrievalCoordinator:
         active_game_resolution = self._with_discovered_wiki_domains(game_resolution, merged_sources)
         investigation = InvestigationState(
             goal=request.question,
+            evidence_gaps=[
+                EvidenceGap(kind="other", description=value, query_hint=value)
+                for value in plan.missing_info
+            ],
             unresolved_questions=plan.missing_info,
             attempted_queries=[query.query for query in plan.queries],
             aliases=plan.aliases,
@@ -109,6 +113,8 @@ class RetrievalCoordinator:
 
                 refined_plan = SearchPlan(
                     intent=merged_plan.intent,
+                    version_sensitive=merged_plan.version_sensitive,
+                    named_entity_groups=merged_plan.named_entity_groups,
                     aliases=investigation.aliases,
                     queries=investigation.next_queries,
                     missing_info=investigation.unresolved_questions,
@@ -138,6 +144,7 @@ class RetrievalCoordinator:
                     query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
                     intent=merged_plan.intent,
                     max_results=self.max_results,
+                    version_sensitive=merged_plan.version_sensitive,
                 )
                 attempted_queries = list(dict.fromkeys([
                     *investigation.attempted_queries,
@@ -165,7 +172,10 @@ class RetrievalCoordinator:
             merged_plan = merged_plan.model_copy(
                 update={
                     "aliases": list(dict.fromkeys([*merged_plan.aliases, *investigation.aliases]))[:6],
-                    "missing_info": investigation.unresolved_questions[:4],
+                    "missing_info": list(dict.fromkeys([
+                        *investigation.unresolved_questions,
+                        *(gap.description for gap in investigation.evidence_gaps),
+                    ]))[:4],
                 }
             )
             return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
@@ -202,6 +212,7 @@ class RetrievalCoordinator:
                 query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
                 intent=merged_plan.intent,
                 max_results=self.max_results,
+                version_sensitive=merged_plan.version_sensitive,
             )
             refined = True
             active_game_resolution = self._with_discovered_wiki_domains(
@@ -287,6 +298,7 @@ class RetrievalCoordinator:
             query=f"{question} {' '.join(plan.aliases)}".strip(),
             intent=plan.intent,
             max_results=self.max_results,
+            version_sensitive=plan.version_sensitive,
         )
         logger.info(
             "retrieval.completed",
@@ -301,6 +313,35 @@ class RetrievalCoordinator:
 
 def merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:
     aliases = list(dict.fromkeys([*initial.aliases, *refined.aliases]))[:6]
+    named_entity_groups: list[list[str]] = []
+    for group in [*initial.named_entity_groups, *refined.named_entity_groups]:
+        cleaned = list(dict.fromkeys(name.strip() for name in group if name.strip()))
+        normalized = {" ".join(name.casefold().split()) for name in cleaned}
+        if not normalized:
+            continue
+        overlapping = [
+            index
+            for index, existing in enumerate(named_entity_groups)
+            if normalized.intersection(
+                " ".join(name.casefold().split()) for name in existing
+            )
+        ]
+        if not overlapping:
+            named_entity_groups.append(cleaned[:4])
+            continue
+        target = overlapping[0]
+        named_entity_groups[target] = list(dict.fromkeys([
+            *named_entity_groups[target],
+            *cleaned,
+        ]))[:4]
+        # Alias overlap is transitive. Collapse any additional connected
+        # groups instead of turning one entity into multiple AND requirements.
+        for index in reversed(overlapping[1:]):
+            named_entity_groups[target] = list(dict.fromkeys([
+                *named_entity_groups[target],
+                *named_entity_groups[index],
+            ]))[:4]
+            named_entity_groups.pop(index)
     queries = []
     seen_queries: set[str] = set()
     for query in [*initial.queries, *refined.queries]:
@@ -311,6 +352,8 @@ def merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:
         queries.append(query)
     return SearchPlan(
         intent=initial.intent,
+        version_sensitive=initial.version_sensitive or refined.version_sensitive,
+        named_entity_groups=named_entity_groups[:4],
         aliases=aliases,
         queries=queries[:6],
         missing_info=list(dict.fromkeys([*initial.missing_info, *refined.missing_info]))[:4],

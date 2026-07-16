@@ -10,6 +10,8 @@ export type GameCandidate = {
   aliases: string[];
   tags: string[];
   platform_urls: string[];
+  official_urls: string[];
+  identity_urls: string[];
   database_domains: string[];
   confidence: number;
 };

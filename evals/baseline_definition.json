@@ -1,12 +1,14 @@
 {
-  "version": 1,
-  "status": "performance_baseline_refresh_required",
+  "version": 4,
+  "scoring_schema_version": 4,
+  "status": "performance_and_sealed_holdout_refresh_required",
   "dataset": {
-    "sha256": "a41221046dc6d6cc4bdba3b8fd9c748400cf92a09e6260c3914f3ddf26f03ad6",
+    "schema_version": 4,
+    "sha256": "82c52bf27efe5314dc93fa10c6a6eb32bcbbbbbce5b733bd4a215a292b876181",
     "case_count": 52,
     "dev_cases": 30,
-    "validation_cases": 17,
-    "holdout_cases": 5,
+    "validation_cases": 18,
+    "holdout_cases": 4,
     "mainstream_cases": 25,
     "niche_cases": 21,
     "safety_cases": 6,
@@ -23,7 +25,24 @@
     "forbidden_terms_pass",
     "source_urls_valid",
     "version_policy_pass",
-    "citation_pass"
+    "citation_pass",
+    "citation_grounding_pass"
+  ],
+  "gating_dimensions": [
+    "answer_present",
+    "behavior_pass",
+    "evidence_recall_pass",
+    "action_chain_pass",
+    "required_terms_pass",
+    "forbidden_terms_pass",
+    "source_urls_valid",
+    "version_policy_pass",
+    "citation_pass",
+    "citation_grounding_pass"
+  ],
+  "diagnostic_dimensions": [
+    "source_type_pass",
+    "source_recall_pass"
   ],
   "segments": [
     "category",
@@ -32,9 +51,16 @@
     "difficulty"
   ],
   "policy": {
+    "default_evaluation_mode": "discovery",
+    "discovery_mode": "不确认游戏身份，不注入别名或资料库域名；标准答案 URL 仅用于返回后的评分；后端缓存和来源注册表可跨案例复用，因此不是逐案例冷进程",
+    "retrieval_mode": "除 game_resolution 外确认游戏身份；隔离后端需显式启用 ALLOW_EVALUATION_RETRIEVAL_HINTS，且只使用案例声明的 database_domains/game_aliases",
+    "mode_comparison": "discovery 与 retrieval 基线分开记录，不能直接比较通过率",
     "dev_split": "用于日常定位和调参",
     "validation_split": "只用于回归确认，不针对单个失败案例调提示词",
-    "holdout_split": "按整个游戏留出，与开发及验证游戏不重叠，只用于检查跨游戏泛化",
+    "source_route_scoring": "expected source type/URL 只作为召回诊断；证据、答案、引用与官方版本策略决定通过",
+    "citation_grounding": "明确回答的有效引用必须指向含策展证据词、关键答案词或问题实体锚点的来源；版本结论必须引用相关版本来源",
+    "holdout_manifest": "holdout 完整性由数据集 sidecar manifest 声明；缺少 manifest 时标记 unverified，不继承当前仓库的污染状态",
+    "holdout_split": "当前案例已被实现者查看，仅作历史回归；状态为 contaminated_refresh_required，发布前必须建立新的外部 sealed holdout",
     "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定"
   },
   "observed_baselines": [

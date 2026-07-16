@@ -41,10 +41,10 @@ export function ConversationPanel(props: Props) {
                 <span>{text.chooseGame}</span>
                 <div className="candidate-list">
                   {message.gameCandidates.map((candidate) => (
-                    <button type="button" key={`${candidate.name}-${candidate.platform_urls[0] ?? ""}`} className="candidate-card" onClick={() => props.onConfirmGame(candidate, message.pendingQuestion)}>
+                    <button type="button" key={`${candidate.name}-${candidate.platform_urls[0] ?? candidate.official_urls[0] ?? candidate.identity_urls[0] ?? ""}`} className="candidate-card" onClick={() => props.onConfirmGame(candidate, message.pendingQuestion)}>
                       <strong>{candidate.name}</strong>
                       {candidate.tags.length > 0 && <small>{candidate.tags.join(" / ")}</small>}
-                      {candidate.platform_urls[0] && <em>{formatCandidateHost(candidate.platform_urls[0])}</em>}
+                      {(candidate.platform_urls[0] || candidate.official_urls[0] || candidate.identity_urls[0]) && <em>{formatCandidateHost(candidate.platform_urls[0] || candidate.official_urls[0] || candidate.identity_urls[0])}</em>}
                     </button>
                   ))}
                   <button type="button" className="candidate-card none" onClick={() => props.onRejectGames(message.pendingQuestion)}><strong>{text.noneOfThese}</strong></button>

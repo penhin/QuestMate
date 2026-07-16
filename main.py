@@ -1,9 +1,10 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
+import secrets
 
 import structlog
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -24,9 +25,10 @@ from schemas import (
     SessionSummary,
     SessionsResponse,
 )
-from storage import conversation_store
+from storage import conversation_store, shared_database
 from source_registry import game_source_registry
 from tasks import index_url
+from outbound_http import validate_public_https_url
 from uuid import UUID
 
 logger = structlog.get_logger()
@@ -44,10 +46,31 @@ def create_app() -> FastAPI:
             await game_source_registry.init_schema()
         except Exception:
             logger.warning("source_registry.schema_unavailable")
-        yield
+        try:
+            yield
+        finally:
+            wait_for_indexes = getattr(quest_agent.search_provider, "wait_for_background_tasks", None)
+            try:
+                if callable(wait_for_indexes):
+                    await wait_for_indexes()
+            finally:
+                try:
+                    await knowledge_store.aclose()
+                finally:
+                    await shared_database.engine.dispose()
 
     app = FastAPI(title="QuestMate", version="0.1.0", lifespan=lifespan)
     settings = get_settings()
+
+    def require_admin(x_questmate_admin_token: str | None = Header(default=None)) -> None:
+        configured = settings.knowledge_admin_token
+        if not configured and not settings.is_production:
+            return
+        if not configured or not x_questmate_admin_token or not secrets.compare_digest(
+            configured,
+            x_questmate_admin_token,
+        ):
+            raise HTTPException(status_code=403, detail="需要管理员凭据")
 
     app.add_middleware(
         CORSMiddleware,
@@ -104,11 +127,20 @@ def create_app() -> FastAPI:
         await conversation_store.save_feedback(request)
         return FeedbackResponse()
 
-    @app.post("/api/knowledge/documents", response_model=KnowledgeIndexResponse, status_code=status.HTTP_202_ACCEPTED)
+    @app.post(
+        "/api/knowledge/documents",
+        response_model=KnowledgeIndexResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_admin)],
+    )
     async def index_knowledge_document(request: KnowledgeIndexRequest) -> KnowledgeIndexResponse:
         try:
+            safe_url = await validate_public_https_url(str(request.url))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
             task = index_url.delay(
-                str(request.url),
+                safe_url,
                 request.game,
                 request.title,
                 request.source_type,
@@ -120,7 +152,11 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail="索引队列暂不可用") from exc
         return KnowledgeIndexResponse(task_id=task.id)
 
-    @app.get("/api/knowledge/documents", response_model=list[KnowledgeDocumentStatus])
+    @app.get(
+        "/api/knowledge/documents",
+        response_model=list[KnowledgeDocumentStatus],
+        dependencies=[Depends(require_admin)],
+    )
     async def list_knowledge_documents(game: str | None = None) -> list[KnowledgeDocumentStatus]:
         try:
             return await knowledge_store.list_documents(game=game)
@@ -128,7 +164,11 @@ def create_app() -> FastAPI:
             logger.exception("knowledge.list_failed")
             raise HTTPException(status_code=503, detail="知识库暂不可用") from exc
 
-    @app.get("/api/source-registry", response_model=list[GameResolution])
+    @app.get(
+        "/api/source-registry",
+        response_model=list[GameResolution],
+        dependencies=[Depends(require_admin)],
+    )
     async def list_source_registry() -> list[GameResolution]:
         return await game_source_registry.list_resolutions()
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dataset": "cases.jsonl",
+  "dataset_sha256": "82c52bf27efe5314dc93fa10c6a6eb32bcbbbbbce5b733bd4a215a292b876181",
+  "holdout_integrity": {
+    "status": "contaminated_refresh_required",
+    "sealed": false,
+    "refresh_required": true,
+    "usage": "legacy regression diagnostics only"
+  }
+}

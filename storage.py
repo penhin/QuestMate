@@ -408,4 +408,7 @@ def sort_summaries(summaries: list[SessionSummary]) -> list[SessionSummary]:
     )
 
 
-conversation_store = PostgresConversationStore()
+# API-owned stores share one engine/pool. Worker tasks still create a
+# short-lived Database because each asyncio.run invocation owns a new loop.
+shared_database = Database()
+conversation_store = PostgresConversationStore(database=shared_database)

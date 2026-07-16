@@ -384,8 +384,7 @@ export default function App() {
       nextGame,
       {
         confirmed_game: true,
-        game_aliases: [candidate.name, ...candidate.aliases],
-        database_domains: candidate.database_domains,
+        selected_game_url: candidate.platform_urls[0] || candidate.official_urls[0] || candidate.identity_urls[0],
       },
       { appendUserMessage: false },
     );

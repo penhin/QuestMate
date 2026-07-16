@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -16,7 +17,7 @@ from quality_policy import (
     SEARCH_RESULT_WEIGHTS,
     SOURCE_POLICIES,
 )
-from knowledge import chunk_text, keyword_terms, parse_published_at
+from knowledge import KnowledgeStore, chunk_text, keyword_terms, parse_published_at
 from agent import QuestAgent
 from game_resolution import GameResolver, identity_matches_game
 from llm import GuideLLM
@@ -28,6 +29,15 @@ from storage import InMemoryConversationStore, PostgresConversationStore
 
 
 client = TestClient(main.app)
+
+
+def test_production_environment_aliases_are_fail_closed() -> None:
+    assert Settings(app_env="production").is_production
+    assert Settings(app_env=" PROD ").is_production
+    assert Settings(app_env="staging").is_production
+    assert Settings(app_env="prodution").is_production
+    assert not Settings(app_env="development").is_production
+    assert not Settings(app_env=" test ").is_production
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +62,7 @@ class FastIdentitySearchClient:
 
     def search(self, **kwargs):
         self.queries.append(kwargs["query"])
-        if kwargs["query"] == '"Look Outside" game Steam itch.io GOG wiki':
+        if kwargs["query"].startswith('"Look Outside" video game'):
             return {
                 "results": [
                     {
@@ -153,6 +163,28 @@ class RecordingContentIndex:
         return {"status": "ready", "document_id": "doc", "chunk_count": 1}
 
 
+async def test_knowledge_query_vectors_are_reused() -> None:
+    class CountingEmbeddings:
+        def __init__(self):
+            self.calls = 0
+
+        async def embed(self, texts):
+            self.calls += 1
+            return [[0.25, 0.75]]
+
+    store = KnowledgeStore(settings=Settings())
+    embeddings = CountingEmbeddings()
+    store.embeddings = embeddings
+
+    first = await store._query_vector("  Same   Question ")
+    second = await store._query_vector("Same Question")
+    case_variant = await store._query_vector("same question")
+
+    assert first == second == case_variant == [0.25, 0.75]
+    assert embeddings.calls == 2
+    await store.database.engine.dispose()
+
+
 def test_game_resolver_fast_identity_confirms_niche_game() -> None:
     client = FastIdentitySearchClient()
     resolution = GameResolver(client).resolve(game="Look Outside")
@@ -232,7 +264,11 @@ async def test_game_identity_fallback_has_a_hard_query_cap() -> None:
     resolution = await provider.resolve_game("Unknown Niche Game")
 
     assert resolution.is_confirmed is False
-    assert len(client.queries) == 3
+    assert len(client.queries) <= 4
+    assert client.queries[-2:] == [
+        "Unknown Niche Game wiki",
+        "Unknown Niche Game official wiki",
+    ]
 
 
 async def test_progressive_search_caps_paid_queries() -> None:
@@ -289,7 +325,7 @@ async def test_search_skips_relative_result_urls() -> None:
     assert sources == []
 
 
-async def test_direct_mediawiki_hit_skips_paid_search() -> None:
+async def test_single_direct_mediawiki_hit_keeps_independent_search_route() -> None:
     tavily = CountingEmptySearchClient()
     mediawiki = DirectWikiClient()
     provider = TavilySearchProvider(client=tavily, mediawiki_client=mediawiki)
@@ -312,7 +348,7 @@ async def test_direct_mediawiki_hit_skips_paid_search() -> None:
     )
 
     assert [source.title for source in sources] == ["Pavol"]
-    assert tavily.queries == []
+    assert tavily.queries
     assert mediawiki.queries == [("felvidek.fandom.com", "Pavol recruit party")]
 
 
@@ -348,7 +384,8 @@ async def test_direct_mediawiki_ranks_pages_against_current_gap_query() -> None:
     )
 
     assert [source.title for source in sources] == ["Relay Token"]
-    assert tavily.queries == []
+    assert len(tavily.queries) == 1
+    assert "site:" not in tavily.queries[0]
 
 
 def test_evidence_passage_prefers_late_identifier_phrase_over_numeric_noise() -> None:
@@ -429,11 +466,53 @@ async def test_mediawiki_pages_are_auto_indexed_for_future_questions() -> None:
             confidence=0.8,
         ),
     )
+    await provider.wait_for_background_tasks()
 
     assert len(content_index.documents) == 1
     assert content_index.documents[0]["title"] == "Pavol"
     assert "protagonist" in content_index.documents[0]["content"]
     assert content_index.documents[0]["skip_if_fresh"] is True
+
+
+async def test_mediawiki_auto_index_does_not_block_search_results() -> None:
+    class BlockingContentIndex:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def index_content(self, **kwargs):
+            self.started.set()
+            await self.release.wait()
+            return {"status": "ready", "document_id": "doc", "chunk_count": 1}
+
+    content_index = BlockingContentIndex()
+    provider = TavilySearchProvider(
+        client=CountingEmptySearchClient(),
+        mediawiki_client=DirectWikiClient(),
+        content_index=content_index,
+    )
+    plan = SearchPlan(
+        intent="quest_step",
+        aliases=["Pavol"],
+        queries=[{"source_type": "wiki", "query": "Pavol recruit party"}],
+    )
+
+    sources = await provider.search(
+        "Pavol 怎么加入队伍？",
+        "Felvidek",
+        plan=plan,
+        game_resolution=GameResolution(
+            input_name="Felvidek",
+            confirmed_name="Felvidek",
+            database_domains=["felvidek.fandom.com"],
+            confidence=0.8,
+        ),
+    )
+
+    assert [source.title for source in sources] == ["Pavol"]
+    await asyncio.wait_for(content_index.started.wait(), timeout=1)
+    content_index.release.set()
+    await provider.wait_for_background_tasks()
 
 
 async def test_mediawiki_expands_only_question_matching_links() -> None:
@@ -496,7 +575,7 @@ def test_game_identity_requires_exact_compact_name() -> None:
 def test_game_resolver_enriches_confirmed_store_identity_with_niche_wiki() -> None:
     class StoreThenWikiClient:
         def search(self, **kwargs):
-            if kwargs["query"] == '"Felvidek" game Steam itch.io GOG wiki':
+            if kwargs["query"] == '"Felvidek" video game official store wiki':
                 return {
                     "results": [{
                         "title": "Felvidek on Steam",
@@ -1063,7 +1142,7 @@ class SteamAliasSearchClient:
     def search(self, **kwargs):
         query = kwargs["query"]
         self.queries.append(query)
-        if query == "逃出从此以后 Steam":
+        if "逃出从此以后" in query and "official store" in query:
             return {
                 "results": [
                     {
@@ -1091,7 +1170,7 @@ class SteamAliasSearchClient:
 class DuplicateGameCandidateSearchClient:
     def search(self, **kwargs):
         query = kwargs["query"]
-        if "Steam" in query:
+        if "official store" in query:
             return {
                 "results": [
                     {
@@ -1207,7 +1286,7 @@ async def test_search_uses_steam_alias_for_official_chinese_titles() -> None:
 
     sources = await provider.search("灌铅骰子有什么用？", "逃出从此以后", max_results=5, plan=plan)
 
-    assert any(query == "逃出从此以后 Steam" for query in client.queries)
+    assert any("逃出从此以后" in query and "official store" in query for query in client.queries)
     assert any("Afterwards" in query and "loaded dice" in query for query in client.queries)
     assert sources
     assert "afterwards.fandom.com" in str(sources[0].url)
@@ -1510,9 +1589,7 @@ async def test_agent_returns_game_candidates_before_searching_question(monkeypat
 
 
 def test_agent_status_messages_explain_current_work() -> None:
-    assert QuestAgent._status_for_plan_start("女武神怎么打？") == "理解问题：查弱点和打法"
-    assert QuestAgent._status_for_plan_start("灌铅骰子有什么用？") == "理解问题：查物品用途"
-    assert QuestAgent._status_for_plan_start("如何开启亲亲模式？") == "理解问题：查开启条件"
+    assert QuestAgent._status_for_plan_start("未知复合问题") == "理解问题：识别目标和关键关系"
     assert QuestAgent._status_for_search(SearchPlan(intent="item_location")) == "类型：物品位置；查地点/条件/路线"
     assert QuestAgent._status_for_search(SearchPlan(intent="item_usage")) == "类型：物品用途；查效果/用法/交互对象"
     assert QuestAgent._status_for_search(SearchPlan(intent="game_mechanic")) == "类型：游戏机制；查开启条件/触发方式"

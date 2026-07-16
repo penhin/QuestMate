@@ -8,6 +8,7 @@ have been provisioned.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -16,13 +17,15 @@ from uuid import uuid4
 
 import httpx
 import trafilatura
+from urllib.parse import urljoin
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Table, Text, delete, func, insert, select, text, update
 
 from config import Settings, get_settings
 from quality_policy import KNOWLEDGE_SCORE_POLICY, KNOWLEDGE_SOURCE_TRUST
 from schemas import KnowledgeDocumentStatus, Source
-from storage import Database, metadata
+from outbound_http import validate_public_https_url
+from storage import Database, metadata, shared_database
 
 
 knowledge_documents = Table(
@@ -60,6 +63,7 @@ Index("ix_knowledge_chunks_document", knowledge_chunks.c.document_id)
 class EmbeddingClient:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def enabled(self) -> bool:
@@ -68,13 +72,14 @@ class EmbeddingClient:
     async def embed(self, texts: list[str]) -> list[list[float] | None]:
         if not texts or not self.enabled:
             return [None] * len(texts)
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                f"{self.settings.embedding_base_url.rstrip('/')}/embeddings",
-                headers={"Authorization": f"Bearer {self.settings.embedding_api_key}"},
-                json={"model": self.settings.embedding_model, "input": texts},
-            )
-            response.raise_for_status()
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=45)
+        response = await self._client.post(
+            f"{self.settings.embedding_base_url.rstrip('/')}/embeddings",
+            headers={"Authorization": f"Bearer {self.settings.embedding_api_key}"},
+            json={"model": self.settings.embedding_model, "input": texts},
+        )
+        response.raise_for_status()
         data = response.json().get("data", [])
         vectors = [item.get("embedding") for item in data]
         if len(vectors) != len(texts) or any(not isinstance(vector, list) for vector in vectors):
@@ -83,14 +88,22 @@ class EmbeddingClient:
             raise ValueError(f"Embedding dimensions must equal {self.settings.embedding_dimensions}")
         return vectors
 
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
 
 class KnowledgeStore:
     def __init__(self, database: Database | None = None, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         if self.settings.embedding_dimensions != 1536:
             raise ValueError("EMBEDDING_DIMENSIONS must be 1536 until a database migration changes the vector column")
-        self.database = database or Database(self.settings)
+        self._owns_database = database is None
+        self.database = database if database is not None else Database(self.settings)
         self.embeddings = EmbeddingClient(self.settings)
+        self._query_vector_cache: OrderedDict[str, list[float] | None] = OrderedDict()
+        self._query_vector_cache_size = 128
         self._initialized = False
         self._available = False
 
@@ -137,7 +150,7 @@ class KnowledgeStore:
                 title=title or extracted_title,
                 published_at=published_at or extracted_published_at,
             )
-        except Exception as exc:
+        except BaseException as exc:
             await self._mark_failed(document_id=document_id, error=exc)
             raise
 
@@ -173,7 +186,7 @@ class KnowledgeStore:
                 title=title,
                 published_at=published_at,
             )
-        except Exception as exc:
+        except BaseException as exc:
             await self._mark_failed(document_id=document_id, error=exc)
             raise
 
@@ -182,7 +195,7 @@ class KnowledgeStore:
             return []
         try:
             limit = limit or self.settings.knowledge_retrieval_results
-            vector = (await self.embeddings.embed([query]))[0]
+            vector = await self._query_vector(query)
             if vector is not None:
                 rows = await self._vector_rows(game=game, vector=vector, limit=limit)
             else:
@@ -191,6 +204,30 @@ class KnowledgeStore:
         except Exception:
             # Search should remain available while the index is unavailable.
             return []
+
+    async def _query_vector(self, query: str) -> list[float] | None:
+        # Normalize transport-only whitespace, but preserve case/script exactly:
+        # embedding models are not required to map case variants identically.
+        key = " ".join(query.split())
+        if key in self._query_vector_cache:
+            self._query_vector_cache.move_to_end(key)
+            return self._query_vector_cache[key]
+        vector = (await self.embeddings.embed([key]))[0]
+        self._query_vector_cache[key] = vector
+        self._query_vector_cache.move_to_end(key)
+        while len(self._query_vector_cache) > self._query_vector_cache_size:
+            self._query_vector_cache.popitem(last=False)
+        return vector
+
+    async def aclose(self) -> None:
+        try:
+            await self.embeddings.aclose()
+        finally:
+            # Async SQLAlchemy pools are bound to the event loop that opened
+            # their connections.  Explicit disposal is required both at API
+            # shutdown and when a short-lived worker loop finishes.
+            if self._owns_database:
+                await self.database.engine.dispose()
 
     async def list_documents(self, *, game: str | None = None, limit: int = 50) -> list[KnowledgeDocumentStatus]:
         await self.init_schema()
@@ -283,7 +320,7 @@ class KnowledgeStore:
         age = datetime.now(timezone.utc) - row.fetched_at
         return age.total_seconds() < self.settings.knowledge_auto_index_ttl_seconds
 
-    async def _mark_failed(self, *, document_id: str, error: Exception) -> None:
+    async def _mark_failed(self, *, document_id: str, error: BaseException) -> None:
         async with self.database.sessionmaker() as session:
             async with session.begin():
                 await session.execute(
@@ -293,14 +330,35 @@ class KnowledgeStore:
                 )
 
     async def _fetch_and_extract(self, url: str) -> tuple[str | None, str, datetime | None]:
+        current_url = url
         async with httpx.AsyncClient(
             timeout=self.settings.external_request_timeout_seconds,
-            follow_redirects=True,
+            follow_redirects=False,
             headers={"User-Agent": "QuestMateIndexer/0.1"},
         ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        downloaded = response.text
+            for _hop in range(4):
+                current_url = await validate_public_https_url(
+                    current_url,
+                    dns_timeout=min(3.0, float(self.settings.external_request_timeout_seconds)),
+                )
+                async with client.stream("GET", current_url) as response:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("Redirect response omitted Location")
+                        current_url = urljoin(current_url, location)
+                        continue
+                    response.raise_for_status()
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) > 5_000_000:
+                            raise ValueError("Indexed document exceeds 5 MB limit")
+                    encoding = response.encoding or "utf-8"
+                    downloaded = bytes(body).decode(encoding, errors="replace")
+                    break
+            else:
+                raise ValueError("Too many redirects while indexing URL")
         content = trafilatura.extract(downloaded, include_comments=False, include_tables=True, favor_precision=True) or ""
         metadata = trafilatura.extract_metadata(downloaded)
         return (metadata.title if metadata else None), content, parse_published_at(metadata.date if metadata else None)
@@ -399,4 +457,4 @@ def parse_published_at(value: str | None) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-knowledge_store = KnowledgeStore()
+knowledge_store = KnowledgeStore(database=shared_database)

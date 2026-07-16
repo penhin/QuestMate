@@ -8,9 +8,11 @@ class Settings(BaseSettings):
     app_name: str = "QuestMate"
     app_env: str = "development"
     log_level: str = "info"
+    knowledge_admin_token: str = ""
 
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-5"
+    custom_model_endpoint_hosts: str = ""
 
     tavily_api_key: str = ""
 
@@ -38,6 +40,10 @@ class Settings(BaseSettings):
     wiki_link_expansion_pages_per_query: int = Field(default=2, ge=0, le=6)
     knowledge_auto_index_ttl_seconds: int = Field(default=604800, ge=0, le=7776000)
     knowledge_retrieval_results: int = Field(default=4, ge=1, le=12)
+    # Evaluation-only retrieval hints are untrusted request metadata.  They are
+    # disabled unless an isolated evaluator opts in explicitly, and are never
+    # accepted by production deployments.
+    allow_evaluation_retrieval_hints: bool = False
     embedding_api_key: str = ""
     embedding_base_url: str = ""
     embedding_model: str = "text-embedding-3-small"
@@ -48,6 +54,25 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()]
+
+    @property
+    def allowed_custom_model_hosts(self) -> set[str]:
+        return {
+            host.casefold().strip().strip(".")
+            for host in self.custom_model_endpoint_hosts.split(",")
+            if host.strip()
+        }
+
+    @property
+    def is_production(self) -> bool:
+        """Fail closed unless the environment is explicitly local or test."""
+        return self.app_env.strip().casefold() not in {
+            "development",
+            "dev",
+            "local",
+            "test",
+            "testing",
+        }
 
 
 @lru_cache

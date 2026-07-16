@@ -6,6 +6,7 @@ to the code path that uses them.
 """
 
 from dataclasses import dataclass
+import re
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,9 @@ SOURCE_POLICIES = {
         0.8,
         "百科",
         domains=("fandom.com", "wiki.gg", "fextralife.com"),
+        # Open discovery remains available even when no game database has been
+        # identified yet; query builders can mix it with known-domain probes.
+        query_templates=("{game} wiki {query}", "{game} guide {query}"),
     ),
     "community": SourcePolicy(
         "community",
@@ -113,19 +117,64 @@ INTENT_SOURCE_PREFERENCES = {
 DEFAULT_INTENT_SOURCE_PREFERENCE = 0.4
 
 DOMAIN_QUALITY_GROUPS = (
-    (("wiki.gg", "fandom.com", "fextralife.com"), 0.9),
-    (("bandainamco", "playstation.com", "steampowered.com"), 0.85),
+    # These scores are deliberately modest priors.  Page-level identity and
+    # evidence signals decide whether an individual result is useful.
+    (
+        ("wiki.gg", "fandom.com", "fextralife.com", "miraheze.org", "wikitide.net", "wikitide.org"),
+        0.82,
+    ),
+    (("playstation.com", "steampowered.com", "xbox.com", "nintendo.com"), 0.82),
+    (("gamefaqs.gamespot.com", "neoseeker.com", "strategywiki.org", "pcgamingwiki.com"), 0.68),
     (("reddit.com", "steamcommunity.com"), 0.55),
 )
-DEFAULT_DOMAIN_QUALITY = 0.4
+DEFAULT_DOMAIN_QUALITY = 0.45
 COMMUNITY_DOMAINS = ("reddit.com", "steamcommunity.com")
 COMMUNITY_DOMAIN_RESULT_LIMIT = 2
 DEFAULT_DOMAIN_RESULT_LIMIT = 3
 HIGH_TRUST_THRESHOLD = 0.8
 
-VERSION_SIGNAL_TOKENS = ("patch", "version", "update", "1.", "版本", "补丁", "更新")
+VERSION_SIGNAL_TOKENS = (
+    "patch",
+    "hotfix",
+    "version",
+    "current version",
+    "latest version",
+    "版本",
+    "当前版本",
+    "最新版本",
+    "补丁",
+    "更新",
+)
 VERSION_SENSITIVE_INTENTS = frozenset({"patch", "build", "boss_strategy", "game_mechanic"})
 STABLE_FACT_INTENTS = frozenset({"item_location", "item_usage", "quest_step", "lore"})
+
+
+def is_version_sensitive_question(question: str) -> bool:
+    """Detect an explicit version dimension independently from the main intent."""
+    normalized = " ".join(question.casefold().split())
+    for signal in VERSION_SIGNAL_TOKENS:
+        if re.search(r"[\u3400-\u9fff]", signal):
+            if signal in normalized:
+                return True
+            continue
+        if re.search(
+            rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])",
+            normalized,
+        ):
+            return True
+    # A bare two-part decimal is too ambiguous to be treated as a version: it
+    # is also the normal spelling for coordinates, ratings, damage values, and
+    # percentages.  Accept it only behind an explicit version prefix.  A
+    # three-part semantic version remains sufficiently distinctive on its own.
+    explicit_version = re.search(
+        r"(?<![a-z0-9])(?:v|ver(?:sion)?\.?)\s*\d+\.\d+(?:\.\d+){0,2}(?![a-z0-9])",
+        normalized,
+    )
+    bare_semantic_version = re.search(
+        r"(?<![a-z0-9])\d+\.\d+\.\d+(?![a-z0-9])",
+        normalized,
+    )
+    return explicit_version is not None or bare_semantic_version is not None
 
 
 @dataclass(frozen=True)
@@ -138,6 +187,22 @@ class RelevanceScorePolicy:
 
 
 RELEVANCE_SCORE_POLICY = RelevanceScorePolicy()
+
+
+@dataclass(frozen=True)
+class SourceEvidenceQualityPolicy:
+    """Weights for page-level quality, independent of a provider allowlist."""
+
+    source_prior_weight: float = 0.22
+    domain_prior_weight: float = 0.08
+    game_identity_weight: float = 0.25
+    relevance_weight: float = 0.25
+    evidence_support_weight: float = 0.2
+    strict_threshold: float = 0.68
+    minimum_evidence_support: float = 0.55
+
+
+SOURCE_EVIDENCE_QUALITY_POLICY = SourceEvidenceQualityPolicy()
 
 
 @dataclass(frozen=True)
@@ -169,6 +234,8 @@ class GameResolutionPolicy:
     base_confidence: float = 0.25
     alias_bonus: float = 0.25
     platform_bonus: float = 0.35
+    official_bonus: float = 0.25
+    identity_candidate_bonus: float = 0.15
     database_bonus: float = 0.25
     invalid_name_penalty: float = 0.2
     candidate_base: float = 0.45
@@ -180,7 +247,7 @@ class GameResolutionPolicy:
 GAME_RESOLUTION_POLICY = GameResolutionPolicy()
 FAST_GAME_IDENTITY_MAX_RESULTS = 8
 GAME_IDENTITY_CANDIDATE_QUERIES = 1
-GAME_IDENTITY_DATABASE_QUERIES = 1
+GAME_IDENTITY_DATABASE_QUERIES = 2
 MAX_SEARCH_QUERIES = 8
 MAX_QUERIES_PER_PLANNED_QUERY = 2
 EXTERNAL_SEARCH_ATTEMPTS = 2
@@ -197,9 +264,11 @@ def intent_source_preference(intent: str, source_type: str) -> float:
 
 
 def domain_quality(domain: str) -> float:
-    lowered = domain.lower()
-    for fragments, score in DOMAIN_QUALITY_GROUPS:
-        if any(fragment in lowered for fragment in fragments):
+    host = domain.casefold().split(":", 1)[0].strip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    for domains, score in DOMAIN_QUALITY_GROUPS:
+        if any(host == candidate or host.endswith(f".{candidate}") for candidate in domains):
             return score
     return DEFAULT_DOMAIN_QUALITY
 

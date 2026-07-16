@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 from quality_policy import SEARCH_RESULT_WEIGHTS, SourcePolicy, domain_quality, intent_source_preference
 from retrieval.relevance import result_relevance_score
+from retrieval.source_quality import page_authority_score, page_source_quality
 from schemas import Source
 
 
@@ -30,6 +31,8 @@ def build_source(
     version_safety_score: Callable[..., float],
     extract_version: Callable[[str], str | None],
     parse_datetime: Callable[[Any], datetime | None],
+    version_sensitive: bool = False,
+    required_entity_groups: list[list[str]] | None = None,
 ) -> BuiltSource | None:
     url = str(item.get("url") or "").strip()
     if not url.startswith(("https://", "http://")):
@@ -48,17 +51,30 @@ def build_source(
         game=game,
         game_aliases=game_aliases,
         question=question,
+        required_entity_groups=required_entity_groups,
     )
     if relevance <= 0:
         return None
+    page_quality, _quality_signals = page_source_quality(
+        item=searchable_item,
+        source_prior=source_policy.trust_score,
+        game=game,
+        game_aliases=game_aliases,
+        question=question,
+        relevance=relevance,
+        evidence=evidence,
+        required_entity_groups=required_entity_groups,
+    )
+    authority = page_authority_score(item=searchable_item, source_prior=source_policy.trust_score)
     version = version_safety_score(
         intent=intent,
+        version_sensitive=version_sensitive,
         source_type=source_policy.source_type,
         text=f"{item.get('title') or ''} {url} {evidence}",
     )
     weighted_score = (
         float(item.get("score") or 0) * SEARCH_RESULT_WEIGHTS.retrieval
-        + source_policy.trust_score * SEARCH_RESULT_WEIGHTS.trust
+        + page_quality * SEARCH_RESULT_WEIGHTS.trust
         + relevance * SEARCH_RESULT_WEIGHTS.relevance
         + intent_source_preference(intent, source_policy.source_type) * SEARCH_RESULT_WEIGHTS.intent
         + domain_quality(urlparse(url).netloc) * SEARCH_RESULT_WEIGHTS.domain
@@ -71,7 +87,7 @@ def build_source(
             snippet=item.get("content"),
             score=weighted_score,
             source_type=source_policy.source_type,
-            trust_score=source_policy.trust_score,
+            trust_score=authority,
             trust_label=source_policy.trust_label,
             evidence=evidence,
             published_at=parse_datetime(item.get("published_date") or item.get("published_at")),

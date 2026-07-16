@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, HttpUrl
@@ -32,6 +32,8 @@ class GameCandidate(BaseModel):
     aliases: list[str] = Field(default_factory=list, max_length=6)
     tags: list[str] = Field(default_factory=list, max_length=5)
     platform_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
+    official_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
+    identity_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
     database_domains: list[str] = Field(default_factory=list, max_length=4)
     confidence: float = Field(default=0, ge=0, le=1)
 
@@ -42,6 +44,7 @@ class GameResolution(BaseModel):
     aliases: list[str] = Field(default_factory=list, max_length=8)
     platform_urls: list[HttpUrl] = Field(default_factory=list, max_length=6)
     official_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
+    identity_urls: list[HttpUrl] = Field(default_factory=list, max_length=4)
     database_domains: list[str] = Field(default_factory=list, max_length=8)
     candidates: list[GameCandidate] = Field(default_factory=list, max_length=6)
     confidence: float = Field(default=0, ge=0, le=1)
@@ -66,9 +69,13 @@ SearchIntent = Literal[
     "general",
 ]
 
+NamedEntityAliasGroup = Annotated[list[str], Field(min_length=1, max_length=4)]
+
 
 class SearchPlan(BaseModel):
     intent: SearchIntent = "general"
+    version_sensitive: bool = False
+    named_entity_groups: list[NamedEntityAliasGroup] = Field(default_factory=list, max_length=4)
     aliases: list[str] = Field(default_factory=list, max_length=6)
     queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=6)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
@@ -80,11 +87,39 @@ class EvidenceFact(BaseModel):
     source_indexes: list[int] = Field(default_factory=list, max_length=6)
 
 
+EvidenceGapKind = Literal[
+    "game_identity",
+    "entity_identity",
+    "premise",
+    "direct_answer",
+    "prerequisite",
+    "acquisition",
+    "access_route",
+    "ordered_actions",
+    "outcome",
+    "version",
+    "conflict",
+    "semantic_distinction",
+    "other",
+]
+
+
+class EvidenceGap(BaseModel):
+    """A typed missing link that can drive a materially different search."""
+
+    kind: EvidenceGapKind = "other"
+    description: str = Field(min_length=1, max_length=300)
+    query_hint: str | None = Field(default=None, max_length=240)
+    source_type: Literal["official", "wiki", "community", "web"] = "web"
+    priority: int = Field(default=3, ge=1, le=5)
+
+
 class InvestigationState(BaseModel):
     """Request-scoped state for following an evidence dependency chain."""
 
     goal: str = Field(min_length=1, max_length=1000)
     known_facts: list[EvidenceFact] = Field(default_factory=list, max_length=12)
+    evidence_gaps: list[EvidenceGap] = Field(default_factory=list, max_length=6)
     unresolved_questions: list[str] = Field(default_factory=list, max_length=6)
     attempted_queries: list[str] = Field(default_factory=list, max_length=16)
     next_queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=2)

@@ -10,38 +10,58 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 
 try:
-    from retrieval.wiki_domains import is_probable_wiki_domain
-except ModuleNotFoundError:  # Direct script execution sets sys.path to evals/.
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from retrieval.wiki_domains import is_probable_wiki_domain
-
-try:
     from evals.dataset import dataset_metadata, filter_cases, load_cases
-    from evals.scoring import evaluate_case, summarize
+    from evals.scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
 except ModuleNotFoundError:  # Support `python evals/run_evals.py` from the repository root.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from dataset import dataset_metadata, filter_cases, load_cases
-    from scoring import evaluate_case, summarize
+    from scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
 
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CASES = ROOT / "cases.jsonl"
 
 
+EVALUATION_MODES = ("discovery", "retrieval")
+
+
 def evaluation_database_domains(case: dict[str, Any]) -> list[str]:
-    """Supply known game identity, but never the expected page path, to retrieval evals."""
-    domains = [str(domain).casefold().strip() for domain in case.get("database_domains") or []]
-    for expected_url in case.get("expected_source_urls") or []:
-        value = str(expected_url).strip()
-        parsed = urlparse(value if "://" in value else f"https://{value}")
-        domain = parsed.netloc.casefold().removeprefix("www.")
-        if domain and is_probable_wiki_domain(domain, url=parsed.path) and domain not in domains:
+    """Return only explicit retrieval hints; gold source URLs are scoring data only."""
+    domains: list[str] = []
+    for raw_domain in case.get("database_domains") or []:
+        domain = str(raw_domain).casefold().strip().removeprefix("www.")
+        if domain and domain not in domains:
             domains.append(domain)
     return domains[:8]
+
+
+def evaluation_request_metadata(case: dict[str, Any], mode: str) -> dict[str, Any]:
+    """Build request hints without allowing scoring fields to influence discovery."""
+    if mode not in EVALUATION_MODES:
+        raise ValueError(f"unsupported evaluation mode: {mode}")
+
+    metadata: dict[str, Any] = {
+        "evaluation": True,
+        "evaluation_case_id": case["id"],
+        "evaluation_mode": mode,
+    }
+    if mode == "discovery" or case.get("category") == "game_resolution":
+        return metadata
+
+    metadata["confirmed_game"] = True
+    aliases = list(
+        dict.fromkeys(alias.strip() for alias in case.get("game_aliases") or [])
+    )[:8]
+    database_domains = evaluation_database_domains(case)
+    if aliases:
+        metadata["game_aliases"] = aliases
+    if database_domains:
+        metadata["database_domains"] = database_domains
+    return metadata
 
 
 async def run_case(
@@ -49,24 +69,11 @@ async def run_case(
     api_base_url: str,
     case: dict[str, Any],
     model_config: dict[str, str],
+    evaluation_mode: str = "discovery",
 ) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     try:
-        metadata: dict[str, Any] = {
-            "evaluation": True,
-            "evaluation_case_id": case["id"],
-        }
-        if case.get("category") != "game_resolution":
-            aliases = case.get("game_aliases") or []
-            database_domains = evaluation_database_domains(case)
-            if aliases or database_domains:
-                metadata.update(
-                    {
-                        "confirmed_game": True,
-                        "game_aliases": aliases,
-                        "database_domains": database_domains,
-                    }
-                )
+        metadata = evaluation_request_metadata(case, evaluation_mode)
         result = await client.post(
             f"{api_base_url.rstrip('/')}/api/chat",
             json={
@@ -103,7 +110,11 @@ async def main_async(args: argparse.Namespace) -> int:
         cases = [case for case in cases if case["id"] == args.case_id]
     if args.limit:
         cases = cases[: args.limit]
-    metadata = dataset_metadata(cases_path, all_cases)
+    metadata = dataset_metadata(
+        cases_path,
+        all_cases,
+        manifest_path=Path(args.dataset_manifest) if args.dataset_manifest else None,
+    )
     if args.dataset_only:
         print(json.dumps(metadata, ensure_ascii=False, indent=2))
         return 0
@@ -120,12 +131,16 @@ async def main_async(args: argparse.Namespace) -> int:
     }
     timeout = httpx.Timeout(args.timeout)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        results = [await run_case(client, args.api_base_url, case, model_config) for case in cases]
+        results = [
+            await run_case(client, args.api_base_url, case, model_config, args.mode)
+            for case in cases
+        ]
     summary = summarize(results)
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "api_base_url": args.api_base_url,
         "dataset": metadata,
+        "scoring_schema_version": SCORING_SCHEMA_VERSION,
         "model": {
             "provider": args.ai_provider or "backend_default",
             "model": args.ai_model or "backend_default",
@@ -133,14 +148,21 @@ async def main_async(args: argparse.Namespace) -> int:
             "request_api_key_configured": bool(api_key),
         },
         "filters": {
+            "mode": args.mode,
             "split": args.split,
             "tier": args.tier,
             "category": args.category,
             "case_id": args.case_id,
         },
         "evaluation_scope": {
-            "answer_cases": "game identity pre-confirmed to isolate retrieval and answer quality",
-            "game_resolution_cases": "full identity resolution enabled",
+            "mode": args.mode,
+            "answer_cases": (
+                "no-hint discovery without request-supplied identity, alias, or database hints; server caches may be warm"
+                if args.mode == "discovery"
+                else "game identity pre-confirmed; explicit case hints supplied to an opt-in evaluation backend"
+            ),
+            "game_resolution_cases": "full identity resolution without retrieval hints",
+            "gold_source_urls": "used only after the response for scoring",
         },
         "summary": summary,
         "results": results,
@@ -156,6 +178,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--cases", default=str(DEFAULT_CASES))
+    parser.add_argument(
+        "--dataset-manifest",
+        help="optional integrity manifest; defaults to <cases>.manifest.json when present",
+    )
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--limit", type=int)
@@ -163,6 +189,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tier", choices=("mainstream", "niche", "safety"))
     parser.add_argument("--category")
     parser.add_argument("--case-id")
+    parser.add_argument(
+        "--mode",
+        choices=EVALUATION_MODES,
+        default="discovery",
+        help="discovery sends no hints (shared server caches may be warm); retrieval may use explicit case hints",
+    )
     parser.add_argument("--dataset-only", action="store_true")
     parser.add_argument("--ai-provider", choices=("anthropic", "deepseek"))
     parser.add_argument("--ai-model")

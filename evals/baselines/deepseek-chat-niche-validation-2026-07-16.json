@@ -7,6 +7,8 @@
     "base_url": "https://api.deepseek.com"
   },
   "scope": {
+    "evaluation_mode": "legacy_pre_mode",
+    "scoring_policy": "legacy_source_route_gated",
     "split": "validation",
     "tier": "niche",
     "game_identity": "pre-confirmed",
@@ -44,6 +46,7 @@
   ],
   "notes": [
     "API Key and full model answers are intentionally excluded.",
+    "This historical pass rate treated expected source type as a hard gate and is not comparable with scoring schema v4.",
     "Four failures had useful community evidence but did not meet the expected wiki source type.",
     "Felvidek and Void Stranger returned no eligible sources; retrieval coverage is the primary bottleneck."
   ]

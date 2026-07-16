@@ -13,7 +13,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from config import Settings, get_settings
 from schemas import GameResolution
-from storage import Database, metadata
+from storage import Database, metadata, shared_database
 
 
 logger = structlog.get_logger()
@@ -78,7 +78,7 @@ class GameSourceRegistry:
         return None
 
     async def upsert_resolution(self, resolution: GameResolution) -> None:
-        if not resolution.is_confirmed:
+        if not resolution.is_confirmed or resolution.ambiguous:
             return
         try:
             await self.init_schema()
@@ -183,4 +183,4 @@ class GameSourceRegistry:
         )
 
 
-game_source_registry = GameSourceRegistry()
+game_source_registry = GameSourceRegistry(database=shared_database)

@@ -31,13 +31,13 @@ def merge_source_evidence(*, preferred: Source, other: Source) -> Source:
     )
 
 
-def source_rank(*, source: Source, query: str, intent: str) -> float:
+def source_rank(*, source: Source, query: str, intent: str, version_sensitive: bool = False) -> float:
     text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
     tokens = question_relevance_tokens(query)
     coverage = sum(1 for token in tokens if token in text) / max(len(tokens), 1)
     retrieval_score = min(max(source.score or 0.5, 0), 1)
     version_score = 1.0 if source.game_version or source.published_at else 0.0
-    if intent not in VERSION_SENSITIVE_INTENTS:
+    if not version_sensitive and intent not in VERSION_SENSITIVE_INTENTS:
         version_score = 0.5
     return (
         coverage * EVIDENCE_POOL_WEIGHTS.relevance
@@ -47,11 +47,23 @@ def source_rank(*, source: Source, query: str, intent: str) -> float:
     )
 
 
-def rank_sources(*, sources: list[Source], query: str, intent: str, max_results: int) -> list[Source]:
+def rank_sources(
+    *,
+    sources: list[Source],
+    query: str,
+    intent: str,
+    max_results: int,
+    version_sensitive: bool = False,
+) -> list[Source]:
     ranked_by_url: dict[str, tuple[float, Source]] = {}
     for source in sources:
         key = canonical_source_url(str(source.url))
-        rank = source_rank(source=source, query=query, intent=intent)
+        rank = source_rank(
+            source=source,
+            query=query,
+            intent=intent,
+            version_sensitive=version_sensitive,
+        )
         current = ranked_by_url.get(key)
         if current is None or rank > current[0]:
             preferred = source if current is None else merge_source_evidence(preferred=source, other=current[1])

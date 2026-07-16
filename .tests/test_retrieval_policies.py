@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,9 +9,10 @@ import mediawiki_client as mediawiki_module
 from mediawiki_client import MediaWikiClient
 from quality_policy import SOURCE_POLICIES
 from retrieval.relevance import is_low_value_page, result_relevance_score
-from retrieval.mediawiki_retriever import MediaWikiRetriever
-from retrieval.wiki_domains import is_probable_wiki_domain
+from retrieval.mediawiki_retriever import MAX_BACKGROUND_INDEX_BATCHES, MediaWikiRetriever
+from retrieval.wiki_domains import is_probable_wiki_domain, is_safe_wiki_host
 from query_tokens import question_relevance_tokens
+from schemas import Source
 
 
 def test_wiki_discovery_accepts_hosted_and_independent_candidates() -> None:
@@ -18,6 +20,29 @@ def test_wiki_discovery_accepts_hosted_and_independent_candidates() -> None:
     assert is_probable_wiki_domain("guide.smallgame.example", url="https://guide.smallgame.example/wiki/Home")
     assert is_probable_wiki_domain("smallgame.wiki")
     assert not is_probable_wiki_domain("store.steampowered.com", url="https://store.steampowered.com/app/1")
+
+
+def test_wiki_discovery_rejects_ambiguous_endpoints_and_unsafe_hosts() -> None:
+    assert not is_probable_wiki_domain(
+        "archive.example",
+        url="https://archive.example/api.php?action=query",
+    )
+    assert not is_probable_wiki_domain(
+        "archive.example",
+        url="https://archive.example/index.php?title=Main_Page",
+    )
+    assert not is_probable_wiki_domain(
+        "archive.example",
+        url="https://different.example/wiki/Main_Page",
+    )
+    for host in (
+        "localhost",
+        "127.0.0.1",
+        "[::1]",
+        "metadata.service.internal",
+        "public.example@127.0.0.1",
+    ):
+        assert not is_safe_wiki_host(host)
 
 
 def test_reddit_index_filter_is_not_bound_to_a_specific_game_community() -> None:
@@ -70,7 +95,7 @@ def test_mediawiki_client_probes_independent_wiki_api_paths(monkeypatch) -> None
             raise URLError("root API unavailable")
         return Response(b'{"query":{"pages":[]}}')
 
-    monkeypatch.setattr(mediawiki_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(mediawiki_module, "_open_url", fake_urlopen)
 
     payload = MediaWikiClient()._request_payload(domain="independent.example", params="action=query")
 
@@ -143,16 +168,115 @@ def test_mediawiki_removes_cjk_instructions_from_english_entity_query() -> None:
     assert query == "Apartment 12 Apt 35 Key"
 
 
-def test_mediawiki_prioritizes_linked_entity_in_dependency_sentence() -> None:
+def test_mediawiki_prioritizes_link_by_generic_local_query_relevance() -> None:
     evidence = (
         "To open the final gate, retrieve the Relay Token from the Maintenance Annex. "
         "A Decorative Painting hangs nearby."
     ).casefold()
 
-    dependency = MediaWikiRetriever._explicit_dependency_score("Maintenance Annex", evidence)
-    decoration = MediaWikiRetriever._explicit_dependency_score("Decorative Painting", evidence)
+    relevant = MediaWikiRetriever._linked_entity_relevance_score(
+        "Maintenance Annex",
+        focused_evidence=evidence,
+        query_tokens=["final", "gate"],
+    )
+    decoration = MediaWikiRetriever._linked_entity_relevance_score(
+        "Decorative Painting",
+        focused_evidence=evidence,
+        query_tokens=["final", "gate"],
+    )
 
-    assert dependency > decoration
+    assert relevant > decoration
+
+
+async def test_mediawiki_rejects_private_host_before_calling_adapter() -> None:
+    class RecordingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, **kwargs):
+            self.calls += 1
+            return {"results": []}
+
+    class EmptyCache:
+        def get(self, key):
+            return None
+
+        def set(self, key, value):
+            return None
+
+    client = RecordingClient()
+    retriever = MediaWikiRetriever(
+        client=client,
+        cache=EmptyCache(),
+        settings=SimpleNamespace(external_request_timeout_seconds=1),
+        source_policy=SOURCE_POLICIES["wiki"],
+        content_index=None,
+        best_passage=lambda content, **kwargs: content,
+        canonical_key=lambda url: url,
+        extract_version=lambda text: None,
+    )
+
+    result = await retriever._fetch_search("127.0.0.1", "entity", 3)
+
+    assert result["results"] == []
+    assert client.calls == 0
+
+
+async def test_mediawiki_auto_index_is_deduplicated_bounded_and_cancelled() -> None:
+    class BlockingIndex:
+        def __init__(self):
+            self.calls = 0
+            self.started = asyncio.Event()
+
+        async def index_content(self, **kwargs):
+            self.calls += 1
+            self.started.set()
+            await asyncio.Event().wait()
+
+    class EmptyCache:
+        def get(self, key):
+            return None
+
+        def set(self, key, value):
+            return None
+
+    index = BlockingIndex()
+    retriever = MediaWikiRetriever(
+        client=object(),
+        cache=EmptyCache(),
+        settings=SimpleNamespace(
+            external_request_timeout_seconds=1,
+            wiki_auto_index_enabled=True,
+            wiki_auto_index_pages_per_query=1,
+        ),
+        source_policy=SOURCE_POLICIES["wiki"],
+        content_index=index,
+        best_passage=lambda content, **kwargs: content,
+        canonical_key=lambda url: url,
+        extract_version=lambda text: None,
+    )
+
+    first = Source(title="Page 0", url="https://game.wiki/wiki/Page_0")
+    retriever._schedule_auto_index(game="Game", sources=[first], content_by_url={str(first.url): "zero"})
+    retriever._schedule_auto_index(game="Game", sources=[first], content_by_url={str(first.url): "zero"})
+    for index_number in range(1, MAX_BACKGROUND_INDEX_BATCHES + 4):
+        source = Source(title=f"Page {index_number}", url=f"https://game.wiki/wiki/Page_{index_number}")
+        retriever._schedule_auto_index(
+            game="Game",
+            sources=[source],
+            content_by_url={str(source.url): str(index_number)},
+        )
+
+    await asyncio.wait_for(index.started.wait(), timeout=1)
+    assert len(retriever._background_index_tasks) == MAX_BACKGROUND_INDEX_BATCHES
+    assert len(retriever._background_index_urls) == MAX_BACKGROUND_INDEX_BATCHES
+
+    await retriever.wait_for_background_tasks(timeout_seconds=0.01)
+    await asyncio.sleep(0)
+
+    assert not retriever._background_index_tasks
+    assert not retriever._background_index_urls
+    assert index.calls <= 4
 
 
 async def test_mediawiki_domain_failure_opens_temporary_circuit_breaker() -> None:

@@ -4,10 +4,23 @@ import json
 import re
 from typing import Any
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from urllib.error import HTTPError, URLError
 
 MAX_MEDIAWIKI_PAGE_CHARS = 24000
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def _open_url(request: Request, *, timeout: int):
+    """Open one validated origin without following attacker-controlled hops."""
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
 
 
 class MediaWikiClient:
@@ -24,7 +37,7 @@ class MediaWikiClient:
                 headers={"User-Agent": self.user_agent},
             )
             try:
-                with urlopen(request, timeout=15) as response:
+                with _open_url(request, timeout=15) as response:
                     payload = json.load(response)
                 if isinstance(payload, dict) and ("query" in payload or "error" in payload):
                     return payload
