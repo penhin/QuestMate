@@ -3,6 +3,8 @@
 import asyncio
 from collections.abc import Callable
 from datetime import datetime, timezone
+import re
+import time
 from typing import Any, Protocol
 
 import structlog
@@ -14,6 +16,7 @@ from retrieval.relevance import is_high_quality_source, result_relevance_score
 from schemas import Source
 
 logger = structlog.get_logger()
+MEDIAWIKI_FAILURE_COOLDOWN_SECONDS = 300
 
 
 class ContentIndex(Protocol):
@@ -41,6 +44,7 @@ class MediaWikiRetriever:
         self.best_passage = best_passage
         self.canonical_key = canonical_key
         self.extract_version = extract_version
+        self._domain_retry_after: dict[str, float] = {}
 
     async def search(
         self,
@@ -55,10 +59,16 @@ class MediaWikiRetriever:
     ) -> list[Source]:
         if self.client is None or not database_domains:
             return []
-        domains = [domain for domain in database_domains if domain][:2]
-        query = " ".join(aliases[:2]).strip() or (planned_queries[0] if planned_queries else question)
-        results = await asyncio.gather(*(self._fetch_search(domain, query, max_results) for domain in domains))
-        context = f"{question} {' '.join(aliases)}"
+        domains = self._rank_database_domains(database_domains, game=game)[:2]
+        queries = self._select_search_queries(
+            question=question,
+            aliases=aliases,
+            planned_queries=planned_queries,
+        )
+        results = await asyncio.gather(
+            *(self._fetch_search(domain, query, max_results) for domain in domains for query in queries)
+        )
+        context = f"{question} {' '.join(aliases)} {' '.join(planned_queries[:2])}".strip()
         results.extend(
             await self._expand_results(results=results, search_context=context, game=game, game_aliases=game_aliases)
         )
@@ -104,8 +114,50 @@ class MediaWikiRetriever:
         await self._auto_index(game=game, sources=ranked, content_by_url=content_by_url)
         return ranked
 
+    @staticmethod
+    def _select_search_query(*, question: str, aliases: list[str], planned_queries: list[str]) -> str:
+        return MediaWikiRetriever._select_search_queries(
+            question=question,
+            aliases=aliases,
+            planned_queries=planned_queries,
+        )[0]
+
+    @staticmethod
+    def _rank_database_domains(domains: list[str], *, game: str) -> list[str]:
+        """Prefer a game-specific host over broad encyclopedias without knowing providers in advance."""
+        game_key = re.sub(r"[^a-z0-9]", "", game.casefold())
+        unique = list(dict.fromkeys(domain for domain in domains if domain))
+
+        def specificity(entry: tuple[int, str]) -> tuple[int, int]:
+            index, domain = entry
+            domain_key = re.sub(r"[^a-z0-9]", "", domain.casefold().split(":", 1)[0])
+            return (1 if len(game_key) >= 4 and game_key in domain_key else 0, -index)
+
+        return [domain for _index, domain in sorted(enumerate(unique), key=specificity, reverse=True)]
+
+    @staticmethod
+    def _select_search_queries(*, question: str, aliases: list[str], planned_queries: list[str]) -> list[str]:
+        planned = list(dict.fromkeys(
+            MediaWikiRetriever._normalize_mixed_language_query(query)
+            for query in planned_queries
+            if query.strip()
+        ))[:2]
+        return planned or [" ".join(aliases[:2]).strip() or question]
+
+    @staticmethod
+    def _normalize_mixed_language_query(query: str) -> str:
+        """Use the Latin entity portion when a query mixes CJK instructions with English wiki names."""
+        compact = " ".join(query.split())
+        if not re.search(r"[\u3400-\u9fff]", compact) or not re.search(r"[a-z]", compact, re.IGNORECASE):
+            return compact
+        latin_parts = re.findall(r"[a-z][a-z'-]*|[a-z]*\d[a-z0-9._-]*|\d{1,6}", compact, re.IGNORECASE)
+        normalized = " ".join(latin_parts).strip()
+        return normalized if len(normalized) >= 3 else compact
+
     async def _fetch_search(self, domain: str, query: str, max_results: int) -> dict[str, Any]:
-        cache_key = f"mediawiki:{domain}:{query.casefold()}:{max_results}"
+        if self._domain_retry_after.get(domain, 0) > time.monotonic():
+            return {"results": [], "_domain": domain}
+        cache_key = f"mediawiki:v2:{domain}:{query.casefold()}:{max_results}"
         cached = self.cache.get(cache_key)
         if cached is not None:
             return {**cached, "_domain": domain}
@@ -115,7 +167,9 @@ class MediaWikiRetriever:
                 timeout=self.settings.external_request_timeout_seconds,
             )
         except Exception:
+            self._domain_retry_after[domain] = time.monotonic() + MEDIAWIKI_FAILURE_COOLDOWN_SECONDS
             return {"results": [], "_domain": domain}
+        self._domain_retry_after.pop(domain, None)
         result["_domain"] = domain
         self.cache.set(cache_key, result)
         return result
@@ -141,14 +195,27 @@ class MediaWikiRetriever:
         seen: set[tuple[str, str]] = set()
         for result in results:
             domain = str(result.get("_domain") or "")
-            for item in result.get("results", []):
+            for item_index, item in enumerate(result.get("results", [])):
+                focused_evidence = self.best_passage(
+                    str(item.get("content") or ""),
+                    question=search_context,
+                    max_chars=self.settings.evidence_passage_max_chars,
+                ).casefold()
                 for title in item.get("links") or []:
                     normalized = str(title).strip()
                     key = (domain, normalized.casefold())
-                    if not domain or not normalized or key in seen:
+                    if (
+                        not domain
+                        or not normalized
+                        or normalized.casefold() == str(item.get("title") or "").strip().casefold()
+                        or key in seen
+                    ):
                         continue
                     seen.add(key)
                     score = sum(1 for token in query_tokens if token in normalized.casefold())
+                    dependency_score = self._explicit_dependency_score(normalized, focused_evidence)
+                    if dependency_score:
+                        score += dependency_score + max(0, 3 - item_index)
                     if score:
                         candidates.append((score, domain, normalized))
         candidates.sort(reverse=True)
@@ -162,12 +229,36 @@ class MediaWikiRetriever:
         logger.info(
             "mediawiki.expanded",
             selected_links=len(selected),
+            selected_titles=[title for _score, _domain, title in selected],
             fetched_pages=sum(len(result.get("results", [])) for result in expanded),
         )
         return list(expanded)
 
+    @staticmethod
+    def _explicit_dependency_score(title: str, focused_evidence: str) -> int:
+        """Prioritize linked entities named in a sentence that expresses a dependency."""
+        normalized = title.casefold()
+        position = focused_evidence.find(normalized)
+        if position < 0:
+            return 0
+        prior_boundaries = [focused_evidence.rfind(mark, 0, position) for mark in ".!?。！？;；"]
+        left = max(prior_boundaries, default=-1) + 1
+        following = [
+            boundary
+            for mark in ".!?。！？;；"
+            if (boundary := focused_evidence.find(mark, position + len(normalized))) >= 0
+        ]
+        right = min(following, default=min(len(focused_evidence), position + len(normalized) + 180))
+        context = focused_evidence[left:right]
+        dependency_cues = (
+            "access", "acquire", "enter", "get ", "key", "need", "obtain",
+            "open", "prerequisite", "require", "retrieve", "unlock", "use ",
+            "进入", "前置", "取得", "开启", "获得", "解锁", "需要", "钥匙",
+        )
+        return 12 if any(cue in context for cue in dependency_cues) else 2
+
     async def _fetch_pages(self, domain: str, titles: list[str]) -> dict[str, Any]:
-        cache_key = f"mediawiki-pages:{domain}:{'|'.join(title.casefold() for title in titles)}"
+        cache_key = f"mediawiki-pages:v2:{domain}:{'|'.join(title.casefold() for title in titles)}"
         cached = self.cache.get(cache_key)
         if cached is not None:
             return {**cached, "_domain": domain}

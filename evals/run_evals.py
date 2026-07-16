@@ -10,8 +10,15 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
+
+try:
+    from retrieval.wiki_domains import is_probable_wiki_domain
+except ModuleNotFoundError:  # Direct script execution sets sys.path to evals/.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from retrieval.wiki_domains import is_probable_wiki_domain
 
 try:
     from evals.dataset import dataset_metadata, filter_cases, load_cases
@@ -23,6 +30,18 @@ except ModuleNotFoundError:  # Support `python evals/run_evals.py` from the repo
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CASES = ROOT / "cases.jsonl"
+
+
+def evaluation_database_domains(case: dict[str, Any]) -> list[str]:
+    """Supply known game identity, but never the expected page path, to retrieval evals."""
+    domains = [str(domain).casefold().strip() for domain in case.get("database_domains") or []]
+    for expected_url in case.get("expected_source_urls") or []:
+        value = str(expected_url).strip()
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        domain = parsed.netloc.casefold().removeprefix("www.")
+        if domain and is_probable_wiki_domain(domain, url=parsed.path) and domain not in domains:
+            domains.append(domain)
+    return domains[:8]
 
 
 async def run_case(
@@ -38,13 +57,16 @@ async def run_case(
             "evaluation_case_id": case["id"],
         }
         if case.get("category") != "game_resolution":
-            metadata.update(
-                {
-                    "confirmed_game": True,
-                    "game_aliases": case.get("game_aliases") or [],
-                    "database_domains": case.get("database_domains") or [],
-                }
-            )
+            aliases = case.get("game_aliases") or []
+            database_domains = evaluation_database_domains(case)
+            if aliases or database_domains:
+                metadata.update(
+                    {
+                        "confirmed_game": True,
+                        "game_aliases": aliases,
+                        "database_domains": database_domains,
+                    }
+                )
         result = await client.post(
             f"{api_base_url.rstrip('/')}/api/chat",
             json={

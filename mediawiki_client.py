@@ -7,6 +7,8 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
+MAX_MEDIAWIKI_PAGE_CHARS = 24000
+
 
 class MediaWikiClient:
     user_agent = "QuestMate/0.1 (local game guide search)"
@@ -68,7 +70,7 @@ class MediaWikiClient:
                 {
                     "title": title,
                     "url": f"https://{domain}/wiki/{quote(title.replace(' ', '_'))}",
-                    "content": self._clean_wikitext(content)[:6000],
+                    "content": self._clean_wikitext(content)[:MAX_MEDIAWIKI_PAGE_CHARS],
                     "links": [
                         str(link.get("title") or "")
                         for link in page.get("links") or []
@@ -111,7 +113,7 @@ class MediaWikiClient:
                 {
                     "title": title,
                     "url": f"https://{domain}/wiki/{quote(title.replace(' ', '_'))}",
-                    "content": self._clean_wikitext(content)[:6000],
+                    "content": self._clean_wikitext(content)[:MAX_MEDIAWIKI_PAGE_CHARS],
                     "links": [
                         str(link.get("title") or "")
                         for link in page.get("links") or []

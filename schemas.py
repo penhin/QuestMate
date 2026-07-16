@@ -75,6 +75,32 @@ class SearchPlan(BaseModel):
     refinement: bool = False
 
 
+class EvidenceFact(BaseModel):
+    statement: str = Field(min_length=1, max_length=500)
+    source_indexes: list[int] = Field(default_factory=list, max_length=6)
+
+
+class InvestigationState(BaseModel):
+    """Request-scoped state for following an evidence dependency chain."""
+
+    goal: str = Field(min_length=1, max_length=1000)
+    known_facts: list[EvidenceFact] = Field(default_factory=list, max_length=12)
+    unresolved_questions: list[str] = Field(default_factory=list, max_length=6)
+    attempted_queries: list[str] = Field(default_factory=list, max_length=16)
+    next_queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=2)
+    aliases: list[str] = Field(default_factory=list, max_length=6)
+    complete: bool = False
+    hop_count: int = Field(default=0, ge=0, le=10)
+    stop_reason: Literal["complete", "needs_search", "budget_exhausted", "insufficient_evidence"] | None = None
+
+
+class AnswerCompletenessAssessment(BaseModel):
+    complete: bool = False
+    gaps: list[str] = Field(default_factory=list, max_length=6)
+    unsupported_claims: list[str] = Field(default_factory=list, max_length=6)
+    irrelevant_details: list[str] = Field(default_factory=list, max_length=6)
+
+
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     game: str = Field(min_length=1, max_length=120)

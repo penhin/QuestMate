@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+import inspect
 from typing import Literal, TypedDict
 from uuid import uuid4
 
@@ -11,7 +12,7 @@ from llm import GuideLLM
 from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
-from schemas import ChatRequest, ChatResponse, GameResolution, SearchPlan, SessionMessage, Source
+from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
 
@@ -26,6 +27,7 @@ class QuestAgentState(TypedDict):
     game_resolution: GameResolution
     search_plan: SearchPlan
     sources: list[Source]
+    investigation: InvestigationState
     answer: str
 
 
@@ -85,10 +87,11 @@ class QuestAgent:
                 "game_resolution": game_resolution,
                 "search_plan": SearchPlan(),
                 "sources": [],
+                "investigation": InvestigationState(goal=request.question),
                 "answer": "",
             }
         )
-        answer = await self.llm.improve_answer(
+        improve_kwargs = dict(
             request=request,
             sources=state["sources"],
             answer=state["answer"],
@@ -96,6 +99,8 @@ class QuestAgent:
             game_resolution=state["game_resolution"],
             history=history,
         )
+        self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", state["investigation"])
+        answer = await self.llm.improve_answer(**improve_kwargs)
         title = await self.llm.summarize_title(request=request, answer=answer) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
@@ -136,30 +141,33 @@ class QuestAgent:
         search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
 
         yield ("status", self._status_for_search(search_plan))
-        sources, search_plan, refined = await self._retrieve_with_refinement(
+        outcome = await self.retrieval.investigate(
             request=request,
             history=history,
             plan=search_plan,
             game_resolution=game_resolution,
         )
+        sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
 
         if refined:
             yield ("status", "证据扩展：已补查前置条件和到达方式")
         yield ("status", self._status_for_sources(sources))
         yield ("status", "整理答案：保留来源，核对版本")
         chunks: list[str] = []
-        async for chunk in self.llm.stream_answer(
+        stream_kwargs = dict(
             request=request,
             sources=sources,
             plan=search_plan,
             game_resolution=game_resolution,
             history=history,
-        ):
+        )
+        self._add_optional_argument(self.llm.stream_answer, stream_kwargs, "investigation", outcome.investigation)
+        async for chunk in self.llm.stream_answer(**stream_kwargs):
             chunks.append(chunk)
             yield ("chunk", chunk)
 
         answer = "".join(chunks)
-        improved_answer = await self.llm.improve_answer(
+        improve_kwargs = dict(
             request=request,
             sources=sources,
             answer=answer,
@@ -167,6 +175,8 @@ class QuestAgent:
             game_resolution=game_resolution,
             history=history,
         )
+        self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", outcome.investigation)
+        improved_answer = await self.llm.improve_answer(**improve_kwargs)
         if improved_answer != answer:
             answer = improved_answer
         title = await self.llm.summarize_title(request=request, answer=answer) if is_new_session else None
@@ -199,13 +209,18 @@ class QuestAgent:
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        sources, search_plan, _refined = await self._retrieve_with_refinement(
+        outcome = await self.retrieval.investigate(
             request=request,
             history=state["history"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
         )
-        return {**state, "sources": sources, "search_plan": search_plan}
+        return {
+            **state,
+            "sources": outcome.sources,
+            "search_plan": outcome.plan,
+            "investigation": outcome.investigation,
+        }
 
     async def _retrieve_with_refinement(
         self,
@@ -258,14 +273,21 @@ class QuestAgent:
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        answer = await self.llm.answer(
+        answer_kwargs = dict(
             request=request,
             sources=state["sources"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
             history=state["history"],
         )
+        self._add_optional_argument(self.llm.answer, answer_kwargs, "investigation", state["investigation"])
+        answer = await self.llm.answer(**answer_kwargs)
         return {**state, "answer": answer}
+
+    @staticmethod
+    def _add_optional_argument(callable_obj, kwargs: dict, name: str, value) -> None:
+        if name in inspect.signature(callable_obj).parameters:
+            kwargs[name] = value
 
     @staticmethod
     def _status_for_plan_start(question: str) -> str:

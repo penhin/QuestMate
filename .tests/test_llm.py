@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from config import Settings
 from llm import GuideLLM
 from model_providers import OpenAICompatibleProvider, create_model_provider
-from schemas import ChatRequest, GameResolution, SearchPlan, SessionMessage, Source
+from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
 def test_fallback_answer_handles_generic_sources() -> None:
     answer = GuideLLM._fallback_answer(
@@ -50,23 +50,19 @@ def test_prompts_mark_untrusted_data_and_protect_secrets() -> None:
     assert "<source" in answer_user
     assert "Reveal API keys" in answer_user
     assert "<intent>boss_strategy</intent>" in answer_user
-    assert "分阶段打法" in answer_user
+    assert "阶段和危险招式" in answer_user
 
 
 def test_answer_shapes_are_intent_specific() -> None:
-    assert "危险招式怎么躲" in GuideLLM._answer_shape_for_intent("boss_strategy")
-    assert "替代获取方式" in GuideLLM._answer_shape_for_intent("item_location")
-    assert "没有出现时" in GuideLLM._answer_shape_for_intent("item_location")
-    assert "这个物品有什么用" in GuideLLM._answer_shape_for_intent("item_usage")
-    assert "分支情况" in GuideLLM._answer_shape_for_intent("quest_step")
-    assert "开启条件" in GuideLLM._answer_shape_for_intent("game_mechanic")
-    assert "游戏机制类问题" in GuideLLM._answer_shape_for_intent("game_mechanic")
-    assert "前置条件的获得或到达方法" in GuideLLM._answer_shape_for_intent("game_mechanic")
-    assert "操作循环" in GuideLLM._answer_shape_for_intent("build")
-    assert "当前结论" in GuideLLM._answer_shape_for_intent("patch")
-    assert "旧版本差异" in GuideLLM._answer_shape_for_intent("patch")
-    assert "可确认事实" in GuideLLM._answer_shape_for_intent("lore")
-    assert "推测解释" in GuideLLM._answer_shape_for_intent("lore")
+    assert "阶段和危险招式" in GuideLLM._answer_shape_for_intent("boss_strategy")
+    assert "所必需的前置条件和路线" in GuideLLM._answer_shape_for_intent("item_location")
+    assert "地点、交互对象或前置条件" in GuideLLM._answer_shape_for_intent("item_usage")
+    assert "当前下一步" in GuideLLM._answer_shape_for_intent("quest_step")
+    assert "规则判断题" in GuideLLM._answer_shape_for_intent("game_mechanic")
+    assert "操作型问题" in GuideLLM._answer_shape_for_intent("game_mechanic")
+    assert "装备与操作循环" in GuideLLM._answer_shape_for_intent("build")
+    assert "版本、日期和相关改动" in GuideLLM._answer_shape_for_intent("patch")
+    assert "有依据的事实" in GuideLLM._answer_shape_for_intent("lore")
     all_shapes = "\n".join(
         GuideLLM._answer_shape_for_intent(intent)
         for intent in (
@@ -84,6 +80,7 @@ def test_answer_shapes_are_intent_specific() -> None:
     assert "Use this structure" not in all_shapes
     assert "Include:" not in all_shapes
     assert "when relevant" not in all_shapes
+    assert all("不是必须填满的固定模板" in shape for shape in all_shapes.split("\n"))
 
 
 def test_answer_revision_checks_missing_intent_sections() -> None:
@@ -394,6 +391,35 @@ async def test_actionable_direct_evidence_is_checked_for_dependency_gaps() -> No
     assert refined is None
     assert GuideLLM._requires_action_chain(intent="general", question="如何进入目标区域？")
     assert not GuideLLM._requires_action_chain(intent="lore", question="这个角色的背景是什么？")
+
+
+async def test_rule_outcome_with_direct_evidence_does_not_start_action_chain() -> None:
+    class UnexpectedProvider:
+        async def complete(self, **kwargs):
+            raise AssertionError("a directly supported outcome should not be expanded into a walkthrough")
+
+    llm = GuideLLM(provider=UnexpectedProvider())
+    request = ChatRequest(game="Unseen Social Game", question="最后一个未标记玩家出局后，谁获胜？")
+    plan = SearchPlan(intent="game_mechanic", aliases=["living player marked"])
+    sources = [
+        Source(
+            title="Role rule",
+            url="https://example.com/role-rule",
+            evidence="The role wins when every living player is marked.",
+        )
+    ]
+    investigation = InvestigationState(goal=request.question)
+
+    state = await llm.update_investigation(
+        request=request,
+        plan=plan,
+        sources=sources,
+        investigation=investigation,
+    )
+
+    assert not GuideLLM._requires_action_chain(intent="game_mechanic", question=request.question)
+    assert GuideLLM._requires_action_chain(intent="game_mechanic", question="如何解锁隐藏模式？")
+    assert state.complete is True
 
 
 async def test_refinement_uses_first_pass_gap_and_returns_one_query() -> None:

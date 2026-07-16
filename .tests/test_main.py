@@ -23,6 +23,7 @@ from llm import GuideLLM
 from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, Source
 from search import MediaWikiClient, TavilySearchProvider
 from retrieval.relevance import result_relevance_score
+from retrieval.source_builder import build_source
 from storage import InMemoryConversationStore, PostgresConversationStore
 
 
@@ -312,7 +313,93 @@ async def test_direct_mediawiki_hit_skips_paid_search() -> None:
 
     assert [source.title for source in sources] == ["Pavol"]
     assert tavily.queries == []
-    assert mediawiki.queries == [("felvidek.fandom.com", "Pavol")]
+    assert mediawiki.queries == [("felvidek.fandom.com", "Pavol recruit party")]
+
+
+async def test_direct_mediawiki_ranks_pages_against_current_gap_query() -> None:
+    class GapWikiClient:
+        def search(self, *, domain: str, query: str, max_results: int):
+            return {
+                "results": [{
+                    "title": "Relay Token",
+                    "url": f"https://{domain}/wiki/Relay_Token",
+                    "content": "Unseen Game relay token acquisition route behind the maintenance wall.",
+                    "score": 0.9,
+                }]
+            }
+
+    tavily = CountingEmptySearchClient()
+    provider = TavilySearchProvider(client=tavily, mediawiki_client=GapWikiClient())
+    sources = await provider.search(
+        "How do I open the final gate?",
+        "Unseen Game",
+        plan=SearchPlan(
+            intent="quest_step",
+            aliases=["Final Gate"],
+            queries=[{"source_type": "wiki", "query": "relay token acquisition route"}],
+            refinement=True,
+        ),
+        game_resolution=GameResolution(
+            input_name="Unseen Game",
+            confirmed_name="Unseen Game",
+            database_domains=["unseen-game.example"],
+            confidence=0.8,
+        ),
+    )
+
+    assert [source.title for source in sources] == ["Relay Token"]
+    assert tavily.queries == []
+
+
+def test_evidence_passage_prefers_late_identifier_phrase_over_numeric_noise() -> None:
+    content = (
+        "Coordinates 35 35 35 and unrelated measurements. " * 80
+        + "The Apt 35 Key is conspicuously placed in the center of the open floor."
+    )
+
+    passage = TavilySearchProvider._best_evidence_passage(
+        content,
+        question="Room 35 Apt 35 Key exact location",
+        max_chars=500,
+    )
+
+    assert "Apt 35 Key is conspicuously placed" in passage
+
+
+def test_evidence_passage_keeps_subject_at_sentence_boundary() -> None:
+    content = (
+        "Unrelated corridor measurements and repeated room numbers. " * 50
+        + "Apartment 12 contains a concealed annex. "
+        + "The Apt 35 Key is placed in the center of that annex."
+    )
+
+    passage = TavilySearchProvider._best_evidence_passage(
+        content,
+        question="Apt 35 Key exact location",
+        max_chars=240,
+    )
+
+    assert passage.startswith("The Apt 35 Key") or "\n\nThe Apt 35 Key" in passage
+
+
+def test_evidence_passage_combines_page_prerequisite_with_distant_target() -> None:
+    content = (
+        "The sealed annex entrance requires Solvent before it can be entered. "
+        "Speak to the four witnesses in order to obtain the Annex Key. "
+        + "Background history with no actionable details. " * 80
+        + "The ZX-35 Token is placed in the center of the column hall."
+    )
+
+    passage = TavilySearchProvider._best_evidence_passage(
+        content,
+        question="ZX-35 Token exact location annex",
+        max_chars=700,
+    )
+
+    assert "requires Solvent" in passage
+    assert "obtain the Annex Key" in passage
+    assert "ZX-35 Token is placed" in passage
+    assert len(passage) <= 700
 
 
 async def test_mediawiki_pages_are_auto_indexed_for_future_questions() -> None:
@@ -812,7 +899,9 @@ def test_chat_request_schema_defaults() -> None:
 
 
 def test_chat_endpoint_returns_fallback_answer_without_sources(monkeypatch) -> None:
-    monkeypatch.setattr(main.quest_agent, "search_provider", EmptySearchProvider())
+    empty_search = EmptySearchProvider()
+    monkeypatch.setattr(main.quest_agent, "search_provider", empty_search)
+    monkeypatch.setattr(main.quest_agent.retrieval, "search_provider", empty_search)
 
     response = client.post(
         "/api/chat",
@@ -1310,6 +1399,31 @@ def test_search_extracts_relevant_passage_from_raw_content() -> None:
 
     assert "玛莲妮亚弱点" in evidence
     assert len(evidence) <= 1600
+
+
+def test_source_evidence_preserves_relevant_search_summary_before_raw_navigation() -> None:
+    built = build_source(
+        item={
+            "title": "Unseen Puzzle Game",
+            "url": "https://example.com/wiki/unseen-puzzle",
+            "content": "The Arc Rod picks up floor tiles and places them over reachable holes.",
+            "raw_content": "Navigation menu and edit links. " * 300,
+            "score": 0.8,
+        },
+        source_policy=SOURCE_POLICIES["wiki"],
+        game="Unseen Puzzle Game",
+        game_aliases=[],
+        question="Arc Rod use",
+        intent="item_usage",
+        best_passage=TavilySearchProvider._best_evidence_passage,
+        evidence_max_chars=500,
+        version_safety_score=lambda **kwargs: 0.5,
+        extract_version=lambda text: None,
+        parse_datetime=lambda value: None,
+    )
+
+    assert built is not None
+    assert "picks up floor tiles" in built.source.evidence
 
 
 def test_search_version_sensitive_sources_prefer_official_or_versioned() -> None:

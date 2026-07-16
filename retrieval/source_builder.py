@@ -35,8 +35,10 @@ def build_source(
     if not url.startswith(("https://", "http://")):
         return None
     raw_content = str(item.get("raw_content") or "")
+    summary_content = str(item.get("content") or "")
+    evidence_input = f"{summary_content}\n\n{raw_content}" if raw_content else summary_content
     evidence = best_passage(
-        raw_content or str(item.get("content") or ""),
+        evidence_input,
         question=question,
         max_chars=evidence_max_chars,
     )

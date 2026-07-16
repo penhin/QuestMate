@@ -385,26 +385,115 @@ class TavilySearchProvider:
             return cleaned
 
         tokens = question_relevance_tokens(question)
+        anchors = TavilySearchProvider._evidence_anchor_phrases(question)
         candidates: list[str] = [cleaned[:max_chars]]
         lowered = cleaned.lower()
+        for anchor in anchors:
+            start = 0
+            while (position := lowered.find(anchor, start)) >= 0:
+                candidates.append(
+                    TavilySearchProvider._evidence_window(cleaned, focus=position, max_chars=max_chars)
+                )
+                start = position + len(anchor)
         for token in tokens:
             start = 0
-            for _ in range(3):
+            for _ in range(20):
                 position = lowered.find(token, start)
                 if position < 0:
                     break
-                window_start = max(0, position - max_chars // 4)
-                window_end = min(len(cleaned), window_start + max_chars)
-                candidates.append(cleaned[window_start:window_end].strip())
+                candidates.append(
+                    TavilySearchProvider._evidence_window(cleaned, focus=position, max_chars=max_chars)
+                )
                 start = position + len(token)
 
-        def passage_score(passage: str) -> tuple[int, int]:
+        def passage_score(passage: str) -> tuple[int, int, int]:
             lowered_passage = passage.lower()
+            anchor_matches = sum(1 for anchor in anchors if anchor in lowered_passage)
             matched = sum(1 for token in tokens if token in lowered_passage)
             occurrences = sum(lowered_passage.count(token) for token in tokens)
-            return matched, occurrences
+            return anchor_matches, matched, occurrences
 
-        return max(candidates, key=passage_score)
+        focused = max(candidates, key=passage_score)
+        return TavilySearchProvider._combine_page_lead(
+            cleaned,
+            focused=focused,
+            anchors=anchors,
+            tokens=tokens,
+            max_chars=max_chars,
+        )
+
+    @staticmethod
+    def _combine_page_lead(
+        content: str,
+        *,
+        focused: str,
+        anchors: list[str],
+        tokens: list[str],
+        max_chars: int,
+    ) -> str:
+        """Preserve a guide page's overview while retaining its distant focused claim."""
+        focused_position = content.find(focused[: min(120, len(focused))])
+        if focused_position < max_chars // 2:
+            return focused[:max_chars]
+
+        lead_budget = max_chars * 3 // 5
+        lead = content[:lead_budget]
+        boundaries = [lead.rfind(mark) for mark in ".!?。！？;；"]
+        boundary = max(boundaries, default=-1)
+        if boundary >= lead_budget // 2:
+            lead = lead[: boundary + 1]
+        remaining = max_chars - len(lead) - 2
+        if remaining <= 0:
+            return lead[:max_chars]
+
+        lowered = focused.casefold()
+        positions = [lowered.find(value) for value in [*anchors, *tokens] if value]
+        positions = [position for position in positions if position >= 0]
+        focus = min(positions, default=0)
+        detail = TavilySearchProvider._evidence_window(focused, focus=focus, max_chars=remaining)
+        return f"{lead}\n\n{detail}"[:max_chars]
+
+    @staticmethod
+    def _evidence_window(content: str, *, focus: int, max_chars: int) -> str:
+        """Keep the focused claim's subject by starting at a nearby sentence boundary."""
+        search_start = max(0, focus - max_chars // 2)
+        prefix = content[search_start:focus]
+        boundaries = [prefix.rfind(mark) for mark in ".!?。！？;；"]
+        boundary = max(boundaries, default=-1)
+        window_start = search_start + boundary + 1 if boundary >= 0 else search_start
+        while window_start < focus and content[window_start].isspace():
+            window_start += 1
+        return content[window_start : window_start + max_chars].strip()
+
+    @staticmethod
+    def _evidence_anchor_phrases(value: str) -> list[str]:
+        """Extract identifier-bearing phrases without knowing any game's entities."""
+        stop_words = {
+            "access", "enter", "exact", "find", "guide", "how", "into", "location",
+            "outside", "requirements", "route", "the", "to", "where",
+        }
+        words = re.findall(r"[a-z][a-z'-]*|[a-z]*\d[a-z0-9._-]*|\d{1,6}", value.casefold())
+        anchors: list[str] = []
+        for index, word in enumerate(words):
+            if not any(char.isdigit() for char in word):
+                continue
+            left = max(0, index - 2)
+            right = min(len(words), index + 3)
+            local_pairs = [
+                (position, words[position])
+                for position in range(left, right)
+                if words[position] not in stop_words
+            ]
+            local = [token for _position, token in local_pairs]
+            identifier_index = next(
+                local_index for local_index, (position, _token) in enumerate(local_pairs) if position == index
+            )
+            for start in range(max(0, identifier_index - 2), identifier_index + 1):
+                for end in range(identifier_index + 1, min(len(local), identifier_index + 3) + 1):
+                    phrase = " ".join(local[start:end])
+                    if phrase != word and phrase not in anchors:
+                        anchors.append(phrase)
+        return sorted(anchors, key=len, reverse=True)[:12]
 
     def _build_search_queries(
         self,

@@ -5,7 +5,7 @@ import re
 from schemas import PlannedSearchQuery, SearchIntent, SearchPlan
 
 ACTIONABLE_INVESTIGATION_INTENTS = frozenset(
-    {"item_location", "item_usage", "quest_step", "game_mechanic"}
+    {"item_location", "item_usage", "quest_step"}
 )
 
 

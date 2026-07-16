@@ -8,14 +8,18 @@ NON_ENTITY_PHRASE_PATTERN = re.compile(
     r"哪些|有没有|是否|是什么)"
 )
 EXACT_IDENTIFIER_PATTERN = re.compile(
-    r"(?<![a-z0-9])(?:[a-z]*\d[a-z0-9._-]*|\d{1,6})(?![a-z0-9])",
+    r"(?<![a-z0-9])(?:[a-z]+[-_]?\d[a-z0-9._-]*|\d[a-z][a-z0-9._-]*|\d{1,6})(?![a-z0-9])",
     re.IGNORECASE,
 )
 NON_ENTITY_LATIN_TOKENS = {
+    "and",
     "answer",
+    "access",
+    "acquisition",
     "boss",
     "build",
     "current",
+    "can",
     "does",
     "effect",
     "enable",
@@ -33,18 +37,25 @@ NON_ENTITY_LATIN_TOKENS = {
     "patch",
     "phase",
     "quest",
+    "recruit",
+    "route",
     "reward",
     "step",
     "steps",
     "strategy",
+    "the",
     "trigger",
     "unlock",
     "update",
+    "use",
     "usage",
     "version",
     "what",
     "when",
     "where",
+    "who",
+    "why",
+    "with",
     "weakness",
 }
 
@@ -82,6 +93,6 @@ def is_query_entity_token(token: str) -> bool:
     if re.fullmatch(r"[a-z0-9]+", token):
         has_digit = any(char.isdigit() for char in token)
         has_alpha = any(char.isalpha() for char in token)
-        return token.isdigit() or (len(token) >= 4 and has_alpha) or (has_alpha and has_digit and len(token) >= 2)
+        return token.isdigit() or (len(token) >= 3 and has_alpha) or (has_alpha and has_digit and len(token) >= 2)
 
     return False

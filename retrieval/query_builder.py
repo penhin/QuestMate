@@ -14,7 +14,8 @@ def build_search_queries(
     game_aliases: tuple[str, ...] = (),
 ) -> list[tuple[str, SourcePolicy]]:
     """Expand a search plan without coupling query policy to an HTTP adapter."""
-    planned_queries = list(plan.queries)[:4]
+    planned_query_limit = 1 if plan.refinement else 4
+    planned_queries = list(plan.queries)[:planned_query_limit]
     aliases = list(plan.aliases[:3])
     per_planned_query_limit = 1 if plan.refinement else MAX_QUERIES_PER_PLANNED_QUERY
     built: list[tuple[str, SourcePolicy]] = []

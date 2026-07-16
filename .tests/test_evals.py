@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from evals.dataset import dataset_metadata, filter_cases, load_cases
-from evals.run_evals import DEFAULT_CASES
+from evals.run_evals import DEFAULT_CASES, evaluation_database_domains
 from evals.scoring import evaluate_case, summarize
 
 
@@ -29,6 +29,21 @@ def test_dataset_metadata_is_reproducible() -> None:
     assert metadata["case_count"] == 52
     assert len(metadata["sha256"]) == 64
     assert metadata["by_tier"]["niche"] >= 21
+
+
+def test_evaluation_infers_only_wiki_domain_identity_from_expected_pages() -> None:
+    case = {
+        "expected_source_urls": [
+            "small-game.fandom.com/wiki/Hidden_Key",
+            "https://guide.example.com/article",
+        ]
+    }
+
+    assert evaluation_database_domains(case) == ["small-game.fandom.com"]
+
+
+def test_evaluation_does_not_invent_database_identity_without_evidence() -> None:
+    assert evaluation_database_domains({"game": "Unseen Game"}) == []
 
 
 def test_baseline_definition_tracks_current_holdout_dataset() -> None:

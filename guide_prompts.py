@@ -15,46 +15,39 @@ PROMPT_SECURITY_RULES = (
 def answer_shape_for_intent(intent: SearchIntent) -> str:
     shapes = {
         "boss_strategy": (
-            "使用这个结构：1) 结论：一句话说明核心打法；2) 弱点与抗性；"
-            "3) 战前准备；4) 分阶段打法；5) 危险招式怎么躲；6) 打不过时的降低难度方案；"
-            "7) 必要时说明版本/来源不确定性。"
+            "先给核心打法，再按实际证据补充会改变打法的弱点、准备、阶段和危险招式。"
+            "不要为了凑栏目添加来源未覆盖的配装或版本判断。"
         ),
         "item_location": (
-            "使用这个结构：1) 直接答案：在哪里或怎么获得；2) 前置条件；3) 路线或地标；"
-            "4) 购买/掉落/拾取方式；5) 没有出现时按前置条件逐项排查；6) 替代获取方式；"
-            "7) 必要时说明容易搞错的同名物品/区域。"
+            "先说物品在哪里或如何获得，再只列完成获取所必需的前置条件和路线。"
+            "替代获取、同名区分和未出现排查仅在证据支持且确实影响当前目标时补充。"
         ),
         "item_usage": (
-            "使用这个结构：1) 直接答案：这个物品有什么用/在哪里用；2) 生效条件；3) 使用位置或交互对象；"
-            "4) 使用后的效果或奖励；5) 是否消耗、是否可重复；6) 来源不足时只说明查证结果，不编造路线或材料。"
+            "直接说明物品用途；如果实际使用需要地点、交互对象或前置条件，再给出必要步骤。"
+            "消耗、重复使用和奖励只有在来源明确说明时才写。"
         ),
         "quest_step": (
-            "使用这个结构：1) 当前下一步；2) NPC/地点；3) 触发条件；4) 分支情况：说明该任务是否有分支，"
-            "如果有，分支分别是什么；5) 顺序警告；6) 奖励/后果；7) NPC 不见了怎么办。"
+            "先说当前下一步，再按执行顺序给出必要的 NPC、地点和触发条件。"
+            "只有分支、顺序、奖励或 NPC 状态确实影响当前推进且有证据时才说明。"
         ),
         "build": (
-            "使用这个结构：1) 玩法定位；2) 属性优先级；3) 武器/战技/法术；4) 护符/装备；"
-            "5) 操作循环；6) 当前版本风险。"
+            "先说明玩法定位和核心选择，再给有证据的属性、装备与操作循环；版本风险只在相关时说明。"
         ),
         "patch": (
-            "使用这个结构：1) 当前结论：是否影响玩家当前玩法；2) 版本与日期；3) 改动内容：按系统/角色/"
-            "道具/Boss/数值分类；4) 实际影响：玩家需要怎么调整；5) 旧版本差异；6) 来源冲突或版本不明时说明不确定性。"
+            "先说明是否影响用户关心的玩法，再给版本、日期和相关改动。只分析有证据的实际影响。"
         ),
         "game_mechanic": (
-            "这是游戏机制类问题。使用这个结构：1) 直接答案：能否开启/如何触发；2) 开启条件；3) 具体步骤；"
-            "4) 每个前置条件的获得或到达方法；5) 是否限时、版本相关或需要特定路线；"
-            "6) 失败排查；7) 来源不足时标明不确定部分。"
+            "先直接回答规则结果或触发方法。规则判断题给出决定结论的条件即可；"
+            "只有操作型问题才沿必要前置条件给出可执行步骤。不要自动添加版本、路线或失败排查栏目。"
         ),
         "lore": (
-            "使用这个结构：1) 简短答案：直接解释问题指向的剧情含义；2) 相关人物/势力/事件；"
-            "3) 关键依据：来自物品描述、对白、任务或官方资料；4) 可确认事实；5) 推测解释；"
-            "6) 仍不明确的部分。"
+            "先简短解释剧情含义，再区分有依据的事实和必要的推测；不要扩展无关人物或事件。"
         ),
         "general": "直接回答问题，给出简洁可执行步骤；只有在确实有帮助时才说明不确定性。",
     }
     return (
-        "以下结构只在问题前提成立时使用；如果来源显示用户误认了角色、物品、任务或机制，"
-        "先简洁纠正前提并说明正确状态，不要为了填满结构而编造不存在的步骤、分支、奖励或故障排查。"
+        "以下是内容优先级，不是必须填满的固定模板。只保留解决当前问题所必需且有证据的部分。"
+        "如果来源显示用户误认了角色、物品、任务或机制，先简洁纠正前提。"
         + shapes[intent]
     )
 
@@ -107,6 +100,42 @@ def search_refinement_system_prompt() -> str:
     )
 
 
+def investigation_system_prompt() -> str:
+    return (
+        f"{PROMPT_SECURITY_RULES} "
+        "You maintain a request-scoped investigation state for a game-guide question. "
+        "Return only compact JSON with keys: goal, known_facts, unresolved_questions, next_queries, aliases, complete. "
+        "known_facts is a list of objects with statement and source_indexes. Record only facts explicitly supported "
+        "by the numbered evidence; never turn an inference into a fact. Rebuild the fact list from all current evidence "
+        "on every call, keeping only facts that help solve the goal. unresolved_questions contains only missing links "
+        "that prevent a correct or executable answer. next_queries contains zero to two objects with source_type and "
+        "query, targeting the highest-impact unresolved links without duplicating the same dependency. Do not repeat "
+        "attempted queries. Follow newly discovered "
+        "entities and dependencies, including prerequisites, access routes, ordered actions, absence causes, version "
+        "conditions, and translated names when they materially affect the answer. Do not require optional trivia. "
+        "Set complete=true only when the user's question can be answered correctly and, for an actionable goal, the "
+        "supported path is executable end to end. Preserve exact identifiers such as room numbers, item codes, and "
+        "versions. source_type must be official, wiki, community, or web. Never invent URLs or game-specific facts."
+    )
+
+
+def answer_completeness_system_prompt() -> str:
+    return (
+        f"{PROMPT_SECURITY_RULES} "
+        "You are a final answer completeness judge. Return only compact JSON with keys: complete, gaps, "
+        "unsupported_claims, irrelevant_details. Judge the draft against the user's exact goal, the investigation "
+        "state, and numbered "
+        "evidence. A useful actionable answer must state the direct result and every necessary supported prerequisite, "
+        "access/acquisition step, ordered action, and relevant failure cause. Do not penalize omitted optional detail. "
+        "List claims as unsupported when the draft states them more strongly or specifically than the evidence. "
+        "The absence of a branch, version note, failure mode, or alternative in the evidence does not prove that none "
+        "exists. Treat such negative claims as unsupported. Reject optional rewards, endings, inventory contents, "
+        "or troubleshooting that does not help answer the current goal. "
+        "Put sourced but unnecessary side loot, rooms, endings, lore, and troubleshooting in irrelevant_details. "
+        "Set complete=false when a material gap or unsupported concrete claim remains."
+    )
+
+
 def answer_system_prompt() -> str:
     return (
         f"{PROMPT_SECURITY_RULES} "
@@ -136,6 +165,15 @@ def answer_system_prompt() -> str:
         "ordered actions, and the likely reason something is missing when the sources explicitly support that reason. "
         "Resolve useful prerequisites proactively so the user does not need to ask one follow-up per step. Stop where "
         "the evidence stops; never fill a missing link with genre conventions or guesses. "
+        "Apply a strict relevance gate: remove a detail if omitting it would not change the user's next action or a "
+        "necessary condition. Do not include side loot, unrelated rooms, endings, or speculative places to search. "
+        "Never suggest that an item may be in a location unless the evidence supports that possibility. "
+        "Stop once the requested goal is achieved. Do not describe post-goal events, later consequences, or contents "
+        "of the destination unless they are necessary to perform the requested action. "
+        "A source not mentioning an entity is not evidence that the entity does not exist. If retrieval is incomplete, "
+        "state that the available evidence is insufficient instead of making a negative existence claim. "
+        "Never infer keyboard, controller, or interaction bindings from genre conventions. If evidence describes an "
+        "action but not its input binding, describe the action without naming a key or button. "
         "If the question is unrelated to the game or impossible to understand, say so briefly and ask for the missing "
         "game detail. "
         "Keep the answer concise and actionable: start with the direct answer, then give ordered steps or bullets, "
@@ -161,6 +199,13 @@ def answer_revision_system_prompt() -> str:
         "numbers, collectible numbers, or rewards that are not explicitly stated. "
         "If sources do not directly support concrete locations, materials, NPC names, steps, numbers, or effects, "
         "remove those details and return a conservative answer that says what is verified and what is still missing. "
+        "Do not convert missing evidence into claims that no branch, version restriction, alternative, or failure mode "
+        "exists. Remove optional rewards, endings, room contents, and troubleshooting that do not solve the current "
+        "question. "
+        "Treat every item in irrelevant_details as a deletion request, even when that detail is factually sourced. "
+        "Stop the revised answer when the requested goal has been achieved; delete post-goal events and later "
+        "consequences unless they are prerequisites for that goal. "
+        "Remove guessed keyboard, controller, and interaction bindings unless a numbered source states them. "
         "For actionable questions, ensure the retained evidence is organized as a dependency chain: goal, required "
         "conditions, access or acquisition route, ordered actions, and supported failure causes. "
         "Every retained concrete claim must cite one or more valid source indexes such as [1]."
