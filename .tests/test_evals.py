@@ -786,8 +786,8 @@ def test_answer_with_late_uncertainty_note_is_not_a_conservative_refusal() -> No
 
 def test_summary_reports_quality_dimensions_and_segments() -> None:
     results = [
-        {"case": {"category": "boss", "split": "dev", "tier": "mainstream", "difficulty": "standard"}, "evaluation": {"passed": True, "answer_present": True, "source_count": 2}, "latency_ms": 100},
-        {"case": {"category": "boss", "split": "validation", "tier": "niche", "difficulty": "hard"}, "evaluation": {"passed": False, "answer_present": True, "source_count": 0}, "latency_ms": 300},
+        {"case": {"category": "boss", "split": "dev", "tier": "mainstream", "difficulty": "standard", "expected_behavior": "answer"}, "evaluation": {"passed": True, "answer_present": True, "source_count": 2, "needs_game_confirmation": False}, "latency_ms": 100},
+        {"case": {"category": "boss", "split": "validation", "tier": "niche", "difficulty": "hard", "expected_behavior": "confirmation"}, "evaluation": {"passed": False, "answer_present": True, "source_count": 0, "needs_game_confirmation": True}, "latency_ms": 300},
     ]
 
     summary = summarize(results)
@@ -796,3 +796,8 @@ def test_summary_reports_quality_dimensions_and_segments() -> None:
     assert summary["average_source_count"] == 1
     assert summary["by_tier"]["niche"]["pass_rate"] == 0
     assert summary["dimension_pass_rates"]["answer_present"] == 1
+    assert summary["by_expected_behavior"]["answer"]["pass_rate"] == 1
+    assert summary["by_expected_behavior"]["confirmation"]["pass_rate"] == 0
+    assert summary["by_expected_behavior"]["answer"]["needs_game_confirmation_rate"] == 0
+    assert summary["by_expected_behavior"]["confirmation"]["needs_game_confirmation_rate"] == 1
+    assert summary["needs_game_confirmation_rate"] == 0.5

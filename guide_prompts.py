@@ -28,7 +28,7 @@ def answer_shape_for_intent(intent: SearchIntent) -> str:
         ),
         "quest_step": (
             "先说当前下一步，再按执行顺序给出必要的 NPC、地点和触发条件。"
-            "只有分支、顺序、奖励或 NPC 状态确实影响当前推进且有证据时才说明。"
+            "不要用泛化机制规则替代下一步；只有分支、顺序、奖励或 NPC 状态确实影响当前推进且有证据时才说明。"
         ),
         "build": (
             "先说明玩法定位和核心选择，再给有证据的属性、装备与操作循环；版本风险只在相关时说明。"
@@ -38,7 +38,7 @@ def answer_shape_for_intent(intent: SearchIntent) -> str:
         ),
         "game_mechanic": (
             "先直接回答规则结果或触发方法。规则判断题给出决定结论的条件即可；"
-            "只有操作型问题才沿必要前置条件给出可执行步骤。不要自动添加版本、路线或失败排查栏目。"
+            "只有操作型问题才沿必要前置条件给出可执行步骤。不要把任务路线泛化成机制答案，也不要自动添加版本、路线或失败排查栏目。"
         ),
         "lore": (
             "先简短解释剧情含义，再区分有依据的事实和必要的推测；不要扩展无关人物或事件。"
@@ -194,7 +194,9 @@ def answer_system_prompt() -> str:
         "action but not its input binding, describe the action without naming a key or button. "
         "If the question is unrelated to the game or impossible to understand, say so briefly and ask for the missing "
         "game detail. "
-        "Keep the answer concise and actionable: start with the direct answer, then give ordered steps or bullets, "
+        "Before emitting the answer, audit every key conclusion against numbered source evidence: each rule, trigger, "
+        "prerequisite, location, and next step needs a source that states that exact relationship. Delete unsupported "
+        "claims or state the evidence limit conservatively. Keep the answer concise and actionable: start with the direct answer, then give ordered steps or bullets, "
         "then mention important caveats only when needed. Cite every concrete factual claim, number, location, item "
         "effect, quest step, version statement, and tactical recommendation with the supporting source index in "
         "square brackets, for example [1] or [1][3]. Use only source indexes provided in <sources>. Do not add a "

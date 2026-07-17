@@ -32,7 +32,7 @@ INTENT_SIGNALS: tuple[tuple[SearchIntent, tuple[str, ...]], ...] = (
     (
         "quest_step",
         (
-            "任务", "支线", "下一步", "加入队伍", "入队", "招募", "quest",
+            "任务", "支线", "下一步", "推进", "流程", "加入队伍", "入队", "招募", "quest",
             "questline", "recruit", "join party",
         ),
     ),
@@ -68,8 +68,8 @@ INTENT_QUERY_FACETS: dict[SearchIntent, tuple[str, ...]] = {
     "boss_strategy": ("weakness phase strategy", "dodge timing fight guide"),
     "item_location": ("location obtain source", "merchant drop route"),
     "item_usage": ("use effect interaction", "what does it do how to use"),
-    "quest_step": ("quest steps requirements", "walkthrough next step reward"),
-    "game_mechanic": ("mechanic unlock requirements", "enable trigger conditions"),
+    "quest_step": ("walkthrough next step ordered actions", "quest trigger prerequisite next objective"),
+    "game_mechanic": ("mechanic rule effect", "unlock trigger condition requirement"),
     "build": ("build stats equipment", "weapons skills scaling"),
     "lore": ("lore story context", "ending character relationship"),
     "general": (),

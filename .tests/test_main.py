@@ -1575,7 +1575,7 @@ async def test_agent_passes_recent_history_to_llm(monkeypatch) -> None:
     assert response.is_new is False
 
 
-async def test_agent_returns_game_candidates_before_searching_question(monkeypatch) -> None:
+async def test_agent_returns_game_candidates_after_retrieval_has_no_evidence(monkeypatch) -> None:
     store = InMemoryConversationStore()
     monkeypatch.setattr(agent_module, "conversation_store", store)
     search_provider = AmbiguousGameSearchProvider()
@@ -1585,7 +1585,7 @@ async def test_agent_returns_game_candidates_before_searching_question(monkeypat
 
     assert response.needs_game_confirmation is True
     assert [candidate.name for candidate in response.game_candidates] == ["Afterwards", "Afterwards Survival"]
-    assert search_provider.search_called is False
+    assert search_provider.search_called is True
 
 
 def test_agent_status_messages_explain_current_work() -> None:

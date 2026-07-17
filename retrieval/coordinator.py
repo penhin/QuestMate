@@ -73,9 +73,14 @@ class RetrievalCoordinator:
         history: list[SessionMessage],
         plan: SearchPlan,
         game_resolution: GameResolution,
+        initial_sources: list[Source] | None = None,
     ) -> RetrievalOutcome:
-        merged_sources = await self.retrieve_sources(
-            request.question, request.game, plan=plan, game_resolution=game_resolution
+        merged_sources = (
+            list(initial_sources)
+            if initial_sources is not None
+            else await self.retrieve_sources(
+                request.question, request.game, plan=plan, game_resolution=game_resolution
+            )
         )
         merged_plan = plan
         refined = False
@@ -90,6 +95,12 @@ class RetrievalCoordinator:
             attempted_queries=[query.query for query in plan.queries],
             aliases=plan.aliases,
         )
+
+        # Do not spend additional LLM calls or follow-up searches when the
+        # first retrieval wave has no evidence. The caller may run the cheaper
+        # identity-recovery path or return a conservative response instead.
+        if not merged_sources:
+            return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
 
         update_investigation = getattr(self.llm, "update_investigation", None)
         if callable(update_investigation):

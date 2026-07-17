@@ -318,14 +318,27 @@ class TavilySearchProvider:
     async def wait_for_background_tasks(self) -> None:
         await self._wiki_retriever.wait_for_background_tasks()
 
+    async def get_cached_game_resolution(self, game: str) -> GameResolution | None:
+        """Return only a previously server-verified, unambiguous identity.
+
+        This is deliberately separate from ``resolve_game``: callers can use
+        it as a no-search fast path without treating a client hint or a search
+        result's source label as identity proof.
+        """
+        if self._source_registry is None:
+            return None
+        resolution = await self._source_registry.get_resolution(game)
+        if resolution is not None and resolution.is_confirmed and not resolution.ambiguous:
+            logger.info("source_registry.hit", game=game)
+            return resolution
+        return None
+
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
-        if self._source_registry is not None:
-            cached_resolution = await self._source_registry.get_resolution(game)
-            if cached_resolution is not None and cached_resolution.is_confirmed:
-                logger.info("source_registry.hit", game=game)
-                return cached_resolution
+        cached_resolution = await self.get_cached_game_resolution(game)
+        if cached_resolution is not None:
+            return cached_resolution
         usage_before = (self._client.upstream_calls, self._client.cache_hits)
         try:
             resolution = await asyncio.wait_for(

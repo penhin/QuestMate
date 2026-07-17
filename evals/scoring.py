@@ -526,11 +526,18 @@ def _group_summary(results: list[dict[str, Any]], field: str) -> dict[str, dict[
         for result in results
         if result["evaluation"].get("passed", False)
     )
+    confirmations = Counter(
+        result["case"].get(field, "uncategorized")
+        for result in results
+        if result["evaluation"].get("needs_game_confirmation", False)
+    )
     return {
         value: {
             "total": count,
             "passed": passed[value],
             "pass_rate": round(passed[value] / count, 4),
+            "needs_game_confirmation": confirmations[value],
+            "needs_game_confirmation_rate": round(confirmations[value] / count, 4),
         }
         for value, count in sorted(totals.items())
     }
@@ -560,7 +567,15 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         ) if total else 0,
         "dimension_pass_rates": dimension_rates,
         "by_category": _group_summary(results, "category"),
+        "by_expected_behavior": _group_summary(results, "expected_behavior"),
         "by_split": _group_summary(results, "split"),
         "by_tier": _group_summary(results, "tier"),
         "by_difficulty": _group_summary(results, "difficulty"),
+        "needs_game_confirmation_rate": round(
+            sum(
+                result["evaluation"].get("needs_game_confirmation", False)
+                for result in results
+            ) / total,
+            4,
+        ) if total else 0,
     }

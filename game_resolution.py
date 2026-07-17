@@ -1,4 +1,5 @@
 import re
+from difflib import SequenceMatcher
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
@@ -96,7 +97,7 @@ class GameResolver:
             len(candidates) > 1
             and candidates[0].confidence - candidates[1].confidence
             < GAME_RESOLUTION_POLICY.ambiguity_margin
-        )
+        ) or self._candidate_requires_confirmation(game=game, candidates=candidates)
         return GameResolution(
             input_name=game,
             confirmed_name=confirmed_name,
@@ -218,7 +219,7 @@ class GameResolver:
             len(candidates) > 1
             and candidates[0].confidence - candidates[1].confidence
             < GAME_RESOLUTION_POLICY.ambiguity_margin
-        )
+        ) or self._candidate_requires_confirmation(game=game, candidates=candidates)
         return GameResolution(
             input_name=game,
             confirmed_name=confirmed_name,
@@ -305,9 +306,11 @@ class GameResolver:
                 if not is_platform and not is_official:
                     continue
                 text = self.result_text(item)
-                if not matches_game_text(text=text, game=game, game_aliases=[]):
-                    continue
                 title = str(item.get("title") or url)
+                if not matches_game_text(text=text, game=game, game_aliases=[]) and not is_near_game_identity(
+                    title=title, url=url, game=game
+                ):
+                    continue
                 if is_low_value_game_candidate(title=title, url=url):
                     continue
                 aliases = list(title_alias_candidates(title, url=url))
@@ -355,6 +358,14 @@ class GameResolver:
                     confidence=confidence,
                 )
         return merge_cross_platform_candidates(list(candidates_by_key.values()))[:6]
+
+    @staticmethod
+    def _candidate_requires_confirmation(*, game: str, candidates: list[GameCandidate]) -> bool:
+        """A fuzzy title may be shown to the user, but never silently selected."""
+        return bool(candidates) and not any(
+            identity_names_equivalent(game, name)
+            for name in (candidates[0].name, *candidates[0].aliases)
+        )
 
     @staticmethod
     def result_text(item: dict[str, Any]) -> str:
@@ -848,6 +859,24 @@ def matches_game_text(*, text: str, game: str, game_aliases: list[str]) -> bool:
 
 def identity_matches_game(*, title: str, url: str, game: str) -> bool:
     return matches_game_identity(text=f"{title} {url}", game_names=[game])
+
+
+def identity_names_equivalent(left: str, right: str) -> bool:
+    return compact_identity_text(left) == compact_identity_text(right)
+
+
+def is_near_game_identity(*, title: str, url: str, game: str) -> bool:
+    """Accept a likely typo only as a candidate from a verifiable identity URL."""
+    if not is_candidate_identity_url(url):
+        return False
+    target = compact_identity_text(game)
+    if len(target) < 5:
+        return False
+    return any(
+        SequenceMatcher(a=target, b=compact_identity_text(candidate)).ratio() >= 0.84
+        for candidate in title_alias_candidates(title, url=url)
+        if compact_identity_text(candidate)
+    )
 
 
 def compact_identity_text(value: str) -> str:

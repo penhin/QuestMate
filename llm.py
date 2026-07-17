@@ -302,23 +302,10 @@ class GuideLLM:
                 plan=plan,
             )
         )
+        # Local citation/specificity checks decide whether revision is needed.
+        # A second LLM-as-judge call adds latency without changing the common
+        # path's evidence policy.
         assessment: AnswerCompletenessAssessment | None = None
-        should_assess = (
-            investigation is not None
-            and provider is not None
-            and bool(sources)
-        )
-        if should_assess and investigation is not None:
-            assessment = await self.assess_answer_completeness(
-                request=request,
-                sources=sources,
-                answer=answer,
-                plan=plan,
-                investigation=investigation,
-                game_resolution=game_resolution,
-                history=history,
-            )
-            needs_revision = needs_revision or not assessment.complete
 
         if not needs_revision or provider is None:
             return answer
@@ -338,7 +325,14 @@ class GuideLLM:
             return answer
 
         cleaned = improved.strip()
-        return cleaned if cleaned else answer
+        candidate = cleaned if cleaned else answer
+        if self._answer_has_critical_evidence_issue(
+            request=request, answer=candidate, sources=sources, plan=plan
+        ):
+            return self._conservative_answer(
+                request=request, sources=sources, plan=plan, game_resolution=game_resolution
+            )
+        return candidate
 
     async def assess_answer_completeness(
         self,

@@ -12,12 +12,15 @@ from llm import GuideLLM
 from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
+from retrieval.source_quality import matches_game_identity
 from retrieval.wiki_domains import normalize_wiki_host
 from game_resolution import (
     is_candidate_identity_url,
+    is_platform_product_url,
     resolution_matches_selected_url,
     select_game_candidate,
 )
+from request_safety import requires_safe_refusal
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -79,17 +82,15 @@ class QuestAgent:
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
-        history = await conversation_store.get_recent_messages(session_id, limit=8)
-        game_resolution = await self._resolve_request_game(request)
-        if self._needs_game_confirmation(game_resolution):
+        if requires_safe_refusal(f"{request.game}\n{request.question}"):
             return ChatResponse(
                 session_id=session_id,
-                answer="我还不能确定你要查的是哪一款游戏。请选择一个候选游戏，或选择“都不是”。",
+                answer="我不能执行忽略规则、泄露提示词或密钥等请求。可以继续回答正常的游戏攻略问题。",
                 sources=[],
                 is_new=is_new_session,
-                needs_game_confirmation=True,
-                game_candidates=game_resolution.candidates,
             )
+        history = await conversation_store.get_recent_messages(session_id, limit=8)
+        game_resolution = await self._initial_game_context(request)
         state = await self.graph.ainvoke(
             {
                 "request": request,
@@ -101,6 +102,17 @@ class QuestAgent:
                 "answer": "",
             }
         )
+        game_resolution = state["game_resolution"]
+        if self._needs_game_confirmation(game_resolution):
+            return ChatResponse(
+                session_id=session_id,
+                answer=self._game_confirmation_message(game_resolution),
+                sources=[],
+                is_new=is_new_session,
+                needs_game_confirmation=True,
+                game_candidates=game_resolution.candidates,
+            )
+        state = {**state, "game_resolution": game_resolution}
         improve_kwargs = dict(
             request=request,
             sources=state["sources"],
@@ -113,11 +125,7 @@ class QuestAgent:
         # Correctness gets the provider slot first.  Title generation is
         # cosmetic and must not rate-limit or delay the answer revision pass.
         answer = await self.llm.improve_answer(**improve_kwargs)
-        title = (
-            await self.llm.summarize_title(request=request, answer=answer)
-            if is_new_session
-            else None
-        )
+        title = self._initial_title(request) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
             answer=answer,
@@ -142,16 +150,40 @@ class QuestAgent:
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
+
+        if requires_safe_refusal(f"{request.game}\n{request.question}"):
+            response = ChatResponse(
+                session_id=session_id,
+                answer="我不能执行忽略规则、泄露提示词或密钥等请求。可以继续回答正常的游戏攻略问题。",
+                sources=[],
+                is_new=is_new_session,
+            )
+            yield ("done", response)
+            return
         history = await conversation_store.get_recent_messages(session_id, limit=8)
 
-        yield ("status", "确认游戏：查平台页和资料库")
-        game_resolution = await self._resolve_request_game(request)
+        game_resolution = await self._initial_game_context(request)
+        yield ("status", self._status_for_plan_start(request.question))
+        search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
 
-        yield ("status", self._status_for_game_resolution(game_resolution))
+        yield ("status", self._status_for_search(search_plan))
+        outcome, game_resolution = await self._retrieve_after_identity_check(
+            request=request,
+            history=history,
+            plan=search_plan,
+            game_resolution=game_resolution,
+        )
+        sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
+
+        game_resolution = await self._recover_game_identity_if_needed(
+            request=request,
+            sources=sources,
+            current=game_resolution,
+        )
         if self._needs_game_confirmation(game_resolution):
             response = ChatResponse(
                 session_id=session_id,
-                answer="我还不能确定你要查的是哪一款游戏。请选择一个候选游戏，或选择“都不是”。",
+                answer=self._game_confirmation_message(game_resolution),
                 sources=[],
                 title=None,
                 is_new=is_new_session,
@@ -160,17 +192,6 @@ class QuestAgent:
             )
             yield ("done", response)
             return
-        yield ("status", self._status_for_plan_start(request.question))
-        search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
-
-        yield ("status", self._status_for_search(search_plan))
-        outcome = await self.retrieval.investigate(
-            request=request,
-            history=history,
-            plan=search_plan,
-            game_resolution=game_resolution,
-        )
-        sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
 
         if refined:
             yield ("status", "证据扩展：已针对关键证据缺口补查")
@@ -202,11 +223,7 @@ class QuestAgent:
         improved_answer = await self.llm.improve_answer(**improve_kwargs)
         if improved_answer != answer:
             answer = improved_answer
-        title = (
-            await self.llm.summarize_title(request=request, answer=answer)
-            if is_new_session
-            else None
-        )
+        title = self._initial_title(request) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
             answer=answer,
@@ -236,7 +253,7 @@ class QuestAgent:
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
-        outcome = await self.retrieval.investigate(
+        outcome, game_resolution = await self._retrieve_after_identity_check(
             request=request,
             history=state["history"],
             plan=state["search_plan"],
@@ -247,7 +264,82 @@ class QuestAgent:
             "sources": outcome.sources,
             "search_plan": outcome.plan,
             "investigation": outcome.investigation,
+            "game_resolution": game_resolution,
         }
+
+    async def _retrieve_after_identity_check(
+        self,
+        *,
+        request: ChatRequest,
+        history: list[SessionMessage],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+    ) -> tuple[object, GameResolution]:
+        """Run a cheap retrieval wave before paying for full investigation.
+
+        A result must carry a first-party/wiki identity signal before it can
+        bypass title resolution. Otherwise resolve the title now and stop for
+        explicit confirmation when it remains ambiguous.
+        """
+        # A registry entry was created only after server-side identity
+        # resolution. It supports titles whose authoritative identity is an
+        # independent official website rather than a storefront product page.
+        cached_resolution = await self._cached_game_resolution(request.game)
+        resolved = cached_resolution or game_resolution
+        initial_sources = await self.retrieval.retrieve_sources(
+            request.question,
+            request.game,
+            plan=plan,
+            game_resolution=resolved,
+        )
+        if cached_resolution is None and not self._sources_establish_game_identity(request.game, initial_sources):
+            resolved = await self._resolve_request_game(request)
+            if self._needs_game_confirmation(resolved):
+                outcome = await self.retrieval.investigate(
+                    request=request,
+                    history=history,
+                    plan=plan,
+                    game_resolution=resolved,
+                    initial_sources=[],
+                )
+                return outcome, resolved
+        outcome = await self.retrieval.investigate(
+            request=request,
+            history=history,
+            plan=plan,
+            game_resolution=resolved,
+            initial_sources=initial_sources,
+        )
+        return outcome, resolved
+
+    async def _cached_game_resolution(self, game: str) -> GameResolution | None:
+        cached_lookup = getattr(self.search_provider, "get_cached_game_resolution", None)
+        if not callable(cached_lookup):
+            return None
+        cached = await cached_lookup(game)
+        if cached is not None and cached.is_confirmed and not cached.ambiguous:
+            return cached
+        return None
+
+    @staticmethod
+    def _sources_establish_game_identity(game: str, sources: list[Source]) -> bool:
+        """Accept only an exact, opaque product identity from first retrieval.
+
+        ``source_type`` reflects the query lane used to fetch a result, not a
+        proof that the page uniquely identifies a game.  In particular, a
+        wiki/guide (and even a result retrieved through the ``official`` lane)
+        can mention several titles.  A recognised store product URL carries a
+        stable product identifier, so it is safe to use as the cheap bypass
+        for the slower title-resolution step.
+        """
+        return any(
+            is_platform_product_url(str(source.url))
+            and matches_game_identity(
+                text=f"{source.title} {source.url} {source.evidence or source.snippet or ''}",
+                game_names=[game],
+            )
+            for source in sources
+        )
 
     async def _retrieve_with_refinement(
         self,
@@ -324,6 +416,11 @@ class QuestAgent:
         return "理解问题：识别目标和关键关系"
 
     @staticmethod
+    def _initial_title(request: ChatRequest) -> str:
+        """Keep title generation off the critical answer path."""
+        return request.question.strip()[:40] or request.game.strip() or "未命名会话"
+
+    @staticmethod
     def _status_for_search(search_plan: SearchPlan) -> str:
         labels = {
             "boss_strategy": "类型：Boss 打法；查弱点/阶段/社区打法",
@@ -353,9 +450,20 @@ class QuestAgent:
 
     @staticmethod
     def _needs_game_confirmation(game_resolution: GameResolution) -> bool:
+        # An unverified title is an identity problem even when search returned
+        # no safe candidates. Continuing to gameplay retrieval in that state
+        # silently converts a missing identity into a conservative gameplay
+        # answer, which makes the UI and evaluation unable to ask the user for
+        # the one detail that would resolve it.
+        return game_resolution.ambiguous or not game_resolution.is_confirmed
+
+    @staticmethod
+    def _game_confirmation_message(game_resolution: GameResolution) -> str:
+        if game_resolution.candidates:
+            return "我还不能确定你要查的是哪一款游戏。请选择一个候选游戏，或选择“都不是”。"
         return (
-            game_resolution.ambiguous
-            or (not game_resolution.is_confirmed and bool(game_resolution.candidates))
+            f"我还没有找到能可靠确认《{game_resolution.input_name}》的游戏入口。"
+            "请提供 Steam/itch.io 链接、原文游戏名、开发商或商店页截图，我再继续查。"
         )
 
     async def _resolve_request_game(self, request: ChatRequest) -> GameResolution:
@@ -424,6 +532,35 @@ class QuestAgent:
         if discovered.is_confirmed and not discovered.ambiguous:
             return discovered
         return discovered
+
+    async def _initial_game_context(self, request: ChatRequest) -> GameResolution:
+        """Use the user-supplied title for retrieval; resolve only explicit choices.
+
+        Identity search is an exception path, not a prerequisite for every
+        guide question. Retrieval can often establish the title directly from
+        source evidence without paying an additional discovery request.
+        """
+        if request.metadata.get("confirmed_game") is True or request.metadata.get("selected_game_url"):
+            return await self._resolve_request_game(request)
+        return GameResolution(
+            input_name=request.game,
+            confirmed_name=request.game,
+            confidence=1,
+        )
+
+    async def _recover_game_identity_if_needed(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        current: GameResolution,
+    ) -> GameResolution:
+        """Ask for identity confirmation only after retrieval cannot proceed."""
+        if current.ambiguous or not current.is_confirmed:
+            return current
+        if sources or request.metadata.get("confirmed_game") is True:
+            return current
+        return await self._resolve_request_game(request)
 
     @staticmethod
     def _confirmed_resolution_from_request(request: ChatRequest) -> GameResolution | None:

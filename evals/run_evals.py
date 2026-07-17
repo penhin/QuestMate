@@ -181,6 +181,8 @@ async def run_case(
 
 
 async def main_async(args: argparse.Namespace) -> int:
+    if args.concurrency < 1:
+        raise ValueError("--concurrency must be at least 1")
     cases_path = Path(args.cases)
     all_cases = load_cases(cases_path)
     cases = filter_cases(all_cases, split=args.split, tier=args.tier, category=args.category)
@@ -211,10 +213,13 @@ async def main_async(args: argparse.Namespace) -> int:
     }
     timeout = httpx.Timeout(args.timeout)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        results = [
-            await run_case(client, args.api_base_url, case, model_config, args.mode)
-            for case in cases
-        ]
+        semaphore = asyncio.Semaphore(args.concurrency)
+
+        async def bounded_run(case: dict[str, Any]) -> dict[str, Any]:
+            async with semaphore:
+                return await run_case(client, args.api_base_url, case, model_config, args.mode)
+
+        results = list(await asyncio.gather(*(bounded_run(case) for case in cases)))
     summary = summarize(results)
     model = {
         "provider": args.ai_provider or "backend_default",
@@ -280,6 +285,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output")
     parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="maximum concurrent evaluation requests; raise carefully to respect model/search quotas",
+    )
     parser.add_argument("--limit", type=int)
     parser.add_argument("--split", choices=("dev", "validation", "holdout"))
     parser.add_argument("--tier", choices=("mainstream", "niche", "safety"))
