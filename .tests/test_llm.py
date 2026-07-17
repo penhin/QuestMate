@@ -395,9 +395,57 @@ def test_answer_revision_requires_valid_source_citation() -> None:
     )
 
 
+def test_answer_revision_rejects_a_citation_to_an_unrelated_source() -> None:
+    request = ChatRequest(game="Example Game", question="Where is the Moonstone acquired?")
+    sources = [
+        Source(
+            title="Example Game combat overview",
+            url="https://example.com/combat",
+            evidence="Combat tips and enemy behavior.",
+        ),
+        Source(
+            title="Moonstone acquisition route",
+            url="https://example.com/moonstone",
+            evidence="Moonstone is acquired from the observatory chest.",
+        ),
+    ]
+    answer = "Moonstone is obtained from a chest. Follow the combat advice first.[1]"
+
+    assert GuideLLM._answer_needs_revision(
+        request=request,
+        answer=answer,
+        sources=sources,
+        plan=SearchPlan(intent="item_location"),
+    )
+    assert GuideLLM._has_grounded_citation(
+        answer="Moonstone is acquired from the observatory chest.[2]",
+        sources=sources,
+        question=request.question,
+    )
+
+
 def test_search_plan_rejects_unknown_intent() -> None:
     with pytest.raises(ValidationError):
         SearchPlan(intent="boss fight")
+
+
+def test_openai_compatible_provider_uses_a_bounded_request_timeout() -> None:
+    from model_providers import OpenAICompatibleProvider
+
+    provider = OpenAICompatibleProvider(
+        api_key="test-key",
+        model="test-model",
+        base_url="https://api.example.com",
+        request_timeout_seconds=37,
+    )
+
+    client = provider._http_client()
+    try:
+        assert client.timeout.read == 37
+    finally:
+        import asyncio
+
+        asyncio.run(provider.aclose())
 
 
 def test_search_planner_sanitizes_prompt_injection_text() -> None:

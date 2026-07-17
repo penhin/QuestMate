@@ -1,7 +1,35 @@
 from quality_policy import DEFAULT_DOMAIN_QUALITY, SOURCE_POLICIES, domain_quality
 from retrieval.relevance import is_high_quality_source, result_relevance_score
 from retrieval.source_builder import build_source
+from retrieval.evidence_pool import rank_sources
 from retrieval.wiki_domains import is_probable_wiki_domain
+from schemas import Source
+
+
+def test_direct_evidence_outranks_a_higher_trust_title_only_match() -> None:
+    sources = rank_sources(
+        sources=[
+            Source(
+                title="Moonstone acquired location guide",
+                url="https://example.com/overview",
+                evidence="General combat overview and enemy behavior.",
+                score=0.98,
+                trust_score=0.95,
+            ),
+            Source(
+                title="Observatory route",
+                url="https://example.com/route",
+                evidence="Moonstone is acquired from the observatory chest.",
+                score=0.5,
+                trust_score=0.45,
+            ),
+        ],
+        query="Where is Moonstone acquired?",
+        intent="item_location",
+        max_results=2,
+    )
+
+    assert [source.title for source in sources] == ["Observatory route", "Moonstone acquired location guide"]
 
 
 def _build(item: dict[str, object], *, policy_name: str = "web"):

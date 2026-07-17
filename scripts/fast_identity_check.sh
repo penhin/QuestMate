@@ -7,4 +7,6 @@ set -euo pipefail
 uv run pytest \
   .tests/test_game_confirmation.py \
   .tests/test_evidence_generalization.py \
+  .tests/test_source_generalization.py \
+  .tests/test_llm.py \
   .tests/test_evals.py

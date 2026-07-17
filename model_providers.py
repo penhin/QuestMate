@@ -86,15 +86,23 @@ class AnthropicProvider:
 
 
 class OpenAICompatibleProvider:
-    def __init__(self, *, api_key: str, model: str, base_url: str) -> None:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str,
+        request_timeout_seconds: float = 40,
+    ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.request_timeout_seconds = request_timeout_seconds
         self.client: httpx.AsyncClient | None = None
 
     def _http_client(self) -> httpx.AsyncClient:
         if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(timeout=60)
+            self.client = httpx.AsyncClient(timeout=self.request_timeout_seconds)
         return self.client
 
     async def aclose(self) -> None:
@@ -207,6 +215,7 @@ def create_model_provider(*, request: ChatRequest, settings: Settings) -> ModelP
             api_key=api_key,
             model=model,
             base_url=base_url,
+            request_timeout_seconds=settings.model_request_timeout_seconds,
         )
 
     if request.ai_api_key:

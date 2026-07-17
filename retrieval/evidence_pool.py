@@ -9,7 +9,11 @@ from quality_policy import (
     source_domain_limit,
 )
 from query_tokens import question_relevance_tokens
+from retrieval.source_quality import token_in_text
 from schemas import Source
+
+
+DIRECT_EVIDENCE_BONUS = 0.3
 
 
 def canonical_source_url(url: str) -> str:
@@ -33,8 +37,12 @@ def merge_source_evidence(*, preferred: Source, other: Source) -> Source:
 
 def source_rank(*, source: Source, query: str, intent: str, version_sensitive: bool = False) -> float:
     text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
+    evidence_text = (source.evidence or source.snippet or "").casefold()
     tokens = question_relevance_tokens(query)
-    coverage = sum(1 for token in tokens if token in text) / max(len(tokens), 1)
+    coverage = sum(1 for token in tokens if token_in_text(token, text)) / max(len(tokens), 1)
+    evidence_coverage = sum(
+        1 for token in tokens if token_in_text(token, evidence_text)
+    ) / max(len(tokens), 1)
     retrieval_score = min(max(source.score or 0.5, 0), 1)
     version_score = 1.0 if source.game_version or source.published_at else 0.0
     if not version_sensitive and intent not in VERSION_SENSITIVE_INTENTS:
@@ -44,6 +52,10 @@ def source_rank(*, source: Source, query: str, intent: str, version_sensitive: b
         + retrieval_score * EVIDENCE_POOL_WEIGHTS.retrieval
         + source.trust_score * EVIDENCE_POOL_WEIGHTS.trust
         + version_score * EVIDENCE_POOL_WEIGHTS.version
+        # A title can match the question while the excerpt only covers a
+        # broad overview. Prefer the page whose actual evidence passage
+        # repeats the user's target, without filtering out lower-prior sites.
+        + evidence_coverage * DIRECT_EVIDENCE_BONUS
     )
 
 

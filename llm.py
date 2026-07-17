@@ -1081,10 +1081,10 @@ class GuideLLM:
             return True
 
         evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
-        if (
-            sources
-            and GuideLLM._evidence_level(question=evidence_question, sources=sources) == "direct"
-            and not GuideLLM._has_valid_citation(answer=cleaned, source_count=len(sources))
+        if sources and not GuideLLM._has_grounded_citation(
+            answer=cleaned,
+            sources=sources,
+            question=evidence_question,
         ):
             return True
 
@@ -1104,16 +1104,27 @@ class GuideLLM:
         if GuideLLM._has_unsupported_specifics(answer=cleaned, sources=sources, question=request.question):
             return True
         evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
-        return (
-            bool(sources)
-            and GuideLLM._evidence_level(question=evidence_question, sources=sources) == "direct"
-            and not GuideLLM._has_valid_citation(answer=cleaned, source_count=len(sources))
+        return bool(sources) and not GuideLLM._has_grounded_citation(
+            answer=cleaned,
+            sources=sources,
+            question=evidence_question,
         )
 
     @staticmethod
     def _has_valid_citation(*, answer: str, source_count: int) -> bool:
         cited = [int(value) for value in re.findall(r"\[(\d+)\]", answer)]
         return bool(cited) and all(1 <= index <= source_count for index in cited)
+
+    @staticmethod
+    def _has_grounded_citation(*, answer: str, sources: list[Source], question: str) -> bool:
+        indexes = [int(value) for value in re.findall(r"\[(\d+)\]", answer)]
+        if not indexes or any(index < 1 or index > len(sources) for index in indexes):
+            return False
+        cited_sources = [sources[index - 1] for index in dict.fromkeys(indexes)]
+        return GuideLLM._has_question_specific_sources(
+            question=question,
+            sources=cited_sources,
+        )
 
     @staticmethod
     def _contextual_search_question(*, request: ChatRequest, history: list[SessionMessage]) -> str:
