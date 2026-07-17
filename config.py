@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     search_include_raw_content: bool = True
     evidence_passage_max_chars: int = Field(default=1600, ge=400, le=6000)
     external_request_timeout_seconds: int = Field(default=20, ge=3, le=90)
+    # Identity discovery is a guard before the main answer path. Keep each
+    # attempt short and bounded so a slow upstream cannot consume the entire
+    # request budget before the user can choose a candidate.
+    identity_resolution_timeout_seconds: int = Field(default=8, ge=3, le=30)
+    identity_resolution_attempts: int = Field(default=2, ge=1, le=2)
     tavily_max_concurrency: int = Field(default=3, ge=1, le=8)
     tavily_search_cache_ttl_seconds: int = Field(default=86400, ge=0, le=2592000)
     tavily_search_cache_max_entries: int = Field(default=512, ge=16, le=10000)

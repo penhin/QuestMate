@@ -252,9 +252,10 @@ MAX_SEARCH_QUERIES = 4
 MAX_QUERIES_PER_PLANNED_QUERY = 2
 EXTERNAL_SEARCH_ATTEMPTS = 2
 PROGRESSIVE_STRICT_SOURCE_TARGET = 2
-# Two targeted follow-ups can close a dependency chain; the coordinator stops
-# early whenever a hop has no novel evidence, avoiding repeated dead searches.
-MAX_INVESTIGATION_HOPS = 2
+# One targeted follow-up closes the common evidence gap while bounding tail
+# latency. More complex chains should ask for clarification rather than spend
+# multiple sequential model/search rounds in a single request.
+MAX_INVESTIGATION_HOPS = 1
 MAX_MERGED_EVIDENCE_CHARS = 3600
 
 

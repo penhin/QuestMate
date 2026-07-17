@@ -209,8 +209,11 @@ async def test_tavily_identity_search_is_cached() -> None:
     assert provider._client.cache_hits == 1
 
 
-async def test_source_registry_skips_repeated_identity_search() -> None:
+async def test_source_registry_never_skips_current_identity_search() -> None:
     class CachedRegistry:
+        def __init__(self) -> None:
+            self.writes = []
+
         async def get_resolution(self, game: str):
             return GameResolution(
                 input_name=game,
@@ -222,16 +225,17 @@ async def test_source_registry_skips_repeated_identity_search() -> None:
             )
 
         async def upsert_resolution(self, resolution):
-            raise AssertionError("cached resolution should not be rewritten")
+            self.writes.append(resolution)
 
     client = CountingEmptySearchClient()
-    provider = TavilySearchProvider(client=client, source_registry=CachedRegistry())
+    registry = CachedRegistry()
+    provider = TavilySearchProvider(client=client, source_registry=registry)
 
     resolution = await provider.resolve_game("Registered Alias")
 
-    assert resolution.is_confirmed
-    assert resolution.database_domains == ["registered-game.fandom.com"]
-    assert client.queries == []
+    assert not resolution.is_confirmed
+    assert client.queries
+    assert registry.writes == []
 
 
 async def test_live_identity_is_saved_to_source_registry() -> None:
@@ -817,7 +821,7 @@ async def test_agent_runs_one_model_driven_refinement_pass() -> None:
     assert sources[0].title == "Translated Entity 35"
 
 
-async def test_agent_follows_two_dependency_hops_before_answering() -> None:
+async def test_agent_bounds_dependency_refinement_to_one_hop_before_answering() -> None:
     class EmptyKnowledge:
         async def retrieve(self, *, game: str, query: str):
             return []
@@ -886,10 +890,11 @@ async def test_agent_follows_two_dependency_hops_before_answering() -> None:
     )
 
     assert refined is True
-    assert search_provider.calls == 3
-    assert llm.calls == 2
-    assert {source.title for source in sources} == {"Dependency 1", "Dependency 2", "Dependency 3"}
-    assert {"relay token", "maintenance passage"}.issubset(plan.aliases)
+    assert search_provider.calls == 2
+    assert llm.calls == 1
+    assert {source.title for source in sources} == {"Dependency 1", "Dependency 2"}
+    assert "relay token" in plan.aliases
+    assert "maintenance passage" not in plan.aliases
 
 
 def test_patch_answers_require_dated_official_evidence() -> None:

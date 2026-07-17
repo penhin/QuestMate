@@ -156,6 +156,7 @@ class ChatResponse(BaseModel):
     is_new: bool = False
     needs_game_confirmation: bool = False
     game_candidates: list[GameCandidate] = Field(default_factory=list)
+    timings_ms: dict[str, int] = Field(default_factory=dict)
 
 
 class SessionMessage(BaseModel):

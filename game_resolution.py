@@ -361,11 +361,24 @@ class GameResolver:
 
     @staticmethod
     def _candidate_requires_confirmation(*, game: str, candidates: list[GameCandidate]) -> bool:
-        """A fuzzy title may be shown to the user, but never silently selected."""
-        return bool(candidates) and not any(
-            identity_names_equivalent(game, name)
-            for name in (candidates[0].name, *candidates[0].aliases)
-        )
+        """Require a choice for fuzzy titles and distinct same-name products.
+
+        Search ranking is relevance, not identity authority.  Even a large
+        score gap must not silently choose between two distinct product IDs
+        that both match the title the user entered.
+        """
+        if not candidates:
+            return False
+
+        def matches_input(candidate: GameCandidate) -> bool:
+            return any(
+                identity_names_equivalent(game, name)
+                for name in (candidate.name, *candidate.aliases)
+            )
+
+        if not matches_input(candidates[0]):
+            return True
+        return sum(matches_input(candidate) for candidate in candidates) > 1
 
     @staticmethod
     def result_text(item: dict[str, Any]) -> str:

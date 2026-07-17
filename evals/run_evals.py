@@ -169,6 +169,7 @@ async def run_case(
             "response": response,
             "evaluation": evaluation,
             "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
+            "timings_ms": response.get("timings_ms") if isinstance(response.get("timings_ms"), dict) else {},
         }
     except Exception as exc:
         return {
@@ -251,6 +252,7 @@ async def main_async(args: argparse.Namespace) -> int:
             "gold_source_urls": "used only after the response for scoring",
         },
         "summary": summary,
+        "error_categories": aggregate_error_categories(results),
         "results": results,
     }
     sealed_error_categories: dict[str, int] | None = None
@@ -268,9 +270,15 @@ async def main_async(args: argparse.Namespace) -> int:
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.sealed_holdout:
         output.chmod(0o600)
-    console_summary = {"report": str(output), **summary}
-    if sealed_error_categories is not None:
-        console_summary["error_categories"] = sealed_error_categories
+    console_summary = {
+        "report": str(output),
+        **summary,
+        "error_categories": (
+            sealed_error_categories
+            if sealed_error_categories is not None
+            else report["error_categories"]
+        ),
+    }
     print(json.dumps(console_summary, ensure_ascii=False, indent=2))
     return 0 if summary["pass_rate"] >= args.fail_under else 1
 

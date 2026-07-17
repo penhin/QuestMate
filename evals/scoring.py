@@ -543,6 +543,27 @@ def _group_summary(results: list[dict[str, Any]], field: str) -> dict[str, dict[
     }
 
 
+def _latency_breakdown(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Aggregate server stage durations without retaining per-case timings."""
+    values: dict[str, list[int]] = {}
+    for result in results:
+        timings = result.get("timings_ms")
+        if not isinstance(timings, dict):
+            continue
+        for stage, raw_value in timings.items():
+            if isinstance(stage, str) and isinstance(raw_value, int) and raw_value >= 0:
+                values.setdefault(stage, []).append(raw_value)
+    return {
+        stage: {
+            "p50": sorted(samples)[len(samples) // 2],
+            "p95": sorted(samples)[min(len(samples) - 1, int(len(samples) * 0.95))],
+            "count": len(samples),
+        }
+        for stage, samples in sorted(values.items())
+        if samples
+    }
+
+
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     passed = sum(result["evaluation"].get("passed", False) for result in results)
@@ -565,6 +586,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             sum(result["evaluation"].get("source_count", 0) for result in results) / total,
             2,
         ) if total else 0,
+        "latency_breakdown_ms": _latency_breakdown(results),
         "dimension_pass_rates": dimension_rates,
         "by_category": _group_summary(results, "category"),
         "by_expected_behavior": _group_summary(results, "expected_behavior"),

@@ -336,26 +336,43 @@ class TavilySearchProvider:
     async def resolve_game(self, game: str, question: str | None = None) -> GameResolution:
         if self._client is None:
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
-        cached_resolution = await self.get_cached_game_resolution(game)
-        if cached_resolution is not None:
-            return cached_resolution
         usage_before = (self._client.upstream_calls, self._client.cache_hits)
-        try:
-            resolution = await asyncio.wait_for(
-                asyncio.to_thread(self._game_resolver.resolve, game=game, question=question),
-                timeout=self.settings.external_request_timeout_seconds,
-            )
-        except Exception:
-            resolution = GameResolution(input_name=game, confirmed_name=game, confidence=0)
+        resolution = await self._resolve_game_with_retry(game=game, question=question)
         self._log_search_usage(
             game=game,
             usage_before=usage_before,
             source_count=len(resolution.platform_urls) + len(resolution.database_domains),
             route="identity",
         )
-        if self._source_registry is not None and not resolution.ambiguous:
+        if self._source_registry is not None and resolution.is_confirmed and not resolution.ambiguous:
             await self._source_registry.upsert_resolution(resolution)
         return resolution
+
+    async def _resolve_game_with_retry(
+        self,
+        *,
+        game: str,
+        question: str | None,
+    ) -> GameResolution:
+        """Bound identity lookup separately from the slower guide workflow."""
+        for attempt in range(1, self.settings.identity_resolution_attempts + 1):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._game_resolver.resolve, game=game, question=question),
+                    timeout=self.settings.identity_resolution_timeout_seconds,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    "identity_resolution.failed",
+                    stage="identity_resolution",
+                    attempt=attempt,
+                    error_type=type(exc).__name__,
+                )
+                if attempt < self.settings.identity_resolution_attempts:
+                    await asyncio.sleep(0.15)
+        return GameResolution(input_name=game, confirmed_name=game, confidence=0)
 
     async def select_game_candidate(
         self,
@@ -368,13 +385,7 @@ class TavilySearchProvider:
         if self._client is None or not is_candidate_identity_url(selected_url):
             return GameResolution(input_name=game, confirmed_name=game, confidence=0)
         usage_before = (self._client.upstream_calls, self._client.cache_hits)
-        try:
-            discovered = await asyncio.wait_for(
-                asyncio.to_thread(self._game_resolver.resolve, game=game, question=question),
-                timeout=self.settings.external_request_timeout_seconds,
-            )
-        except Exception:
-            discovered = GameResolution(input_name=game, confirmed_name=game, confidence=0)
+        discovered = await self._resolve_game_with_retry(game=game, question=question)
         selected = select_game_candidate(discovered, selected_url=selected_url)
         self._log_search_usage(
             game=game,

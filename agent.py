@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import inspect
+from time import perf_counter
 from typing import Literal, TypedDict
 from uuid import uuid4
 
@@ -12,14 +13,13 @@ from llm import GuideLLM
 from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
-from retrieval.source_quality import matches_game_identity
 from retrieval.wiki_domains import normalize_wiki_host
 from game_resolution import (
     is_candidate_identity_url,
-    is_platform_product_url,
     resolution_matches_selected_url,
     select_game_candidate,
 )
+from ai.fallback_planning import fallback_search_plan
 from request_safety import requires_safe_refusal
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
@@ -38,6 +38,7 @@ class QuestAgentState(TypedDict):
     sources: list[Source]
     investigation: InvestigationState
     answer: str
+    timings_ms: dict[str, int]
 
 
 class QuestAgent:
@@ -79,6 +80,7 @@ class QuestAgent:
         return await self._run(request)
 
     async def _run(self, request: ChatRequest) -> ChatResponse:
+        started = perf_counter()
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
@@ -88,9 +90,12 @@ class QuestAgent:
                 answer="我不能执行忽略规则、泄露提示词或密钥等请求。可以继续回答正常的游戏攻略问题。",
                 sources=[],
                 is_new=is_new_session,
+                timings_ms={"safety": self._elapsed_ms(started)},
             )
         history = await conversation_store.get_recent_messages(session_id, limit=8)
+        identity_started = perf_counter()
         game_resolution = await self._initial_game_context(request)
+        timings_ms = {"identity": self._elapsed_ms(identity_started)}
         state = await self.graph.ainvoke(
             {
                 "request": request,
@@ -100,6 +105,7 @@ class QuestAgent:
                 "sources": [],
                 "investigation": InvestigationState(goal=request.question),
                 "answer": "",
+                "timings_ms": timings_ms,
             }
         )
         game_resolution = state["game_resolution"]
@@ -111,6 +117,7 @@ class QuestAgent:
                 is_new=is_new_session,
                 needs_game_confirmation=True,
                 game_candidates=game_resolution.candidates,
+                timings_ms=state["timings_ms"],
             )
         state = {**state, "game_resolution": game_resolution}
         improve_kwargs = dict(
@@ -124,7 +131,9 @@ class QuestAgent:
         self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", state["investigation"])
         # Correctness gets the provider slot first.  Title generation is
         # cosmetic and must not rate-limit or delay the answer revision pass.
+        improvement_started = perf_counter()
         answer = await self.llm.improve_answer(**improve_kwargs)
+        state["timings_ms"]["improvement"] = self._elapsed_ms(improvement_started)
         title = self._initial_title(request) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
@@ -132,6 +141,7 @@ class QuestAgent:
             sources=state["sources"],
             title=title,
             is_new=is_new_session,
+            timings_ms=state["timings_ms"],
         )
         await conversation_store.save_chat(request, response)
         return response
@@ -147,6 +157,7 @@ class QuestAgent:
             yield event
 
     async def _stream(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
+        started = perf_counter()
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
@@ -157,14 +168,19 @@ class QuestAgent:
                 answer="我不能执行忽略规则、泄露提示词或密钥等请求。可以继续回答正常的游戏攻略问题。",
                 sources=[],
                 is_new=is_new_session,
+                timings_ms={"safety": self._elapsed_ms(started)},
             )
             yield ("done", response)
             return
         history = await conversation_store.get_recent_messages(session_id, limit=8)
 
+        identity_started = perf_counter()
         game_resolution = await self._initial_game_context(request)
+        timings_ms = {"identity": self._elapsed_ms(identity_started)}
         yield ("status", self._status_for_plan_start(request.question))
+        planning_started = perf_counter()
         search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
+        timings_ms["planning"] = self._elapsed_ms(planning_started)
 
         yield ("status", self._status_for_search(search_plan))
         outcome, game_resolution = await self._retrieve_after_identity_check(
@@ -172,6 +188,7 @@ class QuestAgent:
             history=history,
             plan=search_plan,
             game_resolution=game_resolution,
+            timings_ms=timings_ms,
         )
         sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
 
@@ -189,6 +206,7 @@ class QuestAgent:
                 is_new=is_new_session,
                 needs_game_confirmation=True,
                 game_candidates=game_resolution.candidates,
+                timings_ms=timings_ms,
             )
             yield ("done", response)
             return
@@ -198,6 +216,7 @@ class QuestAgent:
         yield ("status", self._status_for_sources(sources))
         yield ("status", "整理答案：保留来源，核对版本")
         chunks: list[str] = []
+        answer_started = perf_counter()
         stream_kwargs = dict(
             request=request,
             sources=sources,
@@ -211,6 +230,7 @@ class QuestAgent:
             yield ("chunk", chunk)
 
         answer = "".join(chunks)
+        timings_ms["answer"] = self._elapsed_ms(answer_started)
         improve_kwargs = dict(
             request=request,
             sources=sources,
@@ -220,7 +240,9 @@ class QuestAgent:
             history=history,
         )
         self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", outcome.investigation)
+        improvement_started = perf_counter()
         improved_answer = await self.llm.improve_answer(**improve_kwargs)
+        timings_ms["improvement"] = self._elapsed_ms(improvement_started)
         if improved_answer != answer:
             answer = improved_answer
         title = self._initial_title(request) if is_new_session else None
@@ -230,18 +252,22 @@ class QuestAgent:
             sources=sources,
             title=title,
             is_new=is_new_session,
+            timings_ms=timings_ms,
         )
         await conversation_store.save_chat(request, response)
         yield ("done", response)
 
     async def _plan(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
+        started = perf_counter()
         search_plan = await self.llm.plan_search(
             request=request,
             history=state["history"],
             game_resolution=state["game_resolution"],
         )
-        return {**state, "search_plan": search_plan}
+        return {**state, "search_plan": search_plan, "timings_ms": {
+            **state["timings_ms"], "planning": self._elapsed_ms(started)
+        }}
 
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
@@ -258,6 +284,7 @@ class QuestAgent:
             history=state["history"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
+            timings_ms=state["timings_ms"],
         )
         return {
             **state,
@@ -274,35 +301,60 @@ class QuestAgent:
         history: list[SessionMessage],
         plan: SearchPlan,
         game_resolution: GameResolution,
+        timings_ms: dict[str, int] | None = None,
     ) -> tuple[object, GameResolution]:
         """Run a cheap retrieval wave before paying for full investigation.
 
-        A result must carry a first-party/wiki identity signal before it can
-        bypass title resolution. Otherwise resolve the title now and stop for
-        explicit confirmation when it remains ambiguous.
+        Only a server-verified registry entry can bypass title resolution.
+        Search results are evidence for the guide, but never authority to
+        silently select one title among similarly named games.
         """
-        # A registry entry was created only after server-side identity
-        # resolution. It supports titles whose authoritative identity is an
-        # independent official website rather than a storefront product page.
-        cached_resolution = await self._cached_game_resolution(request.game)
-        resolved = cached_resolution or game_resolution
+        resolved = game_resolution
+        retrieval_started = perf_counter()
         initial_sources = await self.retrieval.retrieve_sources(
             request.question,
             request.game,
             plan=plan,
             game_resolution=resolved,
         )
-        if cached_resolution is None and not self._sources_establish_game_identity(request.game, initial_sources):
-            resolved = await self._resolve_request_game(request)
-            if self._needs_game_confirmation(resolved):
-                outcome = await self.retrieval.investigate(
-                    request=request,
-                    history=history,
-                    plan=plan,
-                    game_resolution=resolved,
-                    initial_sources=[],
-                )
-                return outcome, resolved
+        if timings_ms is not None:
+            timings_ms["retrieval_initial"] = self._elapsed_ms(retrieval_started)
+        resolution_started = perf_counter()
+        resolved = await self._resolve_request_game(request)
+        if timings_ms is not None:
+            timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
+        if self._needs_game_confirmation(resolved):
+            outcome = await self.retrieval.investigate(
+                request=request,
+                history=history,
+                plan=plan,
+                game_resolution=resolved,
+                initial_sources=[],
+            )
+            return outcome, resolved
+        if (
+            not initial_sources
+            and resolved.is_confirmed
+            and self._resolution_added_identity(game_resolution, resolved)
+        ):
+            # The first wave may have been built before aliases/official
+            # identity were known, or its model-generated query may be too
+            # narrow. Retry once with a local plan that preserves the full
+            # question. This improves recall without spending another LLM
+            # call or fabricating an answer without evidence.
+            fallback_plan = fallback_search_plan(question=request.question)
+            retry_started = perf_counter()
+            initial_sources = await self.retrieval.retrieve_sources(
+                request.question,
+                request.game,
+                plan=fallback_plan,
+                game_resolution=resolved,
+            )
+            if timings_ms is not None:
+                timings_ms["retrieval_retry"] = self._elapsed_ms(retry_started)
+            if initial_sources:
+                plan = merge_search_plans(plan, fallback_plan)
+        investigation_started = perf_counter()
         outcome = await self.retrieval.investigate(
             request=request,
             history=history,
@@ -310,36 +362,34 @@ class QuestAgent:
             game_resolution=resolved,
             initial_sources=initial_sources,
         )
+        if timings_ms is not None:
+            timings_ms["investigation"] = self._elapsed_ms(investigation_started)
         return outcome, resolved
 
-    async def _cached_game_resolution(self, game: str) -> GameResolution | None:
-        cached_lookup = getattr(self.search_provider, "get_cached_game_resolution", None)
-        if not callable(cached_lookup):
-            return None
-        cached = await cached_lookup(game)
-        if cached is not None and cached.is_confirmed and not cached.ambiguous:
-            return cached
-        return None
-
     @staticmethod
-    def _sources_establish_game_identity(game: str, sources: list[Source]) -> bool:
-        """Accept only an exact, opaque product identity from first retrieval.
-
-        ``source_type`` reflects the query lane used to fetch a result, not a
-        proof that the page uniquely identifies a game.  In particular, a
-        wiki/guide (and even a result retrieved through the ``official`` lane)
-        can mention several titles.  A recognised store product URL carries a
-        stable product identifier, so it is safe to use as the cheap bypass
-        for the slower title-resolution step.
-        """
-        return any(
-            is_platform_product_url(str(source.url))
-            and matches_game_identity(
-                text=f"{source.title} {source.url} {source.evidence or source.snippet or ''}",
-                game_names=[game],
-            )
-            for source in sources
-        )
+    def _resolution_added_identity(before: GameResolution, after: GameResolution) -> bool:
+        """Whether resolution added usable server-discovered identity evidence."""
+        before_values = {
+            str(value).casefold()
+            for value in [
+                *before.aliases,
+                *before.platform_urls,
+                *before.official_urls,
+                *before.identity_urls,
+                *before.database_domains,
+            ]
+        }
+        after_values = {
+            str(value).casefold()
+            for value in [
+                *after.aliases,
+                *after.platform_urls,
+                *after.official_urls,
+                *after.identity_urls,
+                *after.database_domains,
+            ]
+        }
+        return bool(after_values - before_values)
 
     async def _retrieve_with_refinement(
         self,
@@ -392,6 +442,7 @@ class QuestAgent:
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
+        started = perf_counter()
         answer_kwargs = dict(
             request=request,
             sources=state["sources"],
@@ -401,7 +452,13 @@ class QuestAgent:
         )
         self._add_optional_argument(self.llm.answer, answer_kwargs, "investigation", state["investigation"])
         answer = await self.llm.answer(**answer_kwargs)
-        return {**state, "answer": answer}
+        return {**state, "answer": answer, "timings_ms": {
+            **state["timings_ms"], "answer": self._elapsed_ms(started)
+        }}
+
+    @staticmethod
+    def _elapsed_ms(started: float) -> int:
+        return round((perf_counter() - started) * 1000)
 
     @staticmethod
     def _add_optional_argument(callable_obj, kwargs: dict, name: str, value) -> None:

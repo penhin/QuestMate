@@ -801,3 +801,27 @@ def test_summary_reports_quality_dimensions_and_segments() -> None:
     assert summary["by_expected_behavior"]["answer"]["needs_game_confirmation_rate"] == 0
     assert summary["by_expected_behavior"]["confirmation"]["needs_game_confirmation_rate"] == 1
     assert summary["needs_game_confirmation_rate"] == 0.5
+
+
+def test_summary_aggregates_stage_timings_without_case_details() -> None:
+    results = [
+        {
+            "case": {"category": "boss", "split": "dev", "tier": "mainstream", "difficulty": "standard", "expected_behavior": "answer"},
+            "evaluation": {"passed": True, "source_count": 1},
+            "latency_ms": 100,
+            "timings_ms": {"retrieval_initial": 40, "answer": 30},
+        },
+        {
+            "case": {"category": "boss", "split": "dev", "tier": "mainstream", "difficulty": "standard", "expected_behavior": "answer"},
+            "evaluation": {"passed": True, "source_count": 1},
+            "latency_ms": 120,
+            "timings_ms": {"retrieval_initial": 60, "answer": 20},
+        },
+    ]
+
+    summary = summarize(results)
+
+    assert summary["latency_breakdown_ms"]["retrieval_initial"] == {
+        "p50": 60, "p95": 60, "count": 2,
+    }
+    assert summary["latency_breakdown_ms"]["answer"]["p50"] == 30
