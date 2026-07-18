@@ -791,7 +791,7 @@ class GuideLLM:
                     continue
                 supplemental_claims.append(claim)
                 cited_source_indexes.add(claim.source_index)
-                if len(supplemental_claims) >= 3:
+                if len(supplemental_claims) >= 5:
                     break
             if supplemental_claims:
                 rendered.append(
