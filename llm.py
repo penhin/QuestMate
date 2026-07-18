@@ -117,7 +117,9 @@ class GuideLLM:
 
         try:
             content = await provider.complete(
-                max_tokens=700,
+                # Structured planning must leave room for providers that emit
+                # hidden reasoning before their final JSON payload.
+                max_tokens=1400,
                 temperature=0,
                 system=self._search_planner_system_prompt(),
                 user=self._planner_user_prompt(
