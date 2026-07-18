@@ -35,14 +35,30 @@ def merge_source_evidence(*, preferred: Source, other: Source) -> Source:
     )
 
 
-def source_rank(*, source: Source, query: str, intent: str, version_sensitive: bool = False) -> float:
+def source_rank(
+    *,
+    source: Source,
+    query: str,
+    intent: str,
+    version_sensitive: bool = False,
+    entity_groups: list[list[str]] | None = None,
+) -> float:
     text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
     evidence_text = (source.evidence or source.snippet or "").casefold()
-    tokens = question_relevance_tokens(query)
-    coverage = sum(1 for token in tokens if token_in_text(token, text)) / max(len(tokens), 1)
-    evidence_coverage = sum(
-        1 for token in tokens if token_in_text(token, evidence_text)
-    ) / max(len(tokens), 1)
+    groups = entity_groups or []
+    if groups:
+        coverage = sum(
+            1 for group in groups if any(token_in_text(value.casefold(), text) for value in group)
+        ) / len(groups)
+        evidence_coverage = sum(
+            1 for group in groups if any(token_in_text(value.casefold(), evidence_text) for value in group)
+        ) / len(groups)
+    else:
+        # Fallback plans intentionally preserve the full user query. This is a
+        # weak, vocabulary-free tie-breaker rather than an eligibility gate.
+        tokens = question_relevance_tokens(query)
+        coverage = sum(1 for token in tokens if token_in_text(token, text)) / max(len(tokens), 1)
+        evidence_coverage = sum(1 for token in tokens if token_in_text(token, evidence_text)) / max(len(tokens), 1)
     retrieval_score = min(max(source.score or 0.5, 0), 1)
     version_score = 1.0 if source.game_version or source.published_at else 0.0
     if not version_sensitive and intent not in VERSION_SENSITIVE_INTENTS:
@@ -66,6 +82,7 @@ def rank_sources(
     intent: str,
     max_results: int,
     version_sensitive: bool = False,
+    entity_groups: list[list[str]] | None = None,
 ) -> list[Source]:
     ranked_by_url: dict[str, tuple[float, Source]] = {}
     for source in sources:
@@ -75,6 +92,7 @@ def rank_sources(
             query=query,
             intent=intent,
             version_sensitive=version_sensitive,
+            entity_groups=entity_groups,
         )
         current = ranked_by_url.get(key)
         if current is None or rank > current[0]:

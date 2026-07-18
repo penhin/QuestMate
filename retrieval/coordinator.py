@@ -171,6 +171,7 @@ class RetrievalCoordinator:
                     intent=merged_plan.intent,
                     max_results=self.max_results,
                     version_sensitive=merged_plan.version_sensitive,
+                    entity_groups=merged_plan.named_entity_groups,
                 )
                 attempted_queries = list(dict.fromkeys([
                     *investigation.attempted_queries,
@@ -239,6 +240,7 @@ class RetrievalCoordinator:
                 intent=merged_plan.intent,
                 max_results=self.max_results,
                 version_sensitive=merged_plan.version_sensitive,
+                entity_groups=merged_plan.named_entity_groups,
             )
             refined = True
             active_game_resolution = self._with_discovered_wiki_domains(
@@ -325,6 +327,7 @@ class RetrievalCoordinator:
             intent=plan.intent,
             max_results=self.max_results,
             version_sensitive=plan.version_sensitive,
+            entity_groups=plan.named_entity_groups,
         )
         logger.info(
             "retrieval.completed",

@@ -1,6 +1,6 @@
 import pytest
 
-from ai.fallback_planning import fallback_search_plan, infer_intent
+from ai.fallback_planning import fallback_search_plan
 from config import Settings
 from quality_policy import MAX_QUERIES_PER_PLANNED_QUERY, MAX_SEARCH_QUERIES, SOURCE_POLICIES
 from retrieval.coordinator import merge_search_plans
@@ -214,16 +214,16 @@ def test_fallback_latin_fragment_never_replaces_unknown_relationship() -> None:
 
     plan = fallback_search_plan(question=question)
 
-    assert plan.aliases == ["DLC"]
+    assert plan.aliases == []
     assert all("阵营声望继承关系" in query.query for query in plan.queries)
 
 
-def test_overlapping_fallback_signals_choose_specific_relation_without_losing_subject() -> None:
+def test_fallback_never_classifies_a_relation_from_fixed_signals() -> None:
     plan = fallback_search_plan(question="Moon Seal 在哪里用？")
 
-    assert infer_intent("Moon Seal 在哪里用？") == "item_usage"
-    assert plan.aliases == ["Moon Seal"]
-    assert all("Moon Seal" in query.query for query in plan.queries)
+    assert plan.intent == "general"
+    assert plan.aliases == []
+    assert all(query.query == "Moon Seal 在哪里用？" for query in plan.queries)
 
 
 def test_fallback_plan_bounds_long_unclassified_questions() -> None:

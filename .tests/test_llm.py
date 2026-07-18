@@ -112,6 +112,34 @@ def test_answer_prompt_exposes_only_direct_source_indexed_claims() -> None:
     assert 'source_indexes="[2]"' not in prompt
 
 
+def test_claim_binding_is_rendered_only_when_source_matches_claim() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        )
+    ]
+
+    rendered = GuideLLM._render_claim_bound_answer(
+        answer="It is inside the eastern archive.[1]{C1_1}",
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+    rejected = GuideLLM._render_claim_bound_answer(
+        answer="It is inside the eastern archive.[2]{C1_1}",
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert rendered.endswith("[1]")
+    assert "{C1_1}" not in rendered
+    assert "[2]" not in rejected
+
+
 def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
     answer_prompt = GuideLLM._answer_system_prompt()
     revision_prompt = GuideLLM._answer_revision_system_prompt()
@@ -560,35 +588,30 @@ def test_search_planner_sanitizes_aliases() -> None:
     assert aliases == ["Malenia", "Blade of Miquella"]
 
 
-def test_fallback_search_plan_uses_intent_specific_queries() -> None:
+def test_fallback_search_plan_preserves_questions_without_intent_templates() -> None:
     boss_plan = GuideLLM._fallback_search_plan(question="女武神怎么打？")
     item_plan = GuideLLM._fallback_search_plan(question="石剑钥匙在哪里获得？")
     usage_plan = GuideLLM._fallback_search_plan(question="灌铅骰子有什么用？")
     mechanic_plan = GuideLLM._fallback_search_plan(question="如何开启亲亲模式？")
 
-    assert boss_plan.intent == "boss_strategy"
-    assert any("dodge timing" in query.query for query in boss_plan.queries)
-    assert item_plan.intent == "item_location"
-    assert any("merchant" in query.query or "location" in query.query for query in item_plan.queries)
-    assert usage_plan.intent == "item_usage"
-    assert any("effect" in query.query or "what does" in query.query for query in usage_plan.queries)
-    assert mechanic_plan.intent == "game_mechanic"
-    assert any("unlock" in query.query or "trigger" in query.query for query in mechanic_plan.queries)
+    for plan, question in ((boss_plan, "女武神怎么打？"), (item_plan, "石剑钥匙在哪里获得？"), (usage_plan, "灌铅骰子有什么用？"), (mechanic_plan, "如何开启亲亲模式？")):
+        assert plan.intent == "general"
+        assert all(query.query == question for query in plan.queries)
 
 
 def test_fallback_search_plan_keeps_embedded_english_entity_compact() -> None:
     plan = GuideLLM._fallback_search_plan(question="如何开启 Kissing Mode？请给出具体触发步骤。")
 
-    assert plan.aliases == ["Kissing Mode"]
-    assert all("Kissing Mode" in query.query for query in plan.queries)
+    assert plan.aliases == []
+    assert all(query.query == "如何开启 Kissing Mode？请给出具体触发步骤。" for query in plan.queries)
     assert any("具体触发步骤" in query.query for query in plan.queries)
 
 
 def test_fallback_search_plan_normalizes_smart_apostrophe_in_entity() -> None:
     plan = GuideLLM._fallback_search_plan(question="如何进入 Wing’s Rest？")
 
-    assert plan.aliases == ["Wing's Rest"]
-    assert all("s Rest" != query.query for query in plan.queries)
+    assert plan.aliases == []
+    assert all("Wing's Rest" in query.query for query in plan.queries)
 
 
 def test_exact_identifiers_are_preserved_without_domain_rules() -> None:
@@ -825,7 +848,7 @@ async def test_refinement_uses_first_pass_gap_and_returns_one_query() -> None:
     assert request.question in provider.calls[0]["user"]
 
 
-def test_contextual_search_question_merges_short_followup() -> None:
+def test_contextual_search_question_does_not_guess_followup_semantics() -> None:
     request = ChatRequest(game="Look Outside", question="就是 Look Outside")
     history = [
         SessionMessage(role="user", content="如何在 Look Outside 开启亲亲模式"),
@@ -834,8 +857,7 @@ def test_contextual_search_question_merges_short_followup() -> None:
 
     contextual = GuideLLM._contextual_search_question(request=request, history=history)
 
-    assert "如何在 Look Outside 开启亲亲模式" in contextual
-    assert "就是 Look Outside" in contextual
+    assert contextual == "就是 Look Outside"
 
 
 def test_contextual_search_question_keeps_new_short_question_standalone() -> None:
@@ -847,7 +869,7 @@ def test_contextual_search_question_keeps_new_short_question_standalone() -> Non
     assert contextual == "钥匙在哪？"
 
 
-def test_contextual_search_question_links_dependency_followup() -> None:
+def test_contextual_search_question_does_not_infer_dependency_followup() -> None:
     request = ChatRequest(game="Niche Game", question="为什么没有该钥匙？")
     history = [
         SessionMessage(role="user", content="怎么进入目标区域？"),
@@ -856,8 +878,7 @@ def test_contextual_search_question_links_dependency_followup() -> None:
 
     contextual = GuideLLM._contextual_search_question(request=request, history=history)
 
-    assert "怎么进入目标区域" in contextual
-    assert "为什么没有该钥匙" in contextual
+    assert contextual == "为什么没有该钥匙？"
 
 
 def test_deepseek_uses_openai_compatible_provider() -> None:

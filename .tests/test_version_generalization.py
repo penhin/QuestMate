@@ -14,7 +14,7 @@ from schemas import ChatRequest
 def test_version_dimension_is_orthogonal_to_location_intent() -> None:
     plan = fallback_search_plan(question="当前版本月光钥匙在哪？")
 
-    assert plan.intent == "item_location"
+    assert plan.intent == "general"
     assert plan.version_sensitive
     assert is_version_sensitive_question("Moon Key location in v2.01")
     assert is_version_sensitive_question("Moon Key location in version 2.01")

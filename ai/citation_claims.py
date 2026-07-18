@@ -14,6 +14,7 @@ def build_citation_claims(
     question: str,
     sources: list[Source],
     eligible_source_indexes: set[int],
+    entity_groups: list[list[str]] | None = None,
     max_claims: int = 8,
 ) -> list[CitationClaim]:
     """Split direct evidence into bounded claims without an extra model call.
@@ -24,6 +25,7 @@ def build_citation_claims(
     available evidence span.
     """
     tokens = question_relevance_tokens(question)
+    groups = entity_groups or []
     claims: list[CitationClaim] = []
     for source_index, source in enumerate(sources, start=1):
         if source_index not in eligible_source_indexes:
@@ -32,7 +34,7 @@ def build_citation_claims(
         ranked = sorted(
             enumerate(passages),
             key=lambda item: (
-                -_passage_score(item[1], tokens)[0],
+                -_passage_score(item[1], tokens, groups)[0],
                 len(item[1]),
                 item[0],
             ),
@@ -41,7 +43,7 @@ def build_citation_claims(
         for position, passage in ranked:
             if selected >= 3 or len(claims) >= max_claims:
                 break
-            if _passage_score(passage, tokens)[0] <= 0:
+            if _passage_score(passage, tokens, groups)[0] <= 0:
                 continue
             claims.append(CitationClaim(
                 claim_id=f"C{source_index}_{position + 1}",
@@ -65,8 +67,15 @@ def _passages(evidence: str) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _passage_score(passage: str, tokens: list[str]) -> tuple[int, int]:
+def _passage_score(
+    passage: str, tokens: list[str], entity_groups: list[list[str]] | None = None
+) -> tuple[int, int]:
     lowered = passage.casefold()
+    if entity_groups:
+        matches = sum(
+            1 for group in entity_groups if any(token_in_text(value.casefold(), lowered) for value in group)
+        )
+        return matches, -len(passage)
     matches = sum(
         1
         for token in tokens

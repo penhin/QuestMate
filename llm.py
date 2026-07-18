@@ -12,7 +12,6 @@ from config import Settings, get_settings
 from ai.fallback_planning import (
     fallback_search_plan,
     fallback_search_subject,
-    infer_intent,
     is_short_followup,
 )
 from ai.investigation import parse_answer_completeness, parse_investigation_state
@@ -256,7 +255,7 @@ class GuideLLM:
             return self._fallback_answer(game=request.game, question=request.question, sources=sources)
 
         try:
-            return await provider.complete(
+            raw_answer = await provider.complete(
                 max_tokens=2400,
                 temperature=0.2,
                 system=self._answer_system_prompt(),
@@ -268,6 +267,9 @@ class GuideLLM:
                     history=history or [],
                     investigation=investigation,
                 ),
+            )
+            return self._render_claim_bound_answer(
+                answer=raw_answer, request=request, sources=sources, plan=plan
             )
         except Exception as exc:
             # Provider failures (rate limit, malformed upstream response, or
@@ -325,7 +327,9 @@ class GuideLLM:
         except Exception:
             return answer
 
-        cleaned = improved.strip()
+        cleaned = self._render_claim_bound_answer(
+            answer=improved, request=request, sources=sources, plan=plan
+        ).strip()
         candidate = cleaned if cleaned else answer
         if self._answer_has_critical_evidence_issue(
             request=request, answer=candidate, sources=sources, plan=plan
@@ -575,7 +579,7 @@ class GuideLLM:
             f"<evidence_policy>{GuideLLM._evidence_policy_for_level(evidence_level)}</evidence_policy>\n"
             f"<version_evidence>{version_status}</version_evidence>\n"
             f"<answer_shape>{GuideLLM._answer_shape_for_intent(intent)}</answer_shape>\n"
-            f"<citation_claims>{GuideLLM._citation_claim_context(question=evidence_question, sources=sources) or 'No directly grounded claims are available.'}</citation_claims>\n"
+            f"<citation_claims>{GuideLLM._citation_claim_context(question=evidence_question, sources=sources, entity_groups=plan.named_entity_groups if plan else None) or 'No directly grounded claims are available.'}</citation_claims>\n"
             f"<investigation_state>{GuideLLM._investigation_context(investigation)}</investigation_state>\n"
             f"<recent_conversation>{GuideLLM._history_context(history) or 'No prior messages.'}</recent_conversation>\n"
             f"<current_question>{request.question}</current_question>\n"
@@ -619,7 +623,9 @@ class GuideLLM:
         return "\n".join(parts)
 
     @staticmethod
-    def _citation_claim_context(*, question: str, sources: list[Source]) -> str:
+    def _citation_claim_context(
+        *, question: str, sources: list[Source], entity_groups: list[list[str]] | None = None
+    ) -> str:
         """Expose a bounded, source-indexed claim ledger to answer generation.
 
         This is deliberately deterministic: it does not add another model
@@ -637,12 +643,43 @@ class GuideLLM:
             question=question,
             sources=sources,
             eligible_source_indexes=eligible_indexes,
+            entity_groups=entity_groups,
         )
         return "\n".join(
             f'<claim id="{claim.claim_id}" source_indexes="[{claim.source_index}]">'
             f"{claim.statement}</claim>"
             for claim in claims
         )
+
+    @staticmethod
+    def _render_claim_bound_answer(
+        *, answer: str, request: ChatRequest, sources: list[Source], plan: SearchPlan | None
+    ) -> str:
+        """Validate optional model Claim IDs and remove them from the user view.
+
+        Compatibility answers without an internal marker keep the existing
+        citation policy. A malformed marker is removed rather than permitted to
+        create an invalid source-to-claim binding.
+        """
+        evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
+        claims = build_citation_claims(
+            question=evidence_question,
+            sources=sources,
+            eligible_source_indexes={
+                index for index, source in enumerate(sources, start=1)
+                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
+            },
+            entity_groups=plan.named_entity_groups if plan else None,
+        )
+        claim_sources = {claim.claim_id: claim.source_index for claim in claims}
+
+        def render(match: re.Match[str]) -> str:
+            source_index = int(match.group(1))
+            claim_id = match.group(2)
+            return f"[{source_index}]" if claim_sources.get(claim_id) == source_index else ""
+
+        return re.sub(r"\[(\d+)\]\{(C\d+_\d+)\}", render, answer).strip()
+
 
     @staticmethod
     def _investigation_context(investigation: InvestigationState | None) -> str:
@@ -1087,7 +1124,7 @@ class GuideLLM:
 
     @staticmethod
     def _infer_intent(question: str) -> str:
-        return infer_intent(question)
+        return "general"
 
     @staticmethod
     def _answer_needs_revision(
