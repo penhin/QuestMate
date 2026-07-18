@@ -658,15 +658,10 @@ class GuideLLM:
         entity gate.  The model may compose rows, but every factual sentence
         must retain the row's source index.
         """
-        eligible_indexes = {
-            index
-            for index, source in enumerate(sources, start=1)
-            if GuideLLM._has_question_specific_sources(question=question, sources=[source])
-        }
         claims = build_citation_claims(
             question=question,
             sources=sources,
-            eligible_source_indexes=eligible_indexes,
+            eligible_source_indexes=set(range(1, len(sources) + 1)),
             entity_groups=entity_groups,
         )
         return "\n".join(
@@ -689,10 +684,7 @@ class GuideLLM:
         claims = build_citation_claims(
             question=evidence_question,
             sources=sources,
-            eligible_source_indexes={
-                index for index, source in enumerate(sources, start=1)
-                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
-            },
+            eligible_source_indexes=set(range(1, len(sources) + 1)),
             entity_groups=plan.named_entity_groups if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
@@ -723,10 +715,7 @@ class GuideLLM:
         claims = build_citation_claims(
             question=evidence_question,
             sources=sources,
-            eligible_source_indexes={
-                index for index, source in enumerate(sources, start=1)
-                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
-            },
+            eligible_source_indexes=set(range(1, len(sources) + 1)),
             entity_groups=plan.named_entity_groups if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
