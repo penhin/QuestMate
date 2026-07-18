@@ -1011,7 +1011,7 @@ class GuideLLM:
             ),
             aliases=sanitized_aliases,
             queries=sanitized_queries,
-            missing_info=plan.missing_info[:4],
+            missing_info=[value.strip() for value in plan.missing_info if value.strip()][:4],
         )
 
     @staticmethod

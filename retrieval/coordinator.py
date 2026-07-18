@@ -91,8 +91,9 @@ class RetrievalCoordinator:
             evidence_gaps=[
                 EvidenceGap(kind="other", description=value, query_hint=value)
                 for value in plan.missing_info
+                if value.strip()
             ],
-            unresolved_questions=plan.missing_info,
+            unresolved_questions=[value for value in plan.missing_info if value.strip()],
             attempted_queries=[query.query for query in plan.queries],
             aliases=plan.aliases,
         )

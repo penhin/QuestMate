@@ -470,6 +470,7 @@ def test_search_plan_parser_accepts_generic_json_shape_variants() -> None:
     assert plan.intent == "game_mechanic"
     assert plan.named_entity_groups == [["Quartz Relay"]]
     assert plan.queries[0].source_type == "web"
+    assert plan.missing_info == []
 
 
 def test_search_plan_parser_extracts_complete_object_from_model_wrapper() -> None:
