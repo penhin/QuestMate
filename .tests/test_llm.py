@@ -207,6 +207,7 @@ def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
 
     assert "atomic evidence ledger" in answer_prompt
     assert "fact absent from that row" in answer_prompt
+    assert "every needed Claim ID" in answer_prompt
     assert "atomic permitted evidence passages" in revision_prompt
 
 
