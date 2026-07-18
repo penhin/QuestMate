@@ -785,8 +785,15 @@ class GuideLLM:
             rendered.append(f"{text}{citations}")
             cited_source_indexes.update(indexes)
         if rendered:
+            supplemental_pool = build_citation_claims(
+                question=evidence_question,
+                sources=sources,
+                eligible_source_indexes=set(range(1, len(sources) + 1)),
+                entity_groups=plan.named_entity_groups if plan else None,
+                max_claims=16,
+            )
             supplemental_claims: list[CitationClaim] = []
-            for claim in claims:
+            for claim in supplemental_pool:
                 if claim.source_index in cited_source_indexes:
                     continue
                 supplemental_claims.append(claim)
