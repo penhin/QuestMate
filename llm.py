@@ -40,6 +40,7 @@ from query_tokens import exact_identifiers, question_relevance_tokens
 from schemas import (
     AnswerCompletenessAssessment,
     ChatRequest,
+    CitationClaim,
     GameResolution,
     InvestigationState,
     PlannedSearchQuery,
@@ -764,11 +765,21 @@ class GuideLLM:
             unbound_block_count=unbound_blocks,
             claim_count=len(claims),
         )
+        if claims:
+            return GuideLLM._claim_ledger_fallback(claims)
         return GuideLLM._conservative_answer(
             request=request,
             sources=sources,
             plan=plan,
         )
+
+    @staticmethod
+    def _claim_ledger_fallback(claims: list[CitationClaim]) -> str:
+        """Return only atomic evidence when the model fails Claim selection."""
+        lines = ["已核实的资料："]
+        for claim in claims[:4]:
+            lines.append(f"- {claim.statement}[{claim.source_index}]")
+        return "\n".join(lines)
 
 
     @staticmethod

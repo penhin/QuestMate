@@ -197,8 +197,9 @@ def test_structured_answer_drops_unbound_fact_blocks() -> None:
         plan=SearchPlan(intent="general"),
     )
 
-    assert "东侧档案库" not in rendered
-    assert "没有找到能直接说明" in rendered
+    assert "The Quartz Relay is inside the eastern archive." in rendered
+    assert rendered.endswith("[1]")
+    assert "没有找到能直接说明" not in rendered
 
 
 def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
