@@ -140,6 +140,26 @@ def test_claim_binding_is_rendered_only_when_source_matches_claim() -> None:
     assert "[2]" not in rejected
 
 
+def test_structured_answer_renders_citations_from_claim_ids() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        )
+    ]
+
+    rendered = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"在东侧档案库。","claim_ids":["C1_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert rendered == "在东侧档案库。[1]"
+
+
 def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
     answer_prompt = GuideLLM._answer_system_prompt()
     revision_prompt = GuideLLM._answer_revision_system_prompt()

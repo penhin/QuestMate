@@ -267,8 +267,9 @@ class GuideLLM:
                     history=history or [],
                     investigation=investigation,
                 ),
+                json_mode=True,
             )
-            return self._render_claim_bound_answer(
+            return self._render_structured_answer(
                 answer=raw_answer, request=request, sources=sources, plan=plan
             )
         except Exception as exc:
@@ -679,6 +680,51 @@ class GuideLLM:
             return f"[{source_index}]" if claim_sources.get(claim_id) == source_index else ""
 
         return re.sub(r"\[(\d+)\]\{(C\d+_\d+)\}", render, answer).strip()
+
+    @staticmethod
+    def _render_structured_answer(
+        *, answer: str, request: ChatRequest, sources: list[Source], plan: SearchPlan | None
+    ) -> str:
+        """Render source citations from model-selected Claim IDs, never raw indexes."""
+        try:
+            data = json.loads(answer)
+            blocks = data.get("blocks") if isinstance(data, dict) else None
+            if not isinstance(blocks, list):
+                raise ValueError("missing blocks")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return GuideLLM._render_claim_bound_answer(
+                answer=answer, request=request, sources=sources, plan=plan
+            )
+
+        evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
+        claims = build_citation_claims(
+            question=evidence_question,
+            sources=sources,
+            eligible_source_indexes={
+                index for index, source in enumerate(sources, start=1)
+                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
+            },
+            entity_groups=plan.named_entity_groups if plan else None,
+        )
+        claim_sources = {claim.claim_id: claim.source_index for claim in claims}
+        rendered: list[str] = []
+        for block in blocks[:8]:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text") or "").strip()
+            claim_ids = block.get("claim_ids")
+            if not text or not isinstance(claim_ids, list):
+                continue
+            indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
+            if claim_ids and not indexes:
+                continue
+            citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
+            rendered.append(f"{text}{citations}")
+        if rendered:
+            return "\n\n".join(rendered)
+        return GuideLLM._render_claim_bound_answer(
+            answer=answer, request=request, sources=sources, plan=plan
+        )
 
 
     @staticmethod
