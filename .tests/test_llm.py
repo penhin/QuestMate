@@ -64,6 +64,13 @@ def test_prompts_mark_untrusted_data_and_protect_secrets() -> None:
     assert "阶段和危险招式" in answer_user
 
 
+def test_answer_revision_cannot_add_new_facts_or_detach_citations() -> None:
+    prompt = GuideLLM._answer_revision_system_prompt()
+
+    assert "immediately after the sentence or bullet it supports" in prompt
+    assert "Do not introduce any new factual claim" in prompt
+
+
 def test_source_context_respects_budget_without_cutting_source_boundary() -> None:
     context = GuideLLM._source_context(
         [
@@ -79,6 +86,30 @@ def test_source_context_respects_budget_without_cutting_source_boundary() -> Non
     assert len(context) <= 600
     assert context.startswith('<source index="1"')
     assert context.endswith("</source>")
+
+
+def test_answer_prompt_exposes_only_direct_source_indexed_claims() -> None:
+    request = ChatRequest(game="Example Game", question="Where is Moonstone acquired?")
+    prompt = GuideLLM._answer_user_prompt(
+        request=request,
+        history=[],
+        plan=SearchPlan(intent="item_location", aliases=["Moonstone"]),
+        sources=[
+            Source(
+                title="Moonstone route",
+                url="https://example.com/moonstone",
+                evidence="Moonstone is acquired from the observatory chest.",
+            ),
+            Source(
+                title="Combat overview",
+                url="https://example.com/combat",
+                evidence="Combat tips and enemy behavior.",
+            ),
+        ],
+    )
+
+    assert '<claim id="C1" source_indexes="[1]">Moonstone is acquired' in prompt
+    assert 'claim id="C2"' not in prompt
 
 
 def test_investigation_context_is_bounded_valid_json_without_raw_truncation() -> None:
@@ -369,6 +400,24 @@ def test_structured_entity_groups_are_grounded_and_enforce_group_and_alias_or() 
     assert GuideLLM._has_question_specific_sources(
         question=evidence_question,
         sources=[translated_complete],
+    )
+
+
+def test_planner_entity_groups_do_not_reject_direct_original_language_evidence() -> None:
+    request = ChatRequest(game="Elden Ring", question="女武神玛莲妮亚怎么打？")
+    plan = SearchPlan(
+        intent="boss_strategy",
+        named_entity_groups=[["女武神玛莲妮亚", "Malenia"], ["Elden Ring"]],
+    )
+    source = Source(
+        title="《艾尔登法环》女武神玛莲妮亚招式应对教程",
+        url="https://example.com/malenia",
+        evidence="女武神玛莲妮亚的招式应对与战斗技巧。",
+    )
+
+    assert GuideLLM._has_question_specific_sources(
+        question=GuideLLM._evidence_question(request=request, plan=plan),
+        sources=[source],
     )
 
 

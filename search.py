@@ -449,7 +449,15 @@ class TavilySearchProvider:
                         game_names=[game, *game_aliases],
                     ):
                         continue
-                search_context = f"{query} {search_query} {' '.join(aliases)}"
+                # Score a page against the one outbound query that produced
+                # it.  That query may use either the player's localized name
+                # or one translated alias, but never requires both to appear
+                # on the same page.
+                search_context = search_query
+                query_confirms_game = any(
+                    name.strip() and name.casefold() in search_query.casefold()
+                    for name in [game, *game_aliases]
+                )
                 built = build_source(
                     item=item,
                     source_policy=effective_source,
@@ -464,6 +472,7 @@ class TavilySearchProvider:
                     extract_version=self._extract_game_version,
                     parse_datetime=self._parse_source_datetime,
                     required_entity_groups=required_entity_groups,
+                    query_confirms_game=query_confirms_game,
                 )
                 if built is None:
                     continue

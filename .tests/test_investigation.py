@@ -162,6 +162,50 @@ async def test_investigation_follows_dependencies_until_path_is_complete() -> No
     assert {source.title for source in outcome.sources} == {"Dependency 1", "Dependency 2", "Dependency 3"}
 
 
+async def test_direct_single_entity_evidence_skips_expensive_investigation() -> None:
+    class EmptyKnowledge:
+        async def retrieve(self, *, game: str, query: str):
+            return []
+
+    class Search:
+        async def search(self, query: str, game: str, **kwargs):
+            return [
+                Source(
+                    title="Moonstone acquisition",
+                    url="https://example.com/moonstone",
+                    evidence="Moonstone is acquired from the observatory chest.",
+                    source_type="wiki",
+                )
+            ]
+
+    class Investigator:
+        def __init__(self):
+            self.calls = 0
+
+        async def update_investigation(self, **kwargs):
+            self.calls += 1
+            raise AssertionError("direct, single-entity evidence should use the fast path")
+
+    investigator = Investigator()
+    coordinator = RetrievalCoordinator(
+        knowledge=EmptyKnowledge(), search_provider=Search(), llm=investigator, max_results=5
+    )
+    request = ChatRequest(game="Example Game", question="Where is Moonstone acquired?")
+
+    outcome = await coordinator.investigate(
+        request=request,
+        history=[],
+        plan=SearchPlan(intent="item_location", aliases=["Moonstone"]),
+        game_resolution=GameResolution(
+            input_name=request.game, confirmed_name=request.game, confidence=1
+        ),
+    )
+
+    assert investigator.calls == 0
+    assert len(outcome.sources) == 1
+    assert outcome.investigation.hop_count == 0
+
+
 async def test_answer_completeness_judge_reports_missing_access_step() -> None:
     class JudgeProvider:
         async def complete(self, **kwargs):

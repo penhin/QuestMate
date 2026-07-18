@@ -548,8 +548,13 @@ class GuideLLM:
     ) -> str:
         source_context = GuideLLM._source_context(sources)
         intent = plan.intent if plan else "general"
-        version_sensitive = bool(plan and plan.version_sensitive) or is_version_sensitive_question(
-            request.question
+        # The planner may mark broad tactics as version-sensitive to improve
+        # retrieval ranking. That is not enough to block an otherwise direct
+        # answer: only an explicit current-version question, or inherently
+        # version-bound patch/build intent, requires dated evidence at answer
+        # time.
+        version_sensitive = is_version_sensitive_question(request.question) or (
+            bool(plan and plan.version_sensitive) and intent in {"patch", "build"}
         )
         evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
         evidence_level = GuideLLM._evidence_level(question=evidence_question, sources=sources)
@@ -569,6 +574,7 @@ class GuideLLM:
             f"<evidence_policy>{GuideLLM._evidence_policy_for_level(evidence_level)}</evidence_policy>\n"
             f"<version_evidence>{version_status}</version_evidence>\n"
             f"<answer_shape>{GuideLLM._answer_shape_for_intent(intent)}</answer_shape>\n"
+            f"<citation_claims>{GuideLLM._citation_claim_context(question=evidence_question, sources=sources) or 'No directly grounded claims are available.'}</citation_claims>\n"
             f"<investigation_state>{GuideLLM._investigation_context(investigation)}</investigation_state>\n"
             f"<recent_conversation>{GuideLLM._history_context(history) or 'No prior messages.'}</recent_conversation>\n"
             f"<current_question>{request.question}</current_question>\n"
@@ -610,6 +616,30 @@ class GuideLLM:
             if remaining <= 0:
                 break
         return "\n".join(parts)
+
+    @staticmethod
+    def _citation_claim_context(*, question: str, sources: list[Source]) -> str:
+        """Expose a bounded, source-indexed claim ledger to answer generation.
+
+        This is deliberately deterministic: it does not add another model
+        call, and it never turns a passage into a stronger paraphrase.  A row
+        is eligible only when that single source passes the existing direct
+        entity gate.  The model may compose rows, but every factual sentence
+        must retain the row's source index.
+        """
+        claims: list[str] = []
+        for index, source in enumerate(sources, start=1):
+            if not GuideLLM._has_question_specific_sources(question=question, sources=[source]):
+                continue
+            evidence = " ".join((source.evidence or source.snippet or "").split())
+            if not evidence:
+                continue
+            claims.append(
+                f'<claim id="C{index}" source_indexes="[{index}]">{evidence[:700]}</claim>'
+            )
+            if len(claims) >= 4:
+                break
+        return "\n".join(claims)
 
     @staticmethod
     def _investigation_context(investigation: InvestigationState | None) -> str:
@@ -775,8 +805,8 @@ class GuideLLM:
         if game_resolution is not None and not game_resolution.is_confirmed:
             return True
         intent = plan.intent if plan else GuideLLM._infer_intent(request.question)
-        version_sensitive = bool(plan and plan.version_sensitive) or is_version_sensitive_question(
-            request.question
+        version_sensitive = is_version_sensitive_question(request.question) or (
+            bool(plan and plan.version_sensitive) and intent in {"patch", "build"}
         )
         evidence_required_intents = {
             "item_usage",

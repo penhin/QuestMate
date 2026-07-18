@@ -248,9 +248,23 @@ def _version_focus_token_matches(*, token: str, text: str) -> bool:
 
 
 def evidence_question(*, request: ChatRequest, plan: SearchPlan | None) -> str:
+    game_key = " ".join(request.game.casefold().split())
+    question_key = " ".join(request.question.casefold().split())
+    named_entity_groups = [
+        group
+        for group in (plan.named_entity_groups if plan else [])[:4]
+        # The game is an identity boundary, not an answer entity. Planner
+        # output can redundantly add it as a required group, which rejects
+        # localized pages that otherwise directly answer the question.
+        if not any(" ".join(value.casefold().split()) == game_key for value in group)
+        # A translated entity invented by the planner is a useful retrieval
+        # alias but cannot become a mandatory answer-evidence endpoint. Keep
+        # only groups anchored in the wording the player actually supplied.
+        and any(" ".join(value.casefold().split()) in question_key for value in group)
+    ]
     metadata = {
         "aliases": list((plan.aliases if plan else [])[:6]),
-        "named_entity_groups": list((plan.named_entity_groups if plan else [])[:4]),
+        "named_entity_groups": named_entity_groups,
     }
     if not metadata["aliases"] and not metadata["named_entity_groups"]:
         return request.question

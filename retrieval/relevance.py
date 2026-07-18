@@ -60,6 +60,7 @@ def result_relevance_score(
     question: str,
     game_aliases: list[str] | None = None,
     required_entity_groups: list[list[str]] | None = None,
+    query_confirms_game: bool = False,
 ) -> float:
     raw_text = " ".join(str(item.get(field) or "") for field in ("title", "url", "content"))
     text = raw_text.casefold()
@@ -74,7 +75,12 @@ def result_relevance_score(
         if required_entity_groups
         else source_entity_groups(question=question, game_names=game_names)
     )
-    if not matches_game_name(text=raw_text, game_names=game_names):
+    # A localized guide page may not repeat the original store title in its
+    # title, URL, or excerpt.  It can still be useful if the *trusted query*
+    # explicitly bound the result to this game and the page independently
+    # satisfies the requested entity checks below.  This only admits a
+    # relaxed candidate; strict source quality still requires page identity.
+    if not matches_game_name(text=raw_text, game_names=game_names) and not query_confirms_game:
         return 0
     if required_entity_groups and not required_entity_groups_match(
         groups=required_entity_groups,

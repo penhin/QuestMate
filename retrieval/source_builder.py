@@ -33,6 +33,7 @@ def build_source(
     parse_datetime: Callable[[Any], datetime | None],
     version_sensitive: bool = False,
     required_entity_groups: list[list[str]] | None = None,
+    query_confirms_game: bool = False,
 ) -> BuiltSource | None:
     url = str(item.get("url") or "").strip()
     if not url.startswith(("https://", "http://")):
@@ -52,6 +53,7 @@ def build_source(
         game_aliases=game_aliases,
         question=question,
         required_entity_groups=required_entity_groups,
+        query_confirms_game=query_confirms_game,
     )
     if relevance <= 0:
         return None

@@ -305,9 +305,10 @@ class QuestAgent:
     ) -> tuple[object, GameResolution]:
         """Run a cheap retrieval wave before paying for full investigation.
 
-        Only a server-verified registry entry can bypass title resolution.
-        Search results are evidence for the guide, but never authority to
-        silently select one title among similarly named games.
+        Direct guide evidence can continue the answer path. If the first wave
+        has no evidence at all, recover identity before asking the model to
+        answer. A cached profile is never used as a substitute for the current
+        request's identity decision.
         """
         resolved = game_resolution
         retrieval_started = perf_counter()
@@ -319,19 +320,26 @@ class QuestAgent:
         )
         if timings_ms is not None:
             timings_ms["retrieval_initial"] = self._elapsed_ms(retrieval_started)
-        resolution_started = perf_counter()
-        resolved = await self._resolve_request_game(request)
-        if timings_ms is not None:
-            timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
-        if self._needs_game_confirmation(resolved):
-            outcome = await self.retrieval.investigate(
-                request=request,
-                history=history,
-                plan=plan,
-                game_resolution=resolved,
-                initial_sources=[],
-            )
-            return outcome, resolved
+        if not initial_sources:
+            resolution_started = perf_counter()
+            resolved = await self._resolve_request_game(request)
+            if timings_ms is not None:
+                timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
+            if self._needs_game_confirmation(resolved):
+                # A concrete competing candidate is actionable ambiguity.  An
+                # empty discovery response is only an upstream/retrieval miss;
+                # preserve the supplied title and continue to the conservative
+                # evidence path instead of forcing an unnecessary UI detour.
+                if resolved.ambiguous or resolved.candidates:
+                    outcome = await self.retrieval.investigate(
+                        request=request,
+                        history=history,
+                        plan=plan,
+                        game_resolution=resolved,
+                        initial_sources=[],
+                    )
+                    return outcome, resolved
+                resolved = game_resolution
         if (
             not initial_sources
             and resolved.is_confirmed
@@ -617,7 +625,17 @@ class QuestAgent:
             return current
         if sources or request.metadata.get("confirmed_game") is True:
             return current
-        return await self._resolve_request_game(request)
+        recovered = await self._resolve_request_game(request)
+        # A retrieval miss is not evidence that the title is ambiguous.  In
+        # particular, an identity provider can have a transient miss while a
+        # clearly named game simply lacks indexed material for this question.
+        # Only replace the optimistic request context when discovery actually
+        # found a usable identity or competing candidates.  The former enables
+        # the one cheap retry; the latter is the only case that should interrupt
+        # a normal guide question and ask the player to choose a game.
+        if recovered.is_confirmed or recovered.ambiguous or recovered.candidates:
+            return recovered
+        return current
 
     @staticmethod
     def _confirmed_resolution_from_request(request: ChatRequest) -> GameResolution | None:

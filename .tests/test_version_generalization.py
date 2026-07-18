@@ -140,6 +140,24 @@ def test_current_version_location_requires_dated_context() -> None:
     )
 
 
+def test_boss_plan_version_hint_does_not_require_dated_sources_without_version_question() -> None:
+    request = ChatRequest(game="Example Adventure", question="Moon Queen 怎么打？")
+    source = Source(
+        title="Moon Queen strategy",
+        url="https://example.com/moon-queen",
+        evidence="Moon Queen strategy: dodge the beam, then attack after the recovery.",
+    )
+
+    assert not GuideLLM._should_return_conservative_answer(
+        request=request,
+        sources=[source],
+        plan=SearchPlan(intent="boss_strategy", version_sensitive=True, aliases=["Moon Queen"]),
+        game_resolution=GameResolution(
+            input_name="Example Adventure", confirmed_name="Example Adventure", confidence=1
+        ),
+    )
+
+
 def test_unrelated_dated_page_cannot_make_an_undated_target_current() -> None:
     request = ChatRequest(game="Example Adventure", question="当前版本 Moon Key 在哪？")
     plan = SearchPlan(intent="item_location", version_sensitive=True, aliases=["Moon Key"])

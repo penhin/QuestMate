@@ -161,6 +161,32 @@ def test_unknown_domain_still_requires_correct_game_and_entity_evidence() -> Non
     )
 
 
+def test_query_bound_localized_result_can_be_a_relaxed_candidate_only() -> None:
+    localized = {
+        "title": "月光钥匙获取攻略",
+        "url": "https://long-tail.example/moon-key",
+        "content": "月光钥匙位于观星台的宝箱中。",
+    }
+
+    assert result_relevance_score(
+        item=localized,
+        game="Example Adventure",
+        question="月光钥匙在哪里获得？",
+    ) == 0
+    assert result_relevance_score(
+        item=localized,
+        game="Example Adventure",
+        question="月光钥匙在哪里获得？",
+        query_confirms_game=True,
+    ) > 0
+    assert not is_high_quality_source(
+        item=localized,
+        game="Example Adventure",
+        question="月光钥匙在哪里获得？",
+        source_type="web",
+    )
+
+
 def test_paraphrased_relations_keep_recall_but_require_each_named_endpoint() -> None:
     acquired = {
         "title": "Example Adventure Excalibur",

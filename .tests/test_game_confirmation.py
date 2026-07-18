@@ -311,14 +311,10 @@ def test_unique_high_confidence_identity_continues_without_entity_check() -> Non
 
 
 @pytest.mark.asyncio
-async def test_initial_product_page_never_bypasses_ambiguous_identity_resolution() -> None:
+async def test_empty_initial_retrieval_recovers_ambiguous_identity() -> None:
     class Retrieval:
         async def retrieve_sources(self, *_args, **_kwargs):
-            return [Source(
-                title="Shared Name on Steam",
-                url="https://store.steampowered.com/app/202/Shared_Name/",
-                source_type="official",
-            )]
+            return []
 
         async def investigate(self, *, request, history, plan, game_resolution, initial_sources):
             return type("Outcome", (), {"sources": initial_sources, "plan": plan})()
@@ -352,6 +348,71 @@ async def test_initial_product_page_never_bypasses_ambiguous_identity_resolution
 
     assert provider.resolve_calls == 1
     assert resolved.ambiguous
+
+
+@pytest.mark.asyncio
+async def test_direct_initial_evidence_does_not_force_identity_confirmation() -> None:
+    class Retrieval:
+        async def retrieve_sources(self, *_args, **_kwargs):
+            return [Source(
+                title="Example Game Moonstone guide",
+                url="https://example.com/moonstone",
+                evidence="Moonstone is acquired from the observatory chest.",
+                source_type="wiki",
+            )]
+
+        async def investigate(self, *, request, history, plan, game_resolution, initial_sources):
+            return type("Outcome", (), {"sources": initial_sources, "plan": plan})()
+
+    class Provider:
+        async def resolve_game(self, _game, question=None):
+            raise AssertionError("direct guide evidence should not trigger identity recovery")
+
+    agent = object.__new__(QuestAgent)
+    agent.retrieval = Retrieval()
+    agent.search_provider = Provider()
+    initial = GameResolution(input_name="Example Game", confirmed_name="Example Game", confidence=1)
+
+    outcome, resolved = await agent._retrieve_after_identity_check(
+        request=ChatRequest(game="Example Game", question="Where is Moonstone acquired?"),
+        history=[],
+        plan=SearchPlan(intent="item_location"),
+        game_resolution=initial,
+    )
+
+    assert resolved is initial
+    assert outcome.sources
+
+
+@pytest.mark.asyncio
+async def test_empty_retrieval_and_empty_identity_discovery_do_not_create_false_confirmation() -> None:
+    class Retrieval:
+        async def retrieve_sources(self, *_args, **_kwargs):
+            return []
+
+        async def investigate(self, *, request, history, plan, game_resolution, initial_sources):
+            return type("Outcome", (), {"sources": initial_sources, "plan": plan})()
+
+    class Provider:
+        async def resolve_game(self, game, question=None):
+            return GameResolution(input_name=game, confidence=0)
+
+    request = ChatRequest(game="Known Game", question="Where is the rare item?")
+    initial = GameResolution(input_name=request.game, confirmed_name=request.game, confidence=1)
+    agent = object.__new__(QuestAgent)
+    agent.retrieval = Retrieval()
+    agent.search_provider = Provider()
+
+    outcome, resolved = await agent._retrieve_after_identity_check(
+        request=request,
+        history=[],
+        plan=SearchPlan(intent="item_location"),
+        game_resolution=initial,
+    )
+
+    assert not outcome.sources
+    assert resolved is initial
+    assert not QuestAgent._needs_game_confirmation(resolved)
 
 
 def test_prompt_injection_is_rejected_before_game_resolution() -> None:

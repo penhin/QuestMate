@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import structlog
 
 from quality_policy import MAX_INVESTIGATION_HOPS
+from ai.evidence_policy import evidence_level, evidence_question, requires_semantic_relation_judgment
 from retrieval.evidence_pool import canonical_source_url, rank_sources
 from schemas import ChatRequest, EvidenceGap, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
@@ -95,6 +96,20 @@ class RetrievalCoordinator:
             attempted_queries=[query.query for query in plan.queries],
             aliases=plan.aliases,
         )
+
+        # Most single-entity questions with direct evidence do not need an LLM
+        # judge to rediscover that evidence.  Keeping them on this fast path
+        # removes one model round trip and avoids spending a refinement budget
+        # on optional detail.  Relation questions, version-sensitive requests,
+        # and explicitly declared gaps still use the full investigation loop.
+        evidence_query = evidence_question(request=request, plan=plan)
+        if (
+            evidence_level(question=evidence_query, sources=merged_sources) == "direct"
+            and not plan.missing_info
+            and not plan.version_sensitive
+            and not requires_semantic_relation_judgment(request.question)
+        ):
+            return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
 
         # Do not spend additional LLM calls or follow-up searches when the
         # first retrieval wave has no evidence. The caller may run the cheaper
