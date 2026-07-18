@@ -221,7 +221,10 @@ def test_structured_answer_retains_unreferenced_direct_evidence_chain() -> None:
         answer='{"blocks":[{"text":"继电器在东侧档案库。","claim_ids":["C1_1"]}]}',
         request=request,
         sources=sources,
-        plan=SearchPlan(intent="general"),
+        plan=SearchPlan(
+            intent="general",
+            named_entity_groups=[["Quartz Relay"], ["archive"]],
+        ),
     )
 
     assert "继电器在东侧档案库。[1]" in rendered

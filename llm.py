@@ -25,6 +25,7 @@ from ai.evidence_policy import (
     version_evidence_status,
 )
 from ai.citation_claims import build_citation_claims
+from retrieval.source_quality import token_in_text
 from guide_prompts import (
     answer_completeness_system_prompt,
     answer_revision_system_prompt,
@@ -659,11 +660,9 @@ class GuideLLM:
         entity gate.  The model may compose rows, but every factual sentence
         must retain the row's source index.
         """
-        eligible_indexes = {
-            index
-            for index, source in enumerate(sources, start=1)
-            if GuideLLM._has_question_specific_sources(question=question, sources=[source])
-        }
+        eligible_indexes = GuideLLM._claim_eligible_source_indexes(
+            question=question, sources=sources, entity_groups=entity_groups
+        )
         claims = build_citation_claims(
             question=question,
             sources=sources,
@@ -675,6 +674,27 @@ class GuideLLM:
             f"{claim.statement}</claim>"
             for claim in claims
         )
+
+    @staticmethod
+    def _claim_eligible_source_indexes(
+        *, question: str, sources: list[Source], entity_groups: list[list[str]] | None
+    ) -> set[int]:
+        """Keep direct evidence, plus one anchored side of a multi-entity chain."""
+        eligible = {
+            index
+            for index, source in enumerate(sources, start=1)
+            if GuideLLM._has_question_specific_sources(question=question, sources=[source])
+        }
+        if not entity_groups or len(entity_groups) < 2:
+            return eligible
+        for index, source in enumerate(sources, start=1):
+            source_text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
+            if any(
+                any(token_in_text(name.casefold(), source_text) for name in group)
+                for group in entity_groups
+            ):
+                eligible.add(index)
+        return eligible
 
     @staticmethod
     def _render_claim_bound_answer(
@@ -690,10 +710,11 @@ class GuideLLM:
         claims = build_citation_claims(
             question=evidence_question,
             sources=sources,
-            eligible_source_indexes={
-                index for index, source in enumerate(sources, start=1)
-                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
-            },
+            eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
+                question=evidence_question,
+                sources=sources,
+                entity_groups=plan.named_entity_groups if plan else None,
+            ),
             entity_groups=plan.named_entity_groups if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
@@ -720,10 +741,11 @@ class GuideLLM:
             claims = build_citation_claims(
                 question=evidence_question,
                 sources=sources,
-                eligible_source_indexes={
-                    index for index, source in enumerate(sources, start=1)
-                    if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
-                },
+                eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
+                    question=evidence_question,
+                    sources=sources,
+                    entity_groups=plan.named_entity_groups if plan else None,
+                ),
                 entity_groups=plan.named_entity_groups if plan else None,
             )
             logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
@@ -737,10 +759,11 @@ class GuideLLM:
         claims = build_citation_claims(
             question=evidence_question,
             sources=sources,
-            eligible_source_indexes={
-                index for index, source in enumerate(sources, start=1)
-                if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
-            },
+            eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
+                question=evidence_question,
+                sources=sources,
+                entity_groups=plan.named_entity_groups if plan else None,
+            ),
             entity_groups=plan.named_entity_groups if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
