@@ -969,9 +969,10 @@ class GuideLLM:
             end = content.rfind("}") + 1
             if start < 0 or end <= start:
                 raise ValueError("No JSON object found")
-            data = json.loads(content[start:end])
+            data = cls._coerce_search_plan_data(json.loads(content[start:end]))
             plan = SearchPlan.model_validate(data)
-        except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
+        except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
+            logger.warning("llm.search_plan_parse_failed", error_type=type(exc).__name__)
             return cls._fallback_search_plan(question=fallback_question)
 
         if not plan.queries:
@@ -1013,6 +1014,29 @@ class GuideLLM:
             queries=sanitized_queries,
             missing_info=plan.missing_info[:4],
         )
+
+    @staticmethod
+    def _coerce_search_plan_data(data: object) -> dict:
+        """Accept harmless JSON shape variation without inventing plan facts."""
+        if not isinstance(data, dict):
+            raise TypeError("search plan must be an object")
+        normalized = dict(data)
+        groups = normalized.get("named_entity_groups")
+        if isinstance(groups, list):
+            normalized["named_entity_groups"] = [
+                [value] if isinstance(value, str) else value
+                for value in groups
+            ]
+        for field in ("aliases", "missing_info"):
+            if isinstance(normalized.get(field), str):
+                normalized[field] = [normalized[field]]
+        queries = normalized.get("queries")
+        if isinstance(queries, list):
+            normalized["queries"] = [
+                {"source_type": "web", "query": value} if isinstance(value, str) else value
+                for value in queries
+            ]
+        return normalized
 
     @classmethod
     def _parse_refinement_plan(

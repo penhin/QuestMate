@@ -460,6 +460,18 @@ def test_structured_entity_groups_are_grounded_and_enforce_group_and_alias_or() 
     )
 
 
+def test_search_plan_parser_accepts_generic_json_shape_variants() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"game_mechanic","named_entity_groups":["Quartz Relay"],'
+        '"aliases":"Quartz Relay","queries":["Quartz Relay state"],"missing_info":""}',
+        fallback_question="Does Quartz Relay change the archive state?",
+    )
+
+    assert plan.intent == "game_mechanic"
+    assert plan.named_entity_groups == [["Quartz Relay"]]
+    assert plan.queries[0].source_type == "web"
+
+
 def test_planner_entity_groups_do_not_reject_direct_original_language_evidence() -> None:
     request = ChatRequest(game="Elden Ring", question="女武神玛莲妮亚怎么打？")
     plan = SearchPlan(
