@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     identity_resolution_attempts: int = Field(default=2, ge=1, le=2)
     # Must remain below evaluator/client deadlines so provider failures can
     # degrade to a conservative response instead of becoming an API timeout.
-    model_request_timeout_seconds: int = Field(default=25, ge=5, le=55)
+    model_request_timeout_seconds: int = Field(default=30, ge=5, le=55)
     tavily_max_concurrency: int = Field(default=3, ge=1, le=8)
     tavily_search_cache_ttl_seconds: int = Field(default=86400, ge=0, le=2592000)
     tavily_search_cache_max_entries: int = Field(default=512, ge=16, le=10000)
