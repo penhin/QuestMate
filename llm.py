@@ -25,6 +25,7 @@ from ai.evidence_policy import (
     requires_semantic_relation_judgment,
     version_evidence_status,
 )
+from ai.citation_claims import build_citation_claims
 from guide_prompts import (
     answer_completeness_system_prompt,
     answer_revision_system_prompt,
@@ -627,19 +628,21 @@ class GuideLLM:
         entity gate.  The model may compose rows, but every factual sentence
         must retain the row's source index.
         """
-        claims: list[str] = []
-        for index, source in enumerate(sources, start=1):
-            if not GuideLLM._has_question_specific_sources(question=question, sources=[source]):
-                continue
-            evidence = " ".join((source.evidence or source.snippet or "").split())
-            if not evidence:
-                continue
-            claims.append(
-                f'<claim id="C{index}" source_indexes="[{index}]">{evidence[:700]}</claim>'
-            )
-            if len(claims) >= 4:
-                break
-        return "\n".join(claims)
+        eligible_indexes = {
+            index
+            for index, source in enumerate(sources, start=1)
+            if GuideLLM._has_question_specific_sources(question=question, sources=[source])
+        }
+        claims = build_citation_claims(
+            question=question,
+            sources=sources,
+            eligible_source_indexes=eligible_indexes,
+        )
+        return "\n".join(
+            f'<claim id="{claim.claim_id}" source_indexes="[{claim.source_index}]">'
+            f"{claim.statement}</claim>"
+            for claim in claims
+        )
 
     @staticmethod
     def _investigation_context(investigation: InvestigationState | None) -> str:

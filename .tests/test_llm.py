@@ -108,8 +108,17 @@ def test_answer_prompt_exposes_only_direct_source_indexed_claims() -> None:
         ],
     )
 
-    assert '<claim id="C1" source_indexes="[1]">Moonstone is acquired' in prompt
-    assert 'claim id="C2"' not in prompt
+    assert '<claim id="C1_1" source_indexes="[1]">Moonstone is acquired' in prompt
+    assert 'source_indexes="[2]"' not in prompt
+
+
+def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
+    answer_prompt = GuideLLM._answer_system_prompt()
+    revision_prompt = GuideLLM._answer_revision_system_prompt()
+
+    assert "atomic evidence ledger" in answer_prompt
+    assert "fact absent from that row" in answer_prompt
+    assert "atomic permitted evidence passages" in revision_prompt
 
 
 def test_investigation_context_is_bounded_valid_json_without_raw_truncation() -> None:

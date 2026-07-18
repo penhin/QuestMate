@@ -22,6 +22,14 @@ class Source(BaseModel):
     game_version: str | None = Field(default=None, max_length=80)
 
 
+class CitationClaim(BaseModel):
+    """One atomic source passage that may support a cited answer statement."""
+
+    claim_id: str = Field(min_length=3, max_length=32)
+    source_index: int = Field(ge=1)
+    statement: str = Field(min_length=1, max_length=700)
+
+
 class PlannedSearchQuery(BaseModel):
     source_type: Literal["official", "wiki", "community", "web"] = "web"
     query: str = Field(min_length=1, max_length=240)
