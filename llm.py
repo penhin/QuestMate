@@ -983,7 +983,14 @@ class GuideLLM:
             data = cls._coerce_search_plan_data(cls._first_json_object(content))
             plan = SearchPlan.model_validate(data)
         except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
-            logger.warning("llm.search_plan_parse_failed", error_type=type(exc).__name__)
+            error_fields = (
+                [".".join(str(part) for part in error["loc"]) for error in exc.errors()][:4]
+                if isinstance(exc, ValidationError)
+                else []
+            )
+            logger.warning(
+                "llm.search_plan_parse_failed", error_type=type(exc).__name__, error_fields=error_fields
+            )
             return cls._fallback_search_plan(question=fallback_question)
 
         if not plan.queries:
@@ -1051,6 +1058,13 @@ class GuideLLM:
         if not isinstance(data, dict):
             raise TypeError("search plan must be an object")
         normalized = dict(data)
+        if not isinstance(normalized.get("version_sensitive"), bool):
+            normalized["version_sensitive"] = False
+        if normalized.get("intent") not in {
+            "boss_strategy", "item_location", "item_usage", "quest_step", "game_mechanic",
+            "build", "patch", "lore", "general",
+        }:
+            normalized["intent"] = "general"
         groups = normalized.get("named_entity_groups")
         if isinstance(groups, list):
             normalized["named_entity_groups"] = [
@@ -1063,9 +1077,19 @@ class GuideLLM:
         queries = normalized.get("queries")
         if isinstance(queries, list):
             normalized["queries"] = [
-                {"source_type": "web", "query": value} if isinstance(value, str) else value
+                {"source_type": "web", "query": value}
+                if isinstance(value, str)
+                else {
+                    "source_type": value.get("source_type", value.get("type", "web")),
+                    "query": value.get("query", value.get("text", "")),
+                }
+                if isinstance(value, dict)
+                else value
                 for value in queries
             ]
+            for query in normalized["queries"]:
+                if isinstance(query, dict) and query.get("source_type") not in {"official", "wiki", "community", "web"}:
+                    query["source_type"] = "web"
         return normalized
 
     @classmethod
