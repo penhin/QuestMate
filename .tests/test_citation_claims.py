@@ -27,10 +27,28 @@ def test_build_citation_claims_keeps_source_and_sentence_boundaries() -> None:
     assert {claim.claim_id for claim in claims} == {"C1_1", "C1_2"}
     assert [claim.source_index for claim in claims] == [1, 1]
     assert {claim.statement for claim in claims} == {
-        "Moonstone is acquired from the observatory chest.",
-        "The chest opens after the telescope puzzle.",
+        "Moonstone route: Moonstone is acquired from the observatory chest.",
+        "Moonstone route: The chest opens after the telescope puzzle.",
     }
     assert all("merchant" not in claim.statement for claim in claims)
+
+
+def test_title_can_supply_entity_context_but_not_unrelated_claims() -> None:
+    claims = build_citation_claims(
+        question="How does Quartz Relay alter the archive state?",
+        sources=[
+            Source(
+                title="Quartz Relay",
+                url="https://example.com/relay",
+                evidence="Activating it changes the archive state. A merchant sells potions nearby.",
+            )
+        ],
+        eligible_source_indexes={1},
+        entity_groups=[["Quartz Relay"]],
+    )
+
+    assert len(claims) == 1
+    assert "archive state" in claims[0].statement
 
 
 def test_build_citation_claims_never_uses_ineligible_source() -> None:

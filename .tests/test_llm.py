@@ -108,7 +108,7 @@ def test_answer_prompt_exposes_only_direct_source_indexed_claims() -> None:
         ],
     )
 
-    assert '<claim id="C1_1" source_indexes="[1]">Moonstone is acquired' in prompt
+    assert '<claim id="C1_1" source_indexes="[1]">Moonstone route: Moonstone is acquired' in prompt
     assert 'source_indexes="[2]"' not in prompt
 
 
