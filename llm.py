@@ -563,7 +563,19 @@ class GuideLLM:
         history: list[SessionMessage],
         investigation: InvestigationState | None = None,
     ) -> str:
-        source_context = GuideLLM._source_context(sources)
+        claim_context = GuideLLM._citation_claim_context(
+            question=GuideLLM._evidence_question(request=request, plan=plan),
+            sources=sources,
+            entity_groups=plan.named_entity_groups if plan else None,
+        )
+        # The claim ledger is the auditable evidence contract. Avoid repeating
+        # large raw pages once it exists: that lowers latency and prevents the
+        # model from treating uncited page text as an eligible fact.
+        source_context = (
+            "Evidence is provided exclusively in citation_claims."
+            if claim_context
+            else GuideLLM._source_context(sources)
+        )
         intent = plan.intent if plan else "general"
         # The planner may mark broad tactics as version-sensitive to improve
         # retrieval ranking. That is not enough to block an otherwise direct
@@ -591,7 +603,7 @@ class GuideLLM:
             f"<evidence_policy>{GuideLLM._evidence_policy_for_level(evidence_level)}</evidence_policy>\n"
             f"<version_evidence>{version_status}</version_evidence>\n"
             f"<answer_shape>{GuideLLM._answer_shape_for_intent(intent)}</answer_shape>\n"
-            f"<citation_claims>{GuideLLM._citation_claim_context(question=evidence_question, sources=sources, entity_groups=plan.named_entity_groups if plan else None) or 'No directly grounded claims are available.'}</citation_claims>\n"
+            f"<citation_claims>{claim_context or 'No directly grounded claims are available.'}</citation_claims>\n"
             f"<investigation_state>{GuideLLM._investigation_context(investigation)}</investigation_state>\n"
             f"<recent_conversation>{GuideLLM._history_context(history) or 'No prior messages.'}</recent_conversation>\n"
             f"<current_question>{request.question}</current_question>\n"
