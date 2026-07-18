@@ -128,7 +128,15 @@ class GuideLLM:
                 ),
                 json_mode=True,
             )
-            return self._parse_search_plan(content, fallback_question=planning_question)
+            plan = self._parse_search_plan(content, fallback_question=planning_question)
+            logger.info(
+                "llm.search_plan",
+                intent=plan.intent,
+                entity_group_count=len(plan.named_entity_groups),
+                query_count=len(plan.queries),
+                used_fallback=plan.intent == "general" and not plan.named_entity_groups,
+            )
+            return plan
         except Exception:
             return self._fallback_search_plan(question=planning_question)
 
@@ -256,7 +264,7 @@ class GuideLLM:
 
         try:
             raw_answer = await provider.complete(
-                max_tokens=2400,
+                max_tokens=1400,
                 temperature=0.2,
                 system=self._answer_system_prompt(),
                 user=self._answer_user_prompt(
@@ -403,7 +411,7 @@ class GuideLLM:
 
         try:
             async for chunk in provider.stream_complete(
-                max_tokens=2400,
+                max_tokens=1400,
                 temperature=0.2,
                 system=self._answer_system_prompt(),
                 user=self._answer_user_prompt(

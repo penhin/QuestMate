@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 import inspect
+import re
 from time import perf_counter
 from typing import Literal, TypedDict
 from uuid import uuid4
@@ -131,9 +132,14 @@ class QuestAgent:
         self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", state["investigation"])
         # Correctness gets the provider slot first.  Title generation is
         # cosmetic and must not rate-limit or delay the answer revision pass.
-        improvement_started = perf_counter()
-        answer = await self.llm.improve_answer(**improve_kwargs)
-        state["timings_ms"]["improvement"] = self._elapsed_ms(improvement_started)
+        has_citation = bool(re.search(r"\[\d+\]", state["answer"]))
+        if state["sources"] and not has_citation:
+            answer = state["answer"]
+            state["timings_ms"]["improvement"] = 0
+        else:
+            improvement_started = perf_counter()
+            answer = await self.llm.improve_answer(**improve_kwargs)
+            state["timings_ms"]["improvement"] = self._elapsed_ms(improvement_started)
         title = self._initial_title(request) if is_new_session else None
         response = ChatResponse(
             session_id=session_id,
