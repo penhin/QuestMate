@@ -160,6 +160,26 @@ def test_structured_answer_renders_citations_from_claim_ids() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
+def test_structured_answer_extracts_json_from_model_wrapper() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        )
+    ]
+
+    rendered = GuideLLM._render_structured_answer(
+        answer='Output: ```json\n{"blocks":[{"text":"在东侧档案库。","claim_ids":["C1_1"]}]}\n```',
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert rendered == "在东侧档案库。[1]"
+
+
 def test_structured_answer_drops_unbound_fact_blocks() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [

@@ -710,7 +710,7 @@ class GuideLLM:
     ) -> str:
         """Render source citations from model-selected Claim IDs, never raw indexes."""
         try:
-            data = json.loads(answer)
+            data = GuideLLM._first_json_object(answer)
             blocks = data.get("blocks") if isinstance(data, dict) else None
             if not isinstance(blocks, list):
                 raise ValueError("missing blocks")
