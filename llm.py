@@ -715,6 +715,7 @@ class GuideLLM:
             if not isinstance(blocks, list):
                 raise ValueError("missing blocks")
         except (json.JSONDecodeError, ValueError, TypeError):
+            logger.info("llm.answer_render", format="legacy")
             return GuideLLM._render_claim_bound_answer(
                 answer=answer, request=request, sources=sources, plan=plan
             )
@@ -731,6 +732,7 @@ class GuideLLM:
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
         rendered: list[str] = []
+        unbound_blocks = 0
         for block in blocks[:8]:
             if not isinstance(block, dict):
                 continue
@@ -740,11 +742,28 @@ class GuideLLM:
                 continue
             indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
             if not indexes:
+                unbound_blocks += 1
                 continue
             citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
             rendered.append(f"{text}{citations}")
         if rendered:
+            logger.info(
+                "llm.answer_render",
+                format="structured",
+                block_count=len(blocks),
+                bound_block_count=len(rendered),
+                unbound_block_count=unbound_blocks,
+                claim_count=len(claims),
+            )
             return "\n\n".join(rendered)
+        logger.info(
+            "llm.answer_render",
+            format="structured",
+            block_count=len(blocks),
+            bound_block_count=0,
+            unbound_block_count=unbound_blocks,
+            claim_count=len(claims),
+        )
         return GuideLLM._conservative_answer(
             request=request,
             sources=sources,
