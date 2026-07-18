@@ -614,12 +614,18 @@ def test_knowledge_chunking_preserves_order_and_overlap() -> None:
     assert {"女武", "武神"}.issubset(terms)
 
 
-def test_question_tokens_remove_intent_noise() -> None:
+def test_question_tokens_preserve_cjk_spans_without_intent_vocabulary() -> None:
     from query_tokens import question_relevance_tokens
 
-    assert question_relevance_tokens("玛莲妮亚怎么打，弱点是什么？") == ["玛莲妮亚"]
-    assert question_relevance_tokens("Malenia boss strategy weakness") == ["malenia"]
-    assert question_relevance_tokens("How does Pavol join the party?") == ["pavol"]
+    tokens = question_relevance_tokens("玛莲妮亚怎么打，弱点是什么？")
+    assert "玛莲妮亚怎么打" in tokens
+    assert "玛莲" in tokens
+    assert question_relevance_tokens("Malenia boss strategy weakness") == [
+        "malenia", "boss", "strategy", "weakness"
+    ]
+    assert question_relevance_tokens("How does Pavol join the party?") == [
+        "how", "does", "pavol", "join", "the", "party"
+    ]
 
 
 def test_quality_policy_weights_and_thresholds_are_valid() -> None:
@@ -1374,18 +1380,18 @@ def test_search_filters_nightreign_when_question_is_base_elden_ring() -> None:
     )
 
 
-def test_search_filters_low_value_pages_for_strategy() -> None:
+def test_search_does_not_filter_pages_by_a_fixed_strategy_vocabulary() -> None:
     item = {
         "title": "Malenia | Villains Wiki | Fandom",
         "url": "https://villains.fandom.com/wiki/Malenia",
         "content": "Malenia Blade of Miquella Elden Ring character biography.",
     }
 
-    assert not result_relevance_score(
+    assert result_relevance_score(
         item=item,
         game="Elden Ring",
         question="Malenia Blade of Miquella boss weakness phase",
-    )
+    ) > 0
 
 
 def test_search_filters_battle_wiki_for_strategy() -> None:

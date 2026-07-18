@@ -278,7 +278,7 @@ def test_incomplete_action_state_gets_generic_query_from_its_own_gap() -> None:
     assert repaired.stop_reason == "needs_search"
 
 
-async def test_investigation_stops_after_a_refinement_returns_no_new_evidence() -> None:
+async def test_investigation_stops_early_when_initial_evidence_is_not_direct() -> None:
     class EmptyKnowledge:
         async def retrieve(self, *, game: str, query: str):
             return []
@@ -333,10 +333,10 @@ async def test_investigation_stops_after_a_refinement_returns_no_new_evidence() 
         ),
     )
 
-    assert search.calls == 2
-    assert investigator.calls == 1
+    assert search.calls == 1
+    assert investigator.calls == 0
     assert outcome.refined is False
-    assert outcome.investigation.stop_reason == "insufficient_evidence"
+    assert outcome.investigation.stop_reason is None
 
 
 async def test_wiki_domain_discovered_from_evidence_is_used_for_refinement() -> None:

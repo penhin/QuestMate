@@ -36,7 +36,7 @@ def test_identity_and_entity_tokens_support_non_latin_game_titles() -> None:
     assert "엘리베이터" in question_relevance_tokens("엘리베이터 잠금 해제 방법")
     japanese_tokens = question_relevance_tokens("月の鍵はどこで使う？")
     assert "月の鍵" in japanese_tokens
-    assert "はどこで" not in japanese_tokens
+    assert "はどこで" in japanese_tokens
     assert is_supported_platform_domain("store.steampowered.com")
     assert not is_supported_platform_domain("steampowered.com.attacker.example")
     assert not matches_game_text(

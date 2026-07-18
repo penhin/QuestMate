@@ -12,7 +12,6 @@ from game_resolution import GameResolver, is_candidate_identity_url, select_game
 from quality_policy import (
     EXTERNAL_SEARCH_ATTEMPTS,
     PROGRESSIVE_STRICT_SOURCE_TARGET,
-    SEARCH_NOISE_TOKENS,
     SOURCE_POLICIES,
     SourcePolicy,
     STABLE_FACT_INTENTS,
@@ -61,7 +60,6 @@ class ContentIndex(Protocol):
 
 
 class TavilySearchProvider:
-    search_noise_tokens = SEARCH_NOISE_TOKENS
     sources = SOURCE_POLICIES
     fallback_plan = SearchPlan(
         intent="general",

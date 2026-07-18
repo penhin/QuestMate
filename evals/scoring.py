@@ -97,51 +97,17 @@ _VERSION_UNCERTAINTY_PATTERN = re.compile(
 )
 _CLAUSE_BOUNDARY_PATTERN = re.compile(r"(?:[。！？!?；;\n]|但是|但|不过|然而|\bbut\b|\bhowever\b)", re.IGNORECASE)
 
-# Generic relationship vocabulary is used only when a curated case lacks
-# evidence terms. It prevents an entity-only page from grounding an arbitrary
-# strategy/location/mechanic claim without encoding any particular game.
+# Evaluation-only fallback for legacy cases that do not declare
+# evidence_terms. It never enters retrieval, entity extraction, or answer
+# generation; new cases should provide explicit evidence_terms instead.
 _CATEGORY_EVIDENCE_MARKERS: dict[str, tuple[str, ...]] = {
-    "boss_strategy": (
-        "dodge", "avoid", "attack", "phase", "weakness", "resistance", "strategy", "tactic",
-        "parry", "block", "roll", "distance", "opening", "window",
-        "闪避", "躲避", "招式", "阶段", "弱点", "抗性", "打法", "弹反", "格挡", "翻滚", "距离", "时机",
-    ),
-    "item_location": (
-        "located", "location", "found", "obtain", "acquire", "drop", "purchase", "merchant",
-        "位于", "位置", "找到", "获得", "掉落", "购买", "商人",
-    ),
-    "item_usage": (
-        "used", "use at", "effect", "activate", "trade", "exchange", "give to", "grants", "unlocks",
-        "用途", "作用", "使用", "效果", "激活", "交换", "交给", "解锁",
-    ),
-    "quest_step": (
-        "quest", "next step", "talk to", "speak to", "go to", "after", "before", "trigger", "requires",
-        "任务", "下一步", "对话", "交谈", "前往", "之后", "之前", "触发", "需要",
-    ),
-    "game_mechanic": (
-        "mechanic", "unlock", "trigger", "activate", "when", "requires", "condition", "rule", "wins", "win when",
-        "机制", "解锁", "触发", "开启", "激活", "条件", "规则", "获胜", "胜利",
-    ),
-    "build": (
-        "build", "stat", "weapon", "equipment", "skill", "damage", "scaling", "loadout",
-        "配装", "属性", "武器", "装备", "技能", "伤害", "补正", "加点",
-    ),
-    "lore": (
-        "lore", "story", "character", "background", "ending", "dialogue",
-        "剧情", "故事", "角色", "背景", "结局", "对话",
-    ),
-}
-_GENERIC_GAME_WORDS = {
-    "game", "edition", "remaster", "remastered", "revision", "the", "of", "and", "world",
-}
-_QUESTION_STOPWORDS = {
-    "about", "after", "before", "does", "from", "game", "guide", "have", "how", "the",
-    "into", "latest", "should", "that", "this", "used", "using", "what", "when",
-    "where", "which", "will", "with", "find", "get", "obtain", "open", "unlock",
-    "effect", "item", "location", "quest", "strategy", "version", "怎么", "怎样", "如何",
-    "哪里", "在哪里", "在哪", "什么", "是否", "会不会", "有没有", "为什么", "当前",
-    "最新", "请问", "游戏", "使用", "获得", "获取", "打开", "开启", "解锁", "触发",
-    "效果", "作用", "位置", "任务", "版本", "补丁", "打法",
+    "boss_strategy": ("dodge", "avoid", "attack", "phase", "weakness", "闪避", "躲避", "招式", "阶段", "弱点", "打法"),
+    "item_location": ("located", "found", "obtain", "acquire", "drop", "位于", "找到", "获得", "掉落"),
+    "item_usage": ("used", "effect", "activate", "trade", "用途", "作用", "使用", "效果", "激活"),
+    "quest_step": ("quest", "talk to", "trigger", "requires", "任务", "对话", "触发", "需要"),
+    "game_mechanic": ("mechanic", "unlock", "trigger", "condition", "机制", "解锁", "触发", "条件"),
+    "build": ("build", "stat", "weapon", "skill", "damage", "配装", "属性", "武器", "技能", "伤害"),
+    "lore": ("lore", "story", "character", "剧情", "故事", "角色"),
 }
 
 
@@ -364,21 +330,14 @@ def _question_entity_terms(question: str) -> list[str]:
             strong_terms.append(normalized)
 
     normalized = _normalized_text(question)
-    cjk_candidate = normalized
-    for stopword in sorted(
-        (value for value in _QUESTION_STOPWORDS if re.search(r"[\u3400-\u9fff]", value)),
-        key=len,
-        reverse=True,
-    ):
-        cjk_candidate = cjk_candidate.replace(stopword, " ")
-    strong_terms.extend(re.findall(r"[\u3400-\u9fff]{2,}", cjk_candidate))
+    strong_terms.extend(re.findall(r"[\u3400-\u9fff]{2,}", normalized))
     if strong_terms:
         return list(dict.fromkeys(strong_terms))[:12]
 
     terms: list[str] = []
     for token in re.findall(r"[a-z0-9][a-z0-9'.+]*|[\u3400-\u9fff]{2,}", normalized):
         candidate = token.strip(".'+")
-        if len(candidate) < 2 or candidate in _QUESTION_STOPWORDS:
+        if len(candidate) < 2:
             continue
         if re.fullmatch(r"[a-z]+", candidate) and len(candidate) < 3:
             continue
@@ -413,11 +372,6 @@ def _cited_sources_ground_case(
     if question_terms and any(term in cited_text for term in question_terms):
         return True
 
-    # Entity names are often translated between a Chinese question/answer and
-    # an English wiki. Exact lexical equality cannot prove that alias relation.
-    # Permit that cross-script boundary only when the cited page is tied to the
-    # requested game and its body contains category-specific relationship
-    # evidence; an entity-only or unrelated page still fails.
     anchors = [*required_terms, *question_terms]
     cross_script = (
         any(re.search(r"[\u3400-\u9fff]", term) for term in anchors)
@@ -509,7 +463,7 @@ def _version_source_matches_game(values: list[Any], source_text: str) -> bool:
         tokens = [
             token
             for token in re.findall(r"[a-z0-9]+|[\u3400-\u9fff]{2,}", normalized)
-            if len(token) >= 3 and token not in _GENERIC_GAME_WORDS
+            if len(token) >= 3
         ]
         if tokens and all(
             re.search(rf"(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])", source_text)

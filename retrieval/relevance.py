@@ -16,29 +16,12 @@ from retrieval.source_quality import (
     token_in_text,
 )
 
-LORE_MARKERS = ("lore", "剧情", "背景")
-NON_GAMEPLAY_PAGE_MARKERS = (
-    "character biography",
-    "fiction battles",
-    "power scaling",
-    "vs battles wiki",
-)
-
-
 def matches_game_name(*, text: str, game_names: list[str]) -> bool:
     return matches_game_identity(text=text, game_names=game_names)
 
 
 def is_low_value_page(*, text: str, question: str) -> bool:
     """Reject generic indexes using URL shape, never a game or community name."""
-    lowered_question = question.casefold()
-    if "reddit - the heart of the internet" in text:
-        return True
-    if any(marker in text for marker in NON_GAMEPLAY_PAGE_MARKERS) and not any(
-        marker in lowered_question for marker in LORE_MARKERS
-    ):
-        return True
-
     url_match = re.search(r"https?://[^\s]+", text)
     if not url_match:
         return False

@@ -11,7 +11,7 @@ import structlog
 
 from config import Settings
 from mediawiki_client import MediaWikiClient
-from quality_policy import SEARCH_NOISE_TOKENS, SourcePolicy
+from quality_policy import SourcePolicy
 from query_tokens import question_relevance_tokens, relevance_tokens
 from retrieval.evidence_pool import merge_source_evidence
 from retrieval.relevance import is_high_quality_source, result_relevance_score
@@ -352,7 +352,7 @@ class MediaWikiRetriever:
             query_tokens = [
                 token
                 for token in question_relevance_tokens(result_context)
-                if token not in game_tokens and token not in SEARCH_NOISE_TOKENS
+                if token not in game_tokens
             ]
             domain = str(result.get("_domain") or "")
             for item_index, item in enumerate(result.get("results", [])):

@@ -160,12 +160,14 @@ def test_mediawiki_prioritizes_domain_matching_game_identity() -> None:
     assert domains[0] == "unseenpuzzlegame.miraheze.org"
 
 
-def test_mediawiki_removes_cjk_instructions_from_english_entity_query() -> None:
+def test_mediawiki_preserves_mixed_language_query_without_instruction_vocabulary() -> None:
     query = MediaWikiRetriever._normalize_mixed_language_query(
         "如何进入 Apartment 12 并获取 Apt 35 Key 的准确位置"
     )
 
-    assert query == "Apartment 12 Apt 35 Key"
+    assert "Apartment 12" in query
+    assert "Apt 35 Key" in query
+    assert "如何进入" in query
 
 
 def test_mediawiki_prioritizes_link_by_generic_local_query_relevance() -> None:

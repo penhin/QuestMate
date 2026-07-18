@@ -5,11 +5,7 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from quality_policy import (
-    SEARCH_NOISE_TOKENS,
-    SOURCE_EVIDENCE_QUALITY_POLICY,
-    domain_quality,
-)
+from quality_policy import SOURCE_EVIDENCE_QUALITY_POLICY, domain_quality
 from query_tokens import (
     minimum_cjk_ngram_matches,
     question_named_entity_groups,
@@ -72,15 +68,13 @@ def matches_game_identity(*, text: str, game_names: list[str]) -> bool:
     return not any(game_name.strip() for game_name in game_names)
 
 
-IDENTITY_CONNECTORS = frozenset({"and", "the", "of"})
 def _identity_tokens(value: str) -> list[str]:
     normalized = value.casefold().replace("&", " and ")
     return re.findall(r"[^\W_]+", normalized, re.UNICODE)
 
 
 def _without_connectors(tokens: list[str]) -> list[str]:
-    filtered = [token for token in tokens if token not in IDENTITY_CONNECTORS]
-    return filtered or tokens
+    return tokens
 
 
 def _contains_sequence(haystack: list[str], needle: list[str]) -> bool:
@@ -287,13 +281,10 @@ def source_entity_tokens(*, question: str, game_names: list[str]) -> list[str]:
     game_token_set = set(relevance_tokens(" ".join(game_names))) | set(
         question_relevance_tokens(" ".join(game_names))
     )
-    infrastructure_noise = {"com", "http", "https", "site", "www"}
     return [
         token
         for token in question_relevance_tokens(question)
         if token not in game_token_set
-        and token not in SEARCH_NOISE_TOKENS
-        and token not in infrastructure_noise
     ]
 
 
@@ -306,7 +297,7 @@ def source_entity_groups(*, question: str, game_names: list[str]) -> list[list[s
         filtered = [
             token
             for token in group
-            if token not in game_token_set and token not in SEARCH_NOISE_TOKENS
+            if token not in game_token_set
         ]
         if filtered:
             groups.append(filtered)

@@ -55,31 +55,6 @@ KNOWLEDGE_SOURCE_TRUST = {
     "web": (0.65, "知识库"),
 }
 
-SEARCH_NOISE_TOKENS = frozenset(
-    {
-        "fandom",
-        "fextralife",
-        "wiki",
-        "guide",
-        "strategy",
-        "weakness",
-        "timing",
-        "location",
-        "merchant",
-        "questline",
-        "walkthrough",
-        "build",
-        "stats",
-        "weapons",
-        "talismans",
-        "official",
-        "patch",
-        "notes",
-        "update",
-    }
-)
-
-
 @dataclass(frozen=True)
 class RankingWeights:
     relevance: float
@@ -133,17 +108,12 @@ COMMUNITY_DOMAIN_RESULT_LIMIT = 2
 DEFAULT_DOMAIN_RESULT_LIMIT = 3
 HIGH_TRUST_THRESHOLD = 0.8
 
+# Explicit-version detection is a conservative fallback: when planning is
+# unavailable or wrong, it prevents an undated answer from being presented as
+# current. It is not used to infer game entities, routes, or answers.
 VERSION_SIGNAL_TOKENS = (
-    "patch",
-    "hotfix",
-    "version",
-    "current version",
-    "latest version",
-    "版本",
-    "当前版本",
-    "最新版本",
-    "补丁",
-    "更新",
+    "patch", "hotfix", "version", "current version", "latest version",
+    "版本", "当前版本", "最新版本", "补丁", "更新",
 )
 VERSION_SENSITIVE_INTENTS = frozenset({"patch", "build", "boss_strategy", "game_mechanic"})
 STABLE_FACT_INTENTS = frozenset({"item_location", "item_usage", "quest_step", "lore"})
@@ -156,11 +126,7 @@ def is_version_sensitive_question(question: str) -> bool:
         if re.search(r"[\u3400-\u9fff]", signal):
             if signal in normalized:
                 return True
-            continue
-        if re.search(
-            rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])",
-            normalized,
-        ):
+        elif re.search(rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])", normalized):
             return True
     # A bare two-part decimal is too ambiguous to be treated as a version: it
     # is also the normal spelling for coordinates, ratings, damage values, and

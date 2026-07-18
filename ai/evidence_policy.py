@@ -56,6 +56,12 @@ def has_question_specific_sources(*, question: str, sources: list[Source]) -> bo
                 return True
             continue
 
+        # In an uncapitalized, single-entity question, the longest token is a
+        # structure-derived focus anchor. It is sufficient on its own and does
+        # not rely on a vocabulary of question or action words.
+        if focus_tokens and any(token_in_text(token, source_text) for token in focus_tokens):
+            return True
+
         matched = sum(1 for token in tokens if token_in_text(token, source_text))
         if matched < minimum_matches:
             continue
@@ -94,7 +100,7 @@ def _minimum_direct_matches(tokens: list[str]) -> int:
 
 
 def _fallback_focus_tokens(question: str, tokens: list[str]) -> list[str]:
-    """Infer an uncapitalized English focus without a game/action vocabulary."""
+    """Use the most distinctive lexical span without an action vocabulary."""
     identifiers = set(exact_identifiers(question))
     latin = [
         token
@@ -104,30 +110,8 @@ def _fallback_focus_tokens(question: str, tokens: list[str]) -> list[str]:
     if not latin:
         return []
 
-    normalized = " ".join(question.casefold().split())
-    # Passive/location forms put the subject immediately after the auxiliary:
-    # "where is moonstone acquired" / "where does moonstone drop".
-    if re.match(r"^(?:where|when|who|what|which)\s+(?:is|are|was|were)\b", normalized):
-        return latin[:1]
-    if re.match(
-        r"^(?:where|when|who|what|which)\s+(?:do|does|did)\s+"
-        r"(?!(?:i|we|you|one|players?)\b)",
-        normalized,
-    ):
-        return latin[:1]
-    if re.match(
-        r"^(?:where|when|who|what|which)\s+"
-        r"(?:can|could|may|might|must|should|will|would)\s+"
-        r"(?!(?:i|we|you|one|players?)\b)",
-        normalized,
-    ):
-        return latin[:1]
-    # Active requests normally place the requested object last: "where can I
-    # obtain moonstone".  For longer yes/no relations retain both boundaries;
-    # the coverage floor still requires the relationship's other endpoint.
-    if len(latin) <= 2 or re.match(r"^(?:where|when|who|what|which|how)\b", normalized):
-        return latin[-1:]
-    return list(dict.fromkeys([latin[0], latin[-1]]))
+    longest = max(map(len, latin))
+    return [token for token in latin if len(token) == longest]
 
 
 def evidence_level(*, question: str, sources: list[Source]) -> str:
