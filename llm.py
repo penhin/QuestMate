@@ -733,6 +733,7 @@ class GuideLLM:
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
         rendered: list[str] = []
+        cited_source_indexes: set[int] = set()
         unbound_blocks = 0
         for block in blocks[:8]:
             if not isinstance(block, dict):
@@ -747,7 +748,24 @@ class GuideLLM:
                 continue
             citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
             rendered.append(f"{text}{citations}")
+            cited_source_indexes.update(indexes)
         if rendered:
+            supplemental_claims: list[CitationClaim] = []
+            for claim in claims:
+                if claim.source_index in cited_source_indexes:
+                    continue
+                supplemental_claims.append(claim)
+                cited_source_indexes.add(claim.source_index)
+                if len(supplemental_claims) >= 3:
+                    break
+            if supplemental_claims:
+                rendered.append(
+                    "证据补充：\n"
+                    + "\n".join(
+                        f"- {claim.statement}[{claim.source_index}]"
+                        for claim in supplemental_claims
+                    )
+                )
             logger.info(
                 "llm.answer_render",
                 format="structured",

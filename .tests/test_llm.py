@@ -180,6 +180,33 @@ def test_structured_answer_extracts_json_from_model_wrapper() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
+def test_structured_answer_retains_unreferenced_direct_evidence_chain() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay and what opens it?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz-route",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        ),
+        Source(
+            title="Archive access",
+            url="https://example.com/archive-access",
+            evidence="The Quartz Relay archive opens after the signal puzzle.",
+        ),
+    ]
+
+    rendered = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"继电器在东侧档案库。","claim_ids":["C1_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert "继电器在东侧档案库。[1]" in rendered
+    assert "证据补充" in rendered
+    assert "[2]" in rendered
+
+
 def test_structured_answer_drops_unbound_fact_blocks() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [
