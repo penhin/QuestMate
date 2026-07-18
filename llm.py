@@ -716,7 +716,19 @@ class GuideLLM:
             if not isinstance(blocks, list):
                 raise ValueError("missing blocks")
         except (json.JSONDecodeError, ValueError, TypeError):
-            logger.info("llm.answer_render", format="legacy")
+            evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
+            claims = build_citation_claims(
+                question=evidence_question,
+                sources=sources,
+                eligible_source_indexes={
+                    index for index, source in enumerate(sources, start=1)
+                    if GuideLLM._has_question_specific_sources(question=evidence_question, sources=[source])
+                },
+                entity_groups=plan.named_entity_groups if plan else None,
+            )
+            logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
+            if claims:
+                return GuideLLM._claim_ledger_fallback(claims)
             return GuideLLM._render_claim_bound_answer(
                 answer=answer, request=request, sources=sources, plan=plan
             )

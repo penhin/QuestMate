@@ -180,6 +180,28 @@ def test_structured_answer_extracts_json_from_model_wrapper() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
+def test_legacy_answer_with_available_claims_uses_claim_ledger() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        )
+    ]
+
+    rendered = GuideLLM._render_structured_answer(
+        answer="The relay might be in an archive.[1]",
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert "might be" not in rendered
+    assert "The Quartz Relay is inside the eastern archive." in rendered
+    assert rendered.endswith("[1]")
+
+
 def test_structured_answer_retains_unreferenced_direct_evidence_chain() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay and what opens it?")
     sources = [
