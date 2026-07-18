@@ -9,6 +9,18 @@ from schemas import CitationClaim, Source
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;.])\s*|\n+(?:[-*•]\s*)?")
 
+# This is intentionally a small language-level equivalence table, not a game
+# glossary. It prevents a question and evidence using ordinary inflections of
+# the same action from being ranked as unrelated.
+_QUERY_TOKEN_VARIANTS: dict[str, tuple[str, ...]] = {
+    "治疗": ("治疗", "治愈", "医治", "疗愈"),
+    "获得": ("获得", "获取", "取得", "拿到", "得到"),
+    "使用": ("使用", "用", "启用"),
+}
+_NON_EVIDENCE_QUERY_TOKENS = frozenset({
+    "什么", "怎么", "如何", "哪里", "哪儿", "会有", "有什", "么影", "咳会",
+})
+
 
 def build_citation_claims(
     *,
@@ -32,8 +44,11 @@ def build_citation_claims(
         passages = _passages(source.evidence or source.snippet or "")
         ranked = sorted(
             enumerate(passages),
-            key=lambda item: _passage_score(item[1], tokens),
-            reverse=True,
+            key=lambda item: (
+                -_passage_score(item[1], tokens)[0],
+                len(item[1]),
+                item[0],
+            ),
         )
         selected = 0
         for position, passage in ranked:
@@ -65,7 +80,12 @@ def _passages(evidence: str) -> list[str]:
 
 def _passage_score(passage: str, tokens: list[str]) -> tuple[int, int]:
     lowered = passage.casefold()
-    matches = sum(1 for token in tokens if token_in_text(token, lowered))
-    # Prefer compact evidence over a page-wide navigation or boilerplate blob
-    # when both repeat the same entity names.
+    matches = sum(
+        1
+        for token in tokens
+        if token not in _NON_EVIDENCE_QUERY_TOKENS
+        if any(token_in_text(variant, lowered) for variant in _QUERY_TOKEN_VARIANTS.get(token, (token,)))
+    )
+    # The caller keeps the original passage position as the final tie-breaker,
+    # so duplicated/translated page bodies cannot displace earlier evidence.
     return matches, -len(passage)
