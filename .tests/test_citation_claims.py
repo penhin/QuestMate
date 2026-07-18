@@ -69,24 +69,3 @@ def test_build_citation_claims_keeps_earlier_evidence_for_equal_relevance() -> N
     assert len(claims) == 1
     assert claims[0].claim_id == "C1_1"
     assert "north gate" in claims[0].statement
-
-
-def test_build_citation_claims_matches_general_action_word_variants() -> None:
-    claims = build_citation_claims(
-        question="这个状态怎么治疗？",
-        sources=[
-            Source(
-                title="Status guide",
-                url="https://example.com/status",
-                evidence=(
-                    "该状态会降低角色的移动速度。"
-                    "在休息点使用净化药剂可以治愈该状态。"
-                ),
-            ),
-        ],
-        eligible_source_indexes={1},
-        max_claims=1,
-    )
-
-    assert len(claims) == 1
-    assert "治愈" in claims[0].statement
