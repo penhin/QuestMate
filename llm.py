@@ -137,7 +137,8 @@ class GuideLLM:
                 used_fallback=plan.intent == "general" and not plan.named_entity_groups,
             )
             return plan
-        except Exception:
+        except Exception as exc:
+            logger.warning("llm.search_plan_failed", error_type=type(exc).__name__)
             return self._fallback_search_plan(question=planning_question)
 
     async def refine_search_plan(
@@ -965,11 +966,7 @@ class GuideLLM:
     @classmethod
     def _parse_search_plan(cls, content: str, *, fallback_question: str) -> SearchPlan:
         try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start < 0 or end <= start:
-                raise ValueError("No JSON object found")
-            data = cls._coerce_search_plan_data(json.loads(content[start:end]))
+            data = cls._coerce_search_plan_data(cls._first_json_object(content))
             plan = SearchPlan.model_validate(data)
         except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
             logger.warning("llm.search_plan_parse_failed", error_type=type(exc).__name__)
@@ -1014,6 +1011,25 @@ class GuideLLM:
             queries=sanitized_queries,
             missing_info=plan.missing_info[:4],
         )
+
+    @staticmethod
+    def _first_json_object(content: str) -> object:
+        """Extract a complete object from model wrappers without relying on delimiters."""
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(content):
+            if character != "{":
+                continue
+            try:
+                value, _ = decoder.raw_decode(content[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                return value
+            if isinstance(value, str):
+                nested, _ = decoder.raw_decode(value.lstrip())
+                if isinstance(nested, dict):
+                    return nested
+        raise ValueError("No complete JSON object found")
 
     @staticmethod
     def _coerce_search_plan_data(data: object) -> dict:

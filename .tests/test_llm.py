@@ -472,6 +472,19 @@ def test_search_plan_parser_accepts_generic_json_shape_variants() -> None:
     assert plan.queries[0].source_type == "web"
 
 
+def test_search_plan_parser_extracts_complete_object_from_model_wrapper() -> None:
+    plan = GuideLLM._parse_search_plan(
+        'analysis {not JSON} ```json\\n'
+        '{"intent":"lore","named_entity_groups":[["Iris Signal"]],'
+        '"aliases":[],"queries":[{"source_type":"wiki","query":"Iris Signal"}],'
+        '"missing_info":[]}\\n``` trailing',
+        fallback_question="What does Iris Signal mean?",
+    )
+
+    assert plan.intent == "lore"
+    assert plan.named_entity_groups == [["Iris Signal"]]
+
+
 def test_planner_entity_groups_do_not_reject_direct_original_language_evidence() -> None:
     request = ChatRequest(game="Elden Ring", question="女武神玛莲妮亚怎么打？")
     plan = SearchPlan(
