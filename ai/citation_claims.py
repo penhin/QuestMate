@@ -34,7 +34,7 @@ def build_citation_claims(
         ranked = sorted(
             enumerate(passages),
             key=lambda item: (
-                -_passage_score(item[1], tokens, groups, source.title)[0],
+                -_passage_score(item[1], tokens, groups)[0],
                 len(item[1]),
                 item[0],
             ),
@@ -43,12 +43,12 @@ def build_citation_claims(
         for position, passage in ranked:
             if selected >= 3 or len(claims) >= max_claims:
                 break
-            if _passage_score(passage, tokens, groups, source.title)[0] <= 0:
+            if _passage_score(passage, tokens, groups)[0] <= 0:
                 continue
             claims.append(CitationClaim(
                 claim_id=f"C{source_index}_{position + 1}",
                 source_index=source_index,
-                statement=f"{source.title}: {passage}",
+                statement=passage,
             ))
             selected += 1
     return claims
@@ -68,21 +68,14 @@ def _passages(evidence: str) -> list[str]:
 
 
 def _passage_score(
-    passage: str,
-    tokens: list[str],
-    entity_groups: list[list[str]] | None = None,
-    source_title: str = "",
+    passage: str, tokens: list[str], entity_groups: list[list[str]] | None = None
 ) -> tuple[int, int]:
-    lowered = f"{source_title} {passage}".casefold() if entity_groups else passage.casefold()
+    lowered = passage.casefold()
     if entity_groups:
         matches = sum(
             1 for group in entity_groups if any(token_in_text(value.casefold(), lowered) for value in group)
         )
-        # A title may establish the entity context for a following evidence
-        # sentence, but it must not make every unrelated sentence a claim.
-        passage_lowered = passage.casefold()
-        relation_matches = sum(1 for token in tokens if token_in_text(token, passage_lowered))
-        return (matches if relation_matches else 0), -len(passage)
+        return matches, -len(passage)
     matches = sum(
         1
         for token in tokens
