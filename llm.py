@@ -1066,14 +1066,29 @@ class GuideLLM:
         }:
             normalized["intent"] = "general"
         groups = normalized.get("named_entity_groups")
+        if isinstance(groups, dict):
+            groups = [groups]
         if isinstance(groups, list):
-            normalized["named_entity_groups"] = [
-                [value] if isinstance(value, str) else value
-                for value in groups
-            ]
+            normalized_groups: list[list[str]] = []
+            for value in groups:
+                if isinstance(value, str):
+                    candidates = [value]
+                elif isinstance(value, dict):
+                    candidates = value.get("names", value.get("aliases", value.get("entity", [])))
+                    candidates = [candidates] if isinstance(candidates, str) else candidates
+                else:
+                    candidates = value
+                if not isinstance(candidates, list):
+                    continue
+                cleaned = [item.strip() for item in candidates if isinstance(item, str) and item.strip()]
+                if cleaned:
+                    normalized_groups.append(cleaned[:4])
+            normalized["named_entity_groups"] = normalized_groups[:4]
         for field in ("aliases", "missing_info"):
             if isinstance(normalized.get(field), str):
                 normalized[field] = [normalized[field]]
+            elif not isinstance(normalized.get(field), list):
+                normalized[field] = []
         queries = normalized.get("queries")
         if isinstance(queries, list):
             normalized["queries"] = [

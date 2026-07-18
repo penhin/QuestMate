@@ -486,6 +486,20 @@ def test_search_plan_parser_extracts_complete_object_from_model_wrapper() -> Non
     assert plan.named_entity_groups == [["Iris Signal"]]
 
 
+def test_search_plan_parser_normalizes_object_entity_groups_and_optional_shapes() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"lore","named_entity_groups":[{"names":["Iris Signal","虹膜信号"]}],'
+        '"aliases":null,"queries":[{"type":"wiki","text":"Iris Signal meaning"}],'
+        '"missing_info":{}}',
+        fallback_question="What does Iris Signal mean?",
+    )
+
+    assert plan.named_entity_groups == [["Iris Signal"]]
+    assert plan.aliases == []
+    assert plan.missing_info == []
+    assert plan.queries[0].source_type == "wiki"
+
+
 def test_planner_entity_groups_do_not_reject_direct_original_language_evidence() -> None:
     request = ChatRequest(game="Elden Ring", question="女武神玛莲妮亚怎么打？")
     plan = SearchPlan(
