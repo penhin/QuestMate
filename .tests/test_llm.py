@@ -160,6 +160,27 @@ def test_structured_answer_renders_citations_from_claim_ids() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
+def test_structured_answer_drops_unbound_fact_blocks() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [
+        Source(
+            title="Quartz Relay route",
+            url="https://example.com/quartz",
+            evidence="The Quartz Relay is inside the eastern archive.",
+        )
+    ]
+
+    rendered = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"在东侧档案库。","claim_ids":[]}]}',
+        request=request,
+        sources=sources,
+        plan=SearchPlan(intent="general"),
+    )
+
+    assert "东侧档案库" not in rendered
+    assert "没有找到能直接说明" in rendered
+
+
 def test_answer_prompts_require_atomic_claim_to_citation_binding() -> None:
     answer_prompt = GuideLLM._answer_system_prompt()
     revision_prompt = GuideLLM._answer_revision_system_prompt()

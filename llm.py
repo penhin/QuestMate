@@ -739,14 +739,16 @@ class GuideLLM:
             if not text or not isinstance(claim_ids, list):
                 continue
             indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
-            if claim_ids and not indexes:
+            if not indexes:
                 continue
             citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
             rendered.append(f"{text}{citations}")
         if rendered:
             return "\n\n".join(rendered)
-        return GuideLLM._render_claim_bound_answer(
-            answer=answer, request=request, sources=sources, plan=plan
+        return GuideLLM._conservative_answer(
+            request=request,
+            sources=sources,
+            plan=plan,
         )
 
 
