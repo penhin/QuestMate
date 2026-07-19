@@ -1,26 +1,37 @@
-# Sealed holdout runbook
+# Sealed holdout runbook / Sealed holdout 运行手册
 
-This runbook is for the evaluation owner. Do not run it in the repository
-workspace used by Agent implementers, and do not place its data in Git, issue
-attachments, CI artifacts, or shared chat.
+本手册仅面向评测负责人。不要在 Agent 实现者使用的工作区运行，也不要将数据放入
+Git、Issue 附件、CI 产物或共享聊天。
 
-## One-time setup
+This runbook is for the evaluation owner only. Do not run it in an Agent
+implementer's workspace or place its data in Git, issue attachments, CI
+artifacts, or shared chat.
 
-Create a private directory on a restricted runner or encrypted volume. Only the
-evaluation owner and the CI service account should have read permission. Keep
-the private JSONL and its reports there; the application repository contains
-only the evaluator code.
+## One-time setup / 一次性准备
 
-The dataset must contain only new `split: "holdout"` cases. Before sealing,
-the owner checks that its games, primary source domains, and task/quest chains
-do not overlap public dev or validation data. The owner should also record the
-author, evidence snapshot date, and intended evaluation window in their private
-tracker, not inside the application repository.
+在受限执行器或加密卷上创建私有目录。仅评测负责人和 CI 服务账号应有读取权限。
+私有 JSONL 与报告均保存在该目录；应用仓库只包含评测器代码。
 
-## Create and validate the manifest
+Create a private directory on a restricted runner or encrypted volume. Only
+the evaluation owner and CI service account should have read permission. Keep
+the private JSONL and reports there; the application repository contains only
+evaluator code.
 
-From the checked-out application repository, while the private dataset remains
-outside it:
+数据集只能包含新的 `split: "holdout"` 用例。封存前，确认游戏、主要来源域名、
+任务/机制链均不与公开 dev/validation 重叠。作者、证据快照日期和评测窗口记录在
+私有追踪系统中，不写入应用仓库。
+
+The dataset may contain only new `split: "holdout"` cases. Before sealing,
+ensure its games, primary source domains, and task/mechanic chains do not
+overlap public dev or validation data. Record author, evidence snapshot date,
+and evaluation window in a private tracker, not this repository.
+
+## Create and validate the manifest / 创建并校验 manifest
+
+在已检出应用仓库、但私有数据集仍位于仓库外时执行：
+
+From a checked-out application repository, while the private dataset remains
+outside it, run:
 
 ```bash
 umask 077
@@ -33,13 +44,17 @@ uv run python evals/run_evals.py \
   --split holdout --mode discovery --sealed-holdout --dataset-only
 ```
 
-The second command must succeed before an API run. It proves the manifest hash
-matches and that the dataset is eligible to be treated as sealed.
+第二个命令必须在调用 API 前成功：它证明 manifest 哈希匹配，且数据集可被视为 sealed。
 
-## Run and publish
+The second command must succeed before an API run. It proves that the manifest
+hash matches and the dataset is eligible to be treated as sealed.
+
+## Run and publish / 运行与发布
+
+启动使用隔离数据库/缓存和测试专用模型凭据的独立评测 API，再执行：
 
 Start a dedicated evaluation API instance with an isolated database/cache and
-the test-only model credentials. Then run:
+test-only model credentials, then run:
 
 ```bash
 uv run python evals/run_evals.py \
@@ -49,14 +64,21 @@ uv run python evals/run_evals.py \
   --output /secure/reports/holdout-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-The output is aggregate-only and owner-readable. Publish only that report's
-aggregate scores, stratified scores, latency, source counts, and failure
-dimension rates. Do not publish the private dataset, request logs, API logs
-containing questions, or a normal evaluator report with `results`.
+输出仅为聚合结果且仅负责人可读。只发布聚合/分层得分、延迟、来源数量和失败维度
+比例；不要发布私有数据集、请求日志、含问题的 API 日志或带 `results` 的常规报告。
 
-## Rotation
+The output is aggregate-only and owner-readable. Publish only aggregate and
+stratified scores, latency, source counts, and failure-dimension rates. Do not
+publish the private dataset, request logs, API logs containing questions, or a
+normal evaluator report with `results`.
+
+## Rotation / 轮换
+
+如果实现者为诊断而看到单题、标准答案、参考 URL、Case ID 或响应，在私有追踪系统
+中将该版本标记为已污染。不要修改 manifest 来宣称它仍为 sealed；为下一次泛化估计
+创建新的私有数据集版本和 manifest。
 
 If an implementer sees an individual question, expected answer, reference URL,
 case ID, or response for diagnosis, mark that release contaminated in the
-private tracker. Do not alter its manifest to claim it remains sealed; create a
-new private dataset release and manifest for the next generalization estimate.
+private tracker. Do not alter its manifest to claim it remains sealed; create
+a new private dataset release and manifest for the next generalization estimate.

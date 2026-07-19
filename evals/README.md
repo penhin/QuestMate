@@ -1,99 +1,86 @@
-# QuestMate Evals
+# QuestMate Evals / QuestMate 评测
 
-`cases.jsonl` 是黑盒评测集。每行一个用例，字段说明：
+此目录包含公开的开发/回归评测、确定性评分器和执行脚本；不保存 sealed holdout
+或真实运行数据。完整仓库边界见 [`../REPOSITORY_BOUNDARY.md`](../REPOSITORY_BOUNDARY.md)。
 
-- `split`：`dev` 用于日常调试，`validation` 用于常规回归；现有 `holdout` 已在实现过程中被查看，只能作为历史回归切片，不能再估计未见游戏的泛化能力。
-- `tier`：`mainstream`、`niche` 或 `safety`，分别衡量主流游戏、冷门游戏和安全/边界行为。
-- `difficulty`：`standard` 或 `hard`。
-- `expected_source_types`：期望命中的来源类型，仅作为召回诊断，不是普通答案的通过门槛。
-- `required_terms`：必须实际出现在答案中的关键实体词或结论词。
-- `expected_behavior`：`answer`、`confirmation`、`conservative`、`safe_refusal` 等预期行为。
-- `requires_official_versioned_source`：补丁题需要官方且具有版本号或发布日期；否则回答必须保持保守。
-- `forbidden_terms`：答案中不得出现的错误或高风险表述。
-- `expected_source_urls`：可接受的参考来源 URL，用于诊断 Source Recall；其他来源只要证据和答案正确，也不会仅因 URL 不同而失败。
-- `database_domains`：可选的已知资料库主机名，只在 `retrieval` 模式注入请求；必须是显式字段，不能由标准答案 URL 推导。
-- `game_aliases`：可选的游戏别名，只在 `retrieval` 模式注入请求。
-- `evidence_terms`：必须出现在返回来源正文片段中的证据词，用于衡量 Evidence Recall。
-- `required_answer_groups`：行动链答案必须覆盖的概念组；每组命中任一中英文表达即通过。
-- `require_citations`：要求答案至少包含一个有效的 `[n]` 来源编号；`answer` 类型以及非保守的版本结论默认开启。
-- `version_sensitive`：要求非保守答案引用一条与当前问题相关、且带版本号或发布日期/补丁上下文的来源；不限定必须是官方来源。
+This directory contains public development/regression evaluations, deterministic
+scorers, and runner scripts. It does not store sealed holdouts or real runtime
+data. See [`../REPOSITORY_BOUNDARY.md`](../REPOSITORY_BOUNDARY.md) for the full boundary.
 
-评测仍会把证据词、关键行动链、必需/禁止表述、有效引用、引用证据关联和版本策略作为通过门槛。普通明确回答所引用的来源必须实际包含声明的 `evidence_terms`、`required_terms`，或至少包含问题中的实体锚点；任意 URL 加 `[1]` 不会通过。非保守的补丁/版本结论必须引用相关版本来源，带日期但内容无关的官方页面不算版本证据。`source_type_pass` 和 `source_recall_pass` 只诊断是否命中策展时记录的参考路线；它们不会否定由其他可靠页面支持的正确答案。报告会分别输出所有维度通过率，以及按类别、数据集、游戏层级和难度分组的结果。
+## 数据集与模式 / Datasets and modes
 
-`expected_source_urls` 和 `evidence_terms` 只在后端返回回答后参与评分，永远不会成为请求元数据。评测入口有两种明确模式：
+- `dev`：日常调试；`validation`：公开回归。二者可用于调优，但不能证明未见游戏的泛化能力。
+- `holdout`：仓库现有条目仅作历史诊断，已不是 sealed 泛化集。
+- `discovery`（默认）：只发送游戏名和问题，评估完整发现链路。
+- `retrieval`：仅用于隔离评测后端；可注入案例显式声明的别名和资料域名，不能与 discovery 的成绩混合比较。
 
-- `discovery`（默认）：无请求提示的发现模式；只发送游戏名和问题，不注入 `confirmed_game`、别名或资料库域名。连续案例仍会共享后端来源注册表和缓存，因此这不是严格的逐案例冷进程测试。
-- `retrieval`：隔离资料检索与回答能力；除 `game_resolution` 案例外会确认游戏身份，并且只允许使用案例中显式声明的 `database_domains` 和 `game_aliases`。后端默认拒绝这些不可信元数据；只能在隔离评测实例中显式设置 `ALLOW_EVALUATION_RETRIEVAL_HINTS=true`，生产环境即使误设也不会接收。
+- `dev` is for daily debugging and `validation` is for public regression; neither proves unseen-game generalization.
+- Repository `holdout` entries are historical diagnostics only, not a sealed generalization set.
+- `discovery` (default) sends only game and question, exercising the full discovery path.
+- `retrieval` is for isolated evaluation backends only. It may inject explicitly declared aliases and source domains, so its scores must not be combined with discovery.
 
-两种模式衡量的能力不同，报告和基线必须分别记录，不能直接比较通过率。
+案例以 JSONL 保存。每行至少需要 `id`、`game`、`question` 和 `expected_behavior`；
+字段校验、可选评分字段和完整性 manifest 的规则见 [`dataset.py`](dataset.py)。
 
-当前基线定义包含 52 个案例，其中有 21 个冷门游戏案例和 6 个安全/边界案例。原留出案例及答案结构已经在本轮开发中被查看；其中与新规则测试重合的 Goose Goose Duck 案例已移入 `validation`，其余 `holdout` 也统一标记为 `contaminated_refresh_required`，仅保留历史诊断用途。发布前需要在开发流程之外建立一个新的、版本化且不向实现者暴露的 sealed holdout，当前仓库不能诚实地提供未见样本成绩。
+Cases are JSONL. Each row needs at least `id`, `game`, `question`, and
+`expected_behavior`; see [`dataset.py`](dataset.py) for validation, optional
+scoring fields, and integrity-manifest rules.
 
-holdout 完整性来自与数据集同名的 sidecar manifest：例如 `cases.jsonl` 自动读取 `cases.manifest.json`。当前仓库的 manifest 明确记录污染状态；没有 manifest 的外部数据集会标为 `unverified`，不会被误报为当前仓库的 `contaminated`。外部 sealed 数据集应提供自己的 manifest，也可用 `--dataset-manifest /path/to/manifest.json` 显式指定。manifest 必须用 `dataset_sha256` 绑定对应数据文件，且其中的 `holdout_integrity` 必须包含 `status`、`sealed`、`refresh_required` 和 `usage`。
-
-已提交的脱敏性能摘要保存在 `baselines/`。摘要只包含评分、延迟、来源数量和失败维度，不保存 API Key 或完整模型回答。
-扩充或修改案例后，`baseline_definition.json` 会标记需要刷新性能基线；旧摘要仅作为历史对照，不能代表新数据集成绩。
-
-## 新性能基线与 sealed holdout
-
-新的正式基线应先在公开的 `validation` 上完成，且同一提交分别运行 `discovery` 和 `retrieval`。报告必须固定并记录模型、模型版本、服务镜像/提交、检索配置、数据集 SHA-256、评分 schema、延迟和来源调用量。两种模式回答的问题不同，不能比较或合并它们的通过率。
-
-新的 sealed holdout 不得提交到本仓库，也不得由正在调 Agent 的实现者编写或读取。建议由独立评测负责人维护私有数据集与同名 manifest；按游戏族、资料域名和任务/机制链进行分组切分，避免同一游戏或资料入口同时落入公开集与 holdout。题目、参考答案、来源 URL、case ID 和完整回答只能出现在受控执行环境。
-
-manifest 必须声明 `sealed: true`、`refresh_required: false`，并以 SHA-256 绑定数据文件。受控环境使用以下入口；它强制 holdout + discovery，只写入聚合报告，且将报告权限设为 owner-readable：
+## 常用命令 / Common commands
 
 ```bash
-uv run python evals/run_evals.py \
-  --cases /secure/questmate-holdout.jsonl \
-  --dataset-manifest /secure/questmate-holdout.manifest.json \
-  --split holdout --mode discovery --sealed-holdout \
-  --output /secure/reports/holdout-$(date -u +%Y%m%dT%H%M%SZ).json
-```
-
-实现者只能收到聚合指标与失败维度分布。任何逐题排查、题目泄露或以失败题直接调优后，该版本 holdout 都要标记为污染并轮换；不能再作为未见泛化成绩。
-
-评测负责人可用 `create_sealed_manifest.py` 从私有 JSONL 创建内容绑定的 manifest；完整的权限、预检、运行和轮换步骤见 [SEALED_HOLDOUT_RUNBOOK.md](SEALED_HOLDOUT_RUNBOOK.md)。
-
-只检查数据集结构和覆盖分布，不调用模型或搜索服务：
-
-```bash
+# 只检查数据集结构与分布 / Check dataset structure and distribution only
 uv run python evals/run_evals.py --dataset-only
-```
 
-运行前启动 API，并使用独立的测试数据库，避免评测会话写入本地开发数据。
+# 默认 discovery 回归 / Default discovery regression
+uv run python evals/run_evals.py --split validation --mode discovery
 
-```bash
-uv run python evals/run_evals.py \
-  --api-base-url http://127.0.0.1:8000 \
-  --mode discovery \
-  --fail-under 0.8
-```
-
-在已知游戏身份/资料库的条件下单独测试检索与回答（需启动隔离后端）：
-
-```bash
+# 隔离后端上的 retrieval 诊断 / Retrieval diagnostics on an isolated backend
 ALLOW_EVALUATION_RETRIEVAL_HINTS=true uv run uvicorn main:app
-uv run python evals/run_evals.py --mode retrieval
+uv run python evals/run_evals.py --split validation --mode retrieval
 ```
 
-运行指定切片：
+如果后端没有默认模型配置，可将测试专用密钥放在受限环境变量
+`QUESTMATE_EVAL_AI_API_KEY` 中；密钥不应写入命令、报告或 Git。
 
-```bash
-uv run python evals/run_evals.py --split dev --tier niche
-uv run python evals/run_evals.py --split validation
-uv run python evals/run_evals.py --split holdout  # 仅历史回归，不是 sealed 泛化成绩
-```
+If the backend lacks a default model configuration, place a test-only key in
+the restricted `QUESTMATE_EVAL_AI_API_KEY` environment variable. Never put a
+key in commands, reports, or Git.
 
-如果后端没有配置默认模型，可通过环境变量传入测试专用密钥。密钥不会写入报告：
+报告默认写入已忽略的 `evals/reports/`。提交的基线只能是脱敏聚合摘要；模型、
+提交、数据集指纹、评测模式和延迟范围必须一起记录。
 
-```bash
-export QUESTMATE_EVAL_AI_API_KEY='你的测试密钥'
-uv run python evals/run_evals.py \
-  --ai-provider deepseek \
-  --ai-model deepseek-chat \
-  --ai-base-url https://api.deepseek.com
-```
+Reports default to ignored `evals/reports/`. Committed baselines may contain
+only redacted aggregates and must record the model, commit, dataset fingerprint,
+evaluation mode, and latency scope.
 
-报告默认写入 `evals/reports/`，该目录不提交。第一次固定模型、模型版本和检索配置的完整运行结果是性能基线，而不是发布门槛；先人工审查失败样本，再调整阈值。模型、数据集指纹、筛选条件以及 holdout 完整性状态都会写入报告，API Key 不会写入。
+## Sealed holdout / 密封留出集
 
-需要分析失败来源时，先运行默认的 `discovery` 基线，再运行相同筛选条件的 `retrieval` 模式。只有前者失败时，多半是游戏/资料入口发现问题；两者都失败时，才更可能是页面召回、证据定位或答案生成问题。`game_resolution` 案例在两种模式下都走完整身份识别链路。若需要严格冷启动延迟或首次发现率，应为每个案例使用空来源注册表、空缓存和独立后端进程，不能把普通 `discovery` 报告当作该指标。
+新的 sealed holdout 必须由独立评测负责人维护在仓库外的受限位置，使用
+`holdout` + `discovery` 运行，并且只向实现者提供聚合指标。创建 manifest、
+权限、执行和轮换流程见：
+
+- [移交模板 / Handoff template](SEALED_HOLDOUT_TEMPLATE.md)
+- [受限运行手册 / Restricted runbook](SEALED_HOLDOUT_RUNBOOK.md)
+
+一旦实现者看到了任一逐题题目、答案、来源 URL、case ID 或响应，该版本 holdout
+即被污染，必须轮换。
+
+A new sealed holdout must be maintained outside this repository by an
+independent evaluation owner. Run it with `holdout` + `discovery` and provide
+implementers aggregate metrics only. Any disclosed per-case question, answer,
+URL, case ID, or response contaminates that release and requires rotation.
+
+## 格式参考 / Format reference
+
+[`examples/holdout_format_reference.jsonl`](examples/holdout_format_reference.jsonl)
+包含五道全虚构的 JSONL 示例，展示常规回答、物品说明、版本题、未知实体和身份确认
+等字段组合。该文件仅用于格式参考：它不由默认评测入口读取，不属于 dev、validation
+或有效 sealed holdout，也不得用于通过率、延迟或泛化结论。
+
+[`examples/holdout_format_reference.jsonl`](examples/holdout_format_reference.jsonl)
+contains five fully fictional JSONL examples covering ordinary answers, item
+usage, version-sensitive questions, unknown entities, and identity resolution.
+It is format reference only: the default evaluator does not read it, it belongs
+to neither dev nor validation nor a valid sealed holdout, and it must not be
+used for pass-rate, latency, or generalization claims.

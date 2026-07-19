@@ -6,6 +6,19 @@ __pycache__/
 .agents/
 skills-lock.json
 evals/reports/
+evals/private/
+evals/holdout*.jsonl
+evals/holdout*.manifest.json
+evals/*.private.jsonl
+evals/*.private.manifest.json
+
+*.log
+*.sqlite
+*.sqlite3
+*.dump
+*.sql.gz
+data/
+storage/
 
 overlay/.env
 overlay/node_modules/
