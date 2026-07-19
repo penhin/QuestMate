@@ -212,6 +212,41 @@ async def test_identity_resolution_retries_once_after_a_transient_failure() -> N
     assert resolver.calls == 2
 
 
+@pytest.mark.asyncio
+async def test_unconfirmed_identity_resolves_before_retrieval_without_title_heuristics() -> None:
+    """An unconfirmed title must not let guide hits choose a title."""
+    class Provider:
+        async def resolve_game(self, game, **_kwargs):
+            return GameResolution(
+                input_name=game,
+                confirmed_name=game,
+                confidence=0,
+                ambiguous=True,
+                candidates=[GameCandidate(name="Synthetic Candidate", confidence=0.7)],
+            )
+
+    class Retrieval:
+        async def retrieve_sources(self, *_args, **_kwargs):
+            raise AssertionError("identity resolution must happen before retrieval")
+
+        async def investigate(self, **_kwargs):
+            return object()
+
+    agent = object.__new__(QuestAgent)
+    agent.search_provider = Provider()
+    agent.retrieval = Retrieval()
+    outcome, resolution = await agent._retrieve_after_identity_check(
+        request=ChatRequest(game="Synthetic Title", question="Identify this title"),
+        history=[],
+        plan=SearchPlan(intent="general"),
+        game_resolution=GameResolution(input_name="Synthetic Title", confirmed_name="Synthetic Title", confidence=1),
+        timings_ms={},
+    )
+
+    assert outcome is not None
+    assert resolution.ambiguous
+
+
 def test_typo_title_becomes_a_confirmation_candidate_not_a_silent_match() -> None:
     from game_resolution import GameResolver
 
@@ -351,7 +386,7 @@ async def test_empty_initial_retrieval_recovers_ambiguous_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_initial_evidence_does_not_force_identity_confirmation() -> None:
+async def test_direct_initial_evidence_follows_unambiguous_identity_resolution() -> None:
     class Retrieval:
         async def retrieve_sources(self, *_args, **_kwargs):
             return [Source(
@@ -366,7 +401,12 @@ async def test_direct_initial_evidence_does_not_force_identity_confirmation() ->
 
     class Provider:
         async def resolve_game(self, _game, question=None):
-            raise AssertionError("direct guide evidence should not trigger identity recovery")
+            return GameResolution(
+                input_name="Example Game",
+                confirmed_name="Example Game",
+                identity_urls=["https://example.com/game"],
+                confidence=0.9,
+            )
 
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
@@ -380,7 +420,8 @@ async def test_direct_initial_evidence_does_not_force_identity_confirmation() ->
         game_resolution=initial,
     )
 
-    assert resolved is initial
+    assert resolved.is_confirmed
+    assert [str(url) for url in resolved.identity_urls] == ["https://example.com/game"]
     assert outcome.sources
 
 
@@ -411,8 +452,8 @@ async def test_empty_retrieval_and_empty_identity_discovery_do_not_create_false_
     )
 
     assert not outcome.sources
-    assert resolved is initial
-    assert not QuestAgent._needs_game_confirmation(resolved)
+    assert not resolved.is_confirmed
+    assert QuestAgent._needs_game_confirmation(resolved)
 
 
 def test_prompt_injection_is_rejected_before_game_resolution() -> None:

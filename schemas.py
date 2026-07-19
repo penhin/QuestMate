@@ -66,6 +66,7 @@ class GameResolution(BaseModel):
 
 
 SearchIntent = Literal[
+    "game_identity",
     "boss_strategy",
     "item_location",
     "item_usage",

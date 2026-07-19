@@ -1596,7 +1596,7 @@ async def test_agent_returns_game_candidates_after_retrieval_has_no_evidence(mon
 
     assert response.needs_game_confirmation is True
     assert [candidate.name for candidate in response.game_candidates] == ["Afterwards", "Afterwards Survival"]
-    assert search_provider.search_called is True
+    assert search_provider.search_called is False
 
 
 def test_agent_status_messages_explain_current_work() -> None:

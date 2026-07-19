@@ -64,6 +64,15 @@ def test_prompts_mark_untrusted_data_and_protect_secrets() -> None:
     assert "阶段和危险招式" in answer_user
 
 
+def test_planner_accepts_generic_game_identity_intent() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"game_identity","version_sensitive":false,"named_entity_groups":[],"aliases":[],"queries":[{"source_type":"web","query":"Identify Synthetic Title"}],"missing_info":[]}',
+        fallback_question="Identify Synthetic Title",
+    )
+
+    assert plan.intent == "game_identity"
+
+
 def test_answer_revision_cannot_add_new_facts_or_detach_citations() -> None:
     prompt = GuideLLM._answer_revision_system_prompt()
 

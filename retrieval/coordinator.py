@@ -109,12 +109,12 @@ class RetrievalCoordinator:
             and not plan.missing_info
             and not plan.version_sensitive
             and not requires_semantic_relation_judgment(request.question)
+            and len(plan.named_entity_groups) < 2
         ):
             return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
 
-        # Do not spend additional LLM calls or follow-up searches when the
-        # first retrieval wave has no evidence. The caller may run the cheaper
-        # identity-recovery path or return a conservative response instead.
+        # Do not spend an additional model call when the first retrieval wave
+        # has no evidence. The caller can return a conservative response.
         if not merged_sources:
             return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
 

@@ -1153,7 +1153,7 @@ class GuideLLM:
         if not isinstance(normalized.get("version_sensitive"), bool):
             normalized["version_sensitive"] = False
         if normalized.get("intent") not in {
-            "boss_strategy", "item_location", "item_usage", "quest_step", "game_mechanic",
+            "game_identity", "boss_strategy", "item_location", "item_usage", "quest_step", "game_mechanic",
             "build", "patch", "lore", "general",
         }:
             normalized["intent"] = "general"

@@ -130,10 +130,11 @@ class QuestAgent:
             history=history,
         )
         self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", state["investigation"])
-        # Correctness gets the provider slot first.  Title generation is
-        # cosmetic and must not rate-limit or delay the answer revision pass.
-        has_citation = bool(re.search(r"\[\d+\]", state["answer"]))
-        if state["sources"] and not has_citation:
+        # The answer renderer has already enforced Claim-to-source binding.
+        # A second model rewrite cannot add evidence and can silently remove
+        # required action terms or detach citations, so source-backed answers
+        # are delivered directly within the two-call budget.
+        if state["sources"]:
             answer = state["answer"]
             state["timings_ms"]["improvement"] = 0
         else:
@@ -317,6 +318,29 @@ class QuestAgent:
         request's identity decision.
         """
         resolved = game_resolution
+        # Game identity is a safety boundary, not a retrieval result.  Before
+        # using an unconfirmed title, resolve it once so a plausible guide
+        # page cannot silently select one of several games sharing that name.
+        # This is an identity-state rule, not a title, game, or action-word
+        # heuristic. Retrieval callers that already supplied a confirmed
+        # identity avoid the extra lookup.
+        if (
+            request.metadata.get("confirmed_game") is not True
+            and not request.metadata.get("selected_game_url")
+        ):
+            resolution_started = perf_counter()
+            resolved = await self._resolve_request_game(request)
+            if timings_ms is not None:
+                timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
+            if self._needs_game_confirmation(resolved):
+                outcome = await self.retrieval.investigate(
+                    request=request,
+                    history=history,
+                    plan=plan,
+                    game_resolution=resolved,
+                    initial_sources=[],
+                )
+                return outcome, resolved
         retrieval_started = perf_counter()
         initial_sources = await self.retrieval.retrieve_sources(
             request.question,

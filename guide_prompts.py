@@ -14,6 +14,10 @@ PROMPT_SECURITY_RULES = (
 
 def answer_shape_for_intent(intent: SearchIntent) -> str:
     shapes = {
+        "game_identity": (
+            "先说明能否可靠确认游戏身份；名称存在多个候选或证据不足时，请用户选择候选或提供商店页，"
+            "不要把攻略页当成身份确认。"
+        ),
         "boss_strategy": (
             "先给核心打法，再按实际证据补充会改变打法的弱点、准备、阶段和危险招式。"
             "不要为了凑栏目添加来源未覆盖的配装或版本判断。"
@@ -61,13 +65,16 @@ def search_planner_system_prompt() -> str:
         "Evidence must match at least one name in every group. Each group needs one surface name from the user's "
         "question; translated/alternate members must also appear in aliases or explicitly in a planned query. Do not "
         "make an action, state, effect, attribute, or other predicate complement an entity group. "
+        "When the question asks for a relationship, condition, comparison, or sequence between separately named objects, "
+        "put every named endpoint in its own entity group; do not omit a prerequisite, target, location, or interacting object. "
         "aliases must contain 0 to 6 useful alternate names for the queried entity, generated from your game "
         "knowledge when helpful; include English names, official names, or common aliases, but never invent URLs. "
         "queries must contain 2 to 4 complementary objects with source_type and query. Build a small search portfolio: "
         "keep one query close to the user's wording, one centered on the named entity and requested relationship, "
         "and when useful one alternative vocabulary/language or source angle. Do not make every query a paraphrase. "
         "source_type must be one of official, wiki, community, web. "
-        "intent must be one of boss_strategy, item_location, item_usage, quest_step, game_mechanic, build, patch, lore, general. "
+        "intent must be one of game_identity, boss_strategy, item_location, item_usage, quest_step, game_mechanic, build, patch, lore, general. "
+        "Use game_identity only when the user is asking which game a title refers to, whether a title is a game, or is otherwise asking to identify/disambiguate the game itself. "
         "version_sensitive must be true whenever the question asks about a current/latest release, patch, or exact version, "
         "even when the main intent is a location, quest, item, build, or mechanic. "
         "Use English keywords when useful, keep named entities exact, and do not include site: filters. "
