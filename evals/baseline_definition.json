@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "scoring_schema_version": 5,
+  "scoring_schema_version": 6,
   "status": "performance_and_sealed_holdout_refresh_required",
   "dataset": {
     "schema_version": 4,

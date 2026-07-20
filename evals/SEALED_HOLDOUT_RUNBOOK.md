@@ -73,11 +73,15 @@ uv run python evals/run_evals.py \
   --output /secure/reports/holdout-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-输出仅为聚合结果且仅负责人可读。只发布聚合/分层得分、延迟、来源数量和失败维度
-比例；不要发布私有数据集、请求日志、含问题的 API 日志或带 `results` 的常规报告。
+输出仅为聚合结果且仅负责人可读。除通过率外，报告会给出验收维度失败数及两两共同
+失败数；这些数据不会按案例、类别、问题、答案、URL 或响应分组。只发布聚合/分层得分、
+延迟、来源数量和失败维度比例；不要发布私有数据集、请求日志、含问题的 API 日志或带
+`results` 的常规报告。
 
-The output is aggregate-only and owner-readable. Publish only aggregate and
-stratified scores, latency, source counts, and failure-dimension rates. Do not
+The output is aggregate-only and owner-readable. It includes pass rates plus
+acceptance-dimension failure counts and pairwise co-failure counts; these are
+not grouped by case, category, prompt, answer, URL, or response. Publish only
+aggregate and stratified scores, latency, source counts, and failure-dimension rates. Do not
 publish the private dataset, request logs, API logs containing questions, or a
 normal evaluator report with `results`.
 

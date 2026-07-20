@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-SCORING_SCHEMA_VERSION = 5
+SCORING_SCHEMA_VERSION = 6
 
 
 SCORE_DIMENSIONS = (
@@ -625,6 +625,33 @@ def evaluation_contract(summary: dict[str, Any]) -> dict[str, Any]:
     return {"thresholds": EVALUATION_CONTRACT, "checks": checks, "passed": all(checks.values())}
 
 
+def _gating_failure_diagnostics(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Return aggregate-only failure counts for the acceptance dimensions.
+
+    This intentionally never groups by case metadata or retains a failure
+    signature for an individual response.  The pair counts indicate which
+    acceptance dimensions commonly fail together while keeping sealed prompts,
+    answers, sources, and per-case outcomes out of the report.
+    """
+    failures_by_dimension = Counter()
+    cofailures = Counter()
+    for result in results:
+        evaluation = result.get("evaluation", {})
+        failed_dimensions = [
+            dimension for dimension in PASS_DIMENSIONS if not evaluation.get(dimension, False)
+        ]
+        failures_by_dimension.update(failed_dimensions)
+        for index, first in enumerate(failed_dimensions):
+            for second in failed_dimensions[index + 1 :]:
+                cofailures[f"{first}+{second}"] += 1
+    return {
+        "by_dimension": {
+            dimension: failures_by_dimension[dimension] for dimension in PASS_DIMENSIONS
+        },
+        "cofailures": dict(sorted(cofailures.items())),
+    }
+
+
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     passed = sum(result["evaluation"].get("passed", False) for result in results)
@@ -667,6 +694,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         ) if total else 0,
         "latency_breakdown_ms": _latency_breakdown(results),
         "dimension_pass_rates": dimension_rates,
+        "gating_failure_diagnostics": _gating_failure_diagnostics(results),
         "cohorts": cohorts,
         "resource_usage": _usage_summary(results),
         "budget": _budget_summary(results),

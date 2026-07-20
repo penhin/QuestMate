@@ -854,6 +854,54 @@ def test_summary_reports_eligible_cohorts_and_usage_without_case_data() -> None:
     assert evaluation_contract(summary)["passed"] is True
 
 
+def test_summary_reports_only_aggregate_gating_failure_diagnostics() -> None:
+    results = [
+        {
+            "case": {"category": "private-category", "split": "holdout", "tier": "niche", "difficulty": "hard", "expected_behavior": "answer"},
+            "evaluation": {
+                "passed": False,
+                "answer_present": True,
+                "behavior_pass": True,
+                "evidence_recall_pass": False,
+                "action_chain_pass": False,
+                "required_terms_pass": True,
+                "forbidden_terms_pass": True,
+                "source_urls_valid": True,
+                "version_policy_pass": True,
+                "citation_pass": True,
+                "citation_grounding_pass": True,
+                "source_count": 1,
+            },
+            "latency_ms": 100,
+        },
+        {
+            "case": {"category": "another-private-category", "split": "holdout", "tier": "niche", "difficulty": "hard", "expected_behavior": "answer"},
+            "evaluation": {
+                "passed": False,
+                "answer_present": True,
+                "behavior_pass": True,
+                "evidence_recall_pass": False,
+                "action_chain_pass": True,
+                "required_terms_pass": True,
+                "forbidden_terms_pass": True,
+                "source_urls_valid": True,
+                "version_policy_pass": True,
+                "citation_pass": False,
+                "citation_grounding_pass": False,
+                "source_count": 1,
+            },
+            "latency_ms": 100,
+        },
+    ]
+
+    diagnostics = summarize(results)["gating_failure_diagnostics"]
+
+    assert diagnostics["by_dimension"]["evidence_recall_pass"] == 2
+    assert diagnostics["by_dimension"]["citation_grounding_pass"] == 1
+    assert diagnostics["cofailures"]["citation_pass+citation_grounding_pass"] == 1
+    assert "private-category" not in str(diagnostics)
+
+
 def test_summary_aggregates_stage_timings_without_case_details() -> None:
     results = [
         {
