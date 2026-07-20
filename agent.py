@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 import inspect
@@ -82,8 +83,29 @@ class QuestAgent:
             provider_scope = getattr(self.llm, "provider_scope", None)
             if callable(provider_scope):
                 async with provider_scope(request):
-                    return await self._run(request)
-            return await self._run(request)
+                    return await self._run_with_timeout(request)
+            return await self._run_with_timeout(request)
+
+    async def _run_with_timeout(self, request: ChatRequest) -> ChatResponse:
+        """Keep a stalled upstream from consuming an unbounded user request."""
+        started = perf_counter()
+        usage_before = self._search_usage_snapshot()
+        try:
+            async with asyncio.timeout(get_settings().agent_request_timeout_seconds):
+                return await self._run(request)
+        except TimeoutError:
+            session_id = request.session_id or uuid4()
+            return ChatResponse(
+                session_id=session_id,
+                answer=(
+                    "当前未能在时限内取得足以核实的游戏资料，因此不提供未经证实的攻略结论。"
+                    "请稍后重试，或补充具体版本、地点或物品名称。"
+                ),
+                sources=[],
+                timings_ms={"request_timeout": self._elapsed_ms(started)},
+                usage=self._request_usage(usage_before),
+                diagnostics=self._evaluation_diagnostics(request=request, path="request_timeout"),
+            )
 
     async def _run(self, request: ChatRequest) -> ChatResponse:
         started = perf_counter()

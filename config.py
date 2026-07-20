@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     planner_model_timeout_seconds: int = Field(default=9, ge=3, le=30)
     investigation_model_timeout_seconds: int = Field(default=9, ge=3, le=30)
     answer_model_timeout_seconds: int = Field(default=12, ge=3, le=30)
+    # End-to-end circuit breaker. It must leave a small margin below the
+    # evaluator's 30-second p95 contract and client deadline.
+    agent_request_timeout_seconds: int = Field(default=28, ge=10, le=55)
     planner_model_max_tokens: int = Field(default=700, ge=128, le=1800)
     investigation_model_max_tokens: int = Field(default=600, ge=128, le=1200)
     answer_model_max_tokens: int = Field(default=900, ge=128, le=1800)

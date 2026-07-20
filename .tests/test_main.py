@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -1617,3 +1618,23 @@ def test_session_title_cleaner_enforces_game_prefix() -> None:
     title = GuideLLM._clean_title("女武神打法", fallback="Elden Ring, 女武神怎么打？", game="Elden Ring")
 
     assert title == "Elden Ring, 女武神打法"
+@pytest.mark.asyncio
+async def test_agent_request_timeout_returns_a_conservative_response(monkeypatch) -> None:
+    agent = object.__new__(QuestAgent)
+    agent.search_provider = SimpleNamespace(usage_snapshot=lambda: {"tavily_paid_calls": 0, "tavily_cache_hits": 0})
+    agent.llm = SimpleNamespace(request_usage=lambda: {"model_calls": 1})
+
+    async def slow_run(_request):
+        await asyncio.sleep(1)
+        raise AssertionError("timeout should cancel this task")
+
+    monkeypatch.setattr(agent, "_run", slow_run)
+    monkeypatch.setattr(
+        "agent.get_settings", lambda: Settings.model_construct(agent_request_timeout_seconds=0.01)
+    )
+
+    response = await agent._run_with_timeout(ChatRequest(game="Synthetic Adventure", question="Synthetic objective"))
+
+    assert response.sources == []
+    assert "未经证实" in response.answer
+    assert response.timings_ms["request_timeout"] >= 0
