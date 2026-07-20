@@ -78,12 +78,19 @@ uv run python evals/run_evals.py \
 延迟、来源数量和失败维度比例；不要发布私有数据集、请求日志、含问题的 API 日志或带
 `results` 的常规报告。
 
+`agent_funnel` 同样只包含聚合数据：响应路径、证据等级和是否渲染引用；其中不含问题、
+答案、查询、来源、URL 或逐题标识。
+
 The output is aggregate-only and owner-readable. It includes pass rates plus
 acceptance-dimension failure counts and pairwise co-failure counts; these are
 not grouped by case, category, prompt, answer, URL, or response. Publish only
 aggregate and stratified scores, latency, source counts, and failure-dimension rates. Do not
 publish the private dataset, request logs, API logs containing questions, or a
 normal evaluator report with `results`.
+
+`agent_funnel` is also aggregate-only: response paths, evidence levels, and
+rendered-citation presence. It contains no prompt, answer, query, source, URL,
+or per-case identifier.
 
 ## Rotation / 轮换
 

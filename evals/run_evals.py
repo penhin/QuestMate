@@ -197,6 +197,7 @@ async def run_case(
             "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
             "timings_ms": response.get("timings_ms") if isinstance(response.get("timings_ms"), dict) else {},
             "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
+            "diagnostics": response.get("diagnostics") if isinstance(response.get("diagnostics"), dict) else {},
         }
     except Exception as exc:
         return {

@@ -23,6 +23,7 @@ from game_resolution import (
     select_game_candidate,
 )
 from ai.fallback_planning import fallback_search_plan
+from ai.evidence_policy import evidence_level, evidence_question
 from request_safety import requires_safe_refusal
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
@@ -98,6 +99,7 @@ class QuestAgent:
                 is_new=is_new_session,
                 timings_ms={"safety": self._elapsed_ms(started)},
                 usage=self._request_usage(usage_before),
+                diagnostics=self._evaluation_diagnostics(request=request, path="safety_gate"),
             )
         history = await conversation_store.get_recent_messages(session_id, limit=8)
         identity_started = perf_counter()
@@ -128,6 +130,7 @@ class QuestAgent:
                 usage=self._request_usage(
                     usage_before, state["investigation"], state["search_plan"]
                 ),
+                diagnostics=self._evaluation_diagnostics(request=request, path="game_confirmation"),
             )
         state = {**state, "game_resolution": game_resolution}
         improve_kwargs = dict(
@@ -160,6 +163,13 @@ class QuestAgent:
             timings_ms=state["timings_ms"],
             usage=self._request_usage(
                 usage_before, state["investigation"], state["search_plan"]
+            ),
+            diagnostics=self._evaluation_diagnostics(
+                request=request,
+                path="answer",
+                sources=state["sources"],
+                plan=state["search_plan"],
+                answer=answer,
             ),
         )
         await conversation_store.save_chat(request, response)
@@ -548,6 +558,31 @@ class QuestAgent:
     @staticmethod
     def _elapsed_ms(started: float) -> int:
         return round((perf_counter() - started) * 1000)
+
+    @staticmethod
+    def _evaluation_diagnostics(
+        *,
+        request: ChatRequest,
+        path: str,
+        sources: list[Source] | None = None,
+        plan: SearchPlan | None = None,
+        answer: str = "",
+    ) -> dict[str, str | int]:
+        """Expose only aggregate-safe stage counters to opt-in evaluators."""
+        if not request.metadata.get("evaluation"):
+            return {}
+        source_list = sources or []
+        level = "none"
+        if source_list:
+            level = evidence_level(
+                question=evidence_question(request=request, plan=plan), sources=source_list
+            )
+        return {
+            "path": path,
+            "evidence_level": level,
+            "source_count": len(source_list),
+            "citation_count": len(re.findall(r"\[(\d+)\]", answer)),
+        }
 
     def _search_usage_snapshot(self) -> dict[str, int]:
         snapshot = getattr(self.search_provider, "usage_snapshot", None)

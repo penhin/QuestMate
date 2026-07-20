@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-SCORING_SCHEMA_VERSION = 6
+SCORING_SCHEMA_VERSION = 7
 
 
 SCORE_DIMENSIONS = (
@@ -569,6 +569,33 @@ def _usage_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, float |
     return summary
 
 
+def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Aggregate opt-in response-stage labels without case-level data."""
+    paths = Counter()
+    evidence_levels = Counter()
+    binding = Counter()
+    for result in results:
+        diagnostics = result.get("diagnostics") or {}
+        if not isinstance(diagnostics, dict):
+            continue
+        path = diagnostics.get("path")
+        if isinstance(path, str):
+            paths[path] += 1
+        level = diagnostics.get("evidence_level")
+        if isinstance(level, str):
+            evidence_levels[level] += 1
+        if path == "answer":
+            if int(diagnostics.get("citation_count", 0)) > 0:
+                binding["has_rendered_citation"] += 1
+            else:
+                binding["no_rendered_citation"] += 1
+    return {
+        "response_path": dict(sorted(paths.items())),
+        "evidence_level": dict(sorted(evidence_levels.items())),
+        "answer_citation_binding": dict(sorted(binding.items())),
+    }
+
+
 def _budget_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     model_within_budget = 0
@@ -697,6 +724,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "gating_failure_diagnostics": _gating_failure_diagnostics(results),
         "cohorts": cohorts,
         "resource_usage": _usage_summary(results),
+        "agent_funnel": _agent_funnel_summary(results),
         "budget": _budget_summary(results),
         "by_category": _group_summary(results, "category"),
         "by_expected_behavior": _group_summary(results, "expected_behavior"),

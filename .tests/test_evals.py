@@ -854,6 +854,35 @@ def test_summary_reports_eligible_cohorts_and_usage_without_case_data() -> None:
     assert evaluation_contract(summary)["passed"] is True
 
 
+def test_summary_aggregates_response_stages_without_case_data() -> None:
+    results = [
+        {
+            "case": {"expected_behavior": "answer"},
+            "evaluation": {"passed": True, "source_count": 1},
+            "diagnostics": {
+                "path": "answer", "evidence_level": "direct", "citation_count": 1,
+            },
+            "latency_ms": 10,
+        },
+        {
+            "case": {"expected_behavior": "safe_refusal"},
+            "evaluation": {"passed": True, "source_count": 0},
+            "diagnostics": {
+                "path": "safety_gate", "evidence_level": "none", "citation_count": 0,
+            },
+            "latency_ms": 10,
+        },
+    ]
+
+    funnel = summarize(results)["agent_funnel"]
+
+    assert funnel == {
+        "response_path": {"answer": 1, "safety_gate": 1},
+        "evidence_level": {"direct": 1, "none": 1},
+        "answer_citation_binding": {"has_rendered_citation": 1},
+    }
+
+
 def test_summary_reports_only_aggregate_gating_failure_diagnostics() -> None:
     results = [
         {

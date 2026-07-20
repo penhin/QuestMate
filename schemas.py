@@ -174,6 +174,9 @@ class ChatResponse(BaseModel):
     # Request-scoped counters only. They contain no query text, source URL, or
     # provider payload and can therefore be aggregated by sealed evaluators.
     usage: dict[str, int] = Field(default_factory=dict)
+    # Evaluation-only, aggregate-safe stage labels. Production responses leave
+    # this empty; it never contains prompts, sources, queries, or model text.
+    diagnostics: dict[str, str | int] = Field(default_factory=dict)
 
 
 class SessionMessage(BaseModel):
