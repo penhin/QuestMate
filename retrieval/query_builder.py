@@ -52,6 +52,18 @@ def build_search_queries(
                 )
                 for name in group
             )
+            # The planner's aliases are alternative surfaces of the requested
+            # entity. Keep them in an initial portfolio even when a structured
+            # entity group is present; otherwise a localized user surface can
+            # silently displace the translated name needed by long-tail pages.
+            # A refinement query is deliberately narrower and follows one
+            # dependency, so it must not reattach aliases for an unrelated
+            # endpoint from the original question.
+            if not plan.refinement:
+                routed_entity_aliases = _unique_text([
+                    *routed_entity_aliases,
+                    *entity_aliases,
+                ])
         candidates = _query_portfolio(
             game=game,
             question=question,

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 import inspect
 import re
 from time import perf_counter
@@ -14,6 +15,7 @@ from llm import GuideLLM
 from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
+from retrieval.source_quality import matches_game_identity
 from retrieval.wiki_domains import normalize_wiki_host
 from game_resolution import (
     is_candidate_identity_url,
@@ -57,6 +59,7 @@ class QuestAgent:
             search_provider=self.search_provider,
             llm=self.llm,
             max_results=get_settings().search_max_results,
+            max_investigation_model_calls=1,
         )
         self.graph = self._build_graph()
 
@@ -74,14 +77,16 @@ class QuestAgent:
         return graph.compile()
 
     async def run(self, request: ChatRequest) -> ChatResponse:
-        provider_scope = getattr(self.llm, "provider_scope", None)
-        if callable(provider_scope):
-            async with provider_scope(request):
-                return await self._run(request)
-        return await self._run(request)
+        with self._search_usage_scope():
+            provider_scope = getattr(self.llm, "provider_scope", None)
+            if callable(provider_scope):
+                async with provider_scope(request):
+                    return await self._run(request)
+            return await self._run(request)
 
     async def _run(self, request: ChatRequest) -> ChatResponse:
         started = perf_counter()
+        usage_before = self._search_usage_snapshot()
         session_id = request.session_id or uuid4()
         request = request.model_copy(update={"session_id": session_id})
         is_new_session = not await conversation_store.session_exists(session_id)
@@ -92,6 +97,7 @@ class QuestAgent:
                 sources=[],
                 is_new=is_new_session,
                 timings_ms={"safety": self._elapsed_ms(started)},
+                usage=self._request_usage(usage_before),
             )
         history = await conversation_store.get_recent_messages(session_id, limit=8)
         identity_started = perf_counter()
@@ -119,6 +125,9 @@ class QuestAgent:
                 needs_game_confirmation=True,
                 game_candidates=game_resolution.candidates,
                 timings_ms=state["timings_ms"],
+                usage=self._request_usage(
+                    usage_before, state["investigation"], state["search_plan"]
+                ),
             )
         state = {**state, "game_resolution": game_resolution}
         improve_kwargs = dict(
@@ -149,19 +158,23 @@ class QuestAgent:
             title=title,
             is_new=is_new_session,
             timings_ms=state["timings_ms"],
+            usage=self._request_usage(
+                usage_before, state["investigation"], state["search_plan"]
+            ),
         )
         await conversation_store.save_chat(request, response)
         return response
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
-        provider_scope = getattr(self.llm, "provider_scope", None)
-        if callable(provider_scope):
-            async with provider_scope(request):
-                async for event in self._stream(request):
-                    yield event
-            return
-        async for event in self._stream(request):
-            yield event
+        with self._search_usage_scope():
+            provider_scope = getattr(self.llm, "provider_scope", None)
+            if callable(provider_scope):
+                async with provider_scope(request):
+                    async for event in self._stream(request):
+                        yield event
+                return
+            async for event in self._stream(request):
+                yield event
 
     async def _stream(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
         started = perf_counter()
@@ -318,29 +331,19 @@ class QuestAgent:
         request's identity decision.
         """
         resolved = game_resolution
-        # Game identity is a safety boundary, not a retrieval result.  Before
-        # using an unconfirmed title, resolve it once so a plausible guide
-        # page cannot silently select one of several games sharing that name.
-        # This is an identity-state rule, not a title, game, or action-word
-        # heuristic. Retrieval callers that already supplied a confirmed
-        # identity avoid the extra lookup.
-        if (
-            request.metadata.get("confirmed_game") is not True
-            and not request.metadata.get("selected_game_url")
-        ):
-            resolution_started = perf_counter()
-            resolved = await self._resolve_request_game(request)
-            if timings_ms is not None:
-                timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
-            if self._needs_game_confirmation(resolved):
-                outcome = await self.retrieval.investigate(
-                    request=request,
-                    history=history,
-                    plan=plan,
-                    game_resolution=resolved,
-                    initial_sources=[],
-                )
-                return outcome, resolved
+        # Only an already-known conflicting identity blocks retrieval.  For an
+        # otherwise unverified title, the first evidence wave is safer and
+        # cheaper than treating a discovery miss as user-facing ambiguity.
+        # Retrieval still never chooses between explicit competing candidates.
+        if game_resolution.ambiguous:
+            outcome = await self.retrieval.investigate(
+                request=request,
+                history=history,
+                plan=plan,
+                game_resolution=game_resolution,
+                initial_sources=[],
+            )
+            return outcome, game_resolution
         retrieval_started = perf_counter()
         initial_sources = await self.retrieval.retrieve_sources(
             request.question,
@@ -350,7 +353,18 @@ class QuestAgent:
         )
         if timings_ms is not None:
             timings_ms["retrieval_initial"] = self._elapsed_ms(retrieval_started)
-        if not initial_sources:
+        # A query can return a perfectly coherent answer for a *different*
+        # game when the supplied title is short, misspelled, or shared.  The
+        # relaxed retrieval path intentionally permits localized pages whose
+        # title is established by the query, so do not use its presence as
+        # identity proof.  Recover identity only when no retained passage
+        # independently carries the requested title or a previously confirmed
+        # alias.  This keeps ordinary title-bearing evidence on the fast path
+        # while preventing cross-game evidence from being rendered as fact.
+        if not initial_sources or not self._sources_establish_game_identity(
+            sources=initial_sources,
+            resolution=game_resolution,
+        ):
             resolution_started = perf_counter()
             resolved = await self._resolve_request_game(request)
             if timings_ms is not None:
@@ -369,7 +383,21 @@ class QuestAgent:
                         initial_sources=[],
                     )
                     return outcome, resolved
+                # Discovery did not identify a competing title, but the
+                # retained pages still failed the source-local identity gate.
+                # Do not let those pages become a fallback answer.
+                if initial_sources:
+                    initial_sources = []
                 resolved = game_resolution
+            elif initial_sources and not self._sources_establish_game_identity(
+                sources=initial_sources,
+                resolution=resolved,
+            ):
+                # A unique candidate that still does not match any retained
+                # page cannot safely bind those pages to the user's game.
+                # Continue through the conservative evidence path rather than
+                # presenting a plausible answer from another title.
+                initial_sources = []
         if (
             not initial_sources
             and resolved.is_confirmed
@@ -428,6 +456,29 @@ class QuestAgent:
             ]
         }
         return bool(after_values - before_values)
+
+    @staticmethod
+    def _sources_establish_game_identity(
+        *, sources: list[Source], resolution: GameResolution
+    ) -> bool:
+        """Require a retained page to name this game before it can answer it.
+
+        The test is intentionally structural and source-local: canonical title
+        plus server-confirmed aliases are accepted, but a matching search query
+        or a source type is never treated as proof of identity.
+        """
+        names = list(dict.fromkeys([
+            resolution.input_name,
+            resolution.confirmed_name or "",
+            *resolution.aliases,
+        ]))
+        return any(
+            matches_game_identity(
+                text=f"{source.title} {source.url} {source.evidence or source.snippet or ''}",
+                game_names=names,
+            )
+            for source in sources
+        )
 
     async def _retrieve_with_refinement(
         self,
@@ -497,6 +548,52 @@ class QuestAgent:
     @staticmethod
     def _elapsed_ms(started: float) -> int:
         return round((perf_counter() - started) * 1000)
+
+    def _search_usage_snapshot(self) -> dict[str, int]:
+        snapshot = getattr(self.search_provider, "usage_snapshot", None)
+        if not callable(snapshot):
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+        values = snapshot()
+        if not isinstance(values, dict):
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+        return {
+            key: max(0, int(values.get(key, 0)))
+            for key in ("tavily_paid_calls", "tavily_cache_hits")
+        }
+
+    def _search_usage_scope(self):
+        factory = getattr(self.search_provider, "usage_scope", None)
+        return factory() if callable(factory) else nullcontext()
+
+    def _request_usage(
+        self,
+        before: dict[str, int],
+        investigation: InvestigationState | None = None,
+        plan: SearchPlan | None = None,
+    ) -> dict[str, int]:
+        after = self._search_usage_snapshot()
+        usage = {
+            key: max(0, after.get(key, 0) - before.get(key, 0))
+            for key in ("tavily_paid_calls", "tavily_cache_hits")
+        }
+        model_usage = getattr(self.llm, "request_usage", None)
+        values = model_usage() if callable(model_usage) else {}
+        usage["model_calls"] = max(0, int(values.get("model_calls", 0))) if isinstance(values, dict) else 0
+        usage["investigation_hops"] = investigation.hop_count if investigation is not None else 0
+        usage["complex_evidence_path"] = int(bool(
+            usage["model_calls"] > 2
+            or
+            investigation
+            and (
+                investigation.hop_count > 0
+                or plan is not None and (
+                    plan.version_sensitive
+                    or bool(plan.missing_info)
+                    or len(plan.named_entity_groups) >= 2
+                )
+            )
+        ))
+        return usage
 
     @staticmethod
     def _add_optional_argument(callable_obj, kwargs: dict, name: str, value) -> None:

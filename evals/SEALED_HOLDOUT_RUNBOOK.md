@@ -56,6 +56,15 @@ hash matches and the dataset is eligible to be treated as sealed.
 Start a dedicated evaluation API instance with an isolated database/cache and
 test-only model credentials, then run:
 
+当 API 使用服务器 `.env` 内的密钥时，模型由 API 的 `DEEPSEEK_MODEL`（或对应服务端配置）
+决定；评测命令的 `--ai-model` 不会覆盖它。只有设置了请求专用的
+`QUESTMATE_EVAL_AI_API_KEY` 时，才可在评测命令中传入 `--ai-model` 与 `--ai-base-url`。
+
+When the API uses a server-owned `.env` key, its `DEEPSEEK_MODEL` (or equivalent
+server configuration) determines the model; evaluator `--ai-model` does not
+override it. Pass `--ai-model` and `--ai-base-url` only when a request-owned
+`QUESTMATE_EVAL_AI_API_KEY` is configured.
+
 ```bash
 uv run python evals/run_evals.py \
   --cases /secure/questmate-holdout.jsonl \

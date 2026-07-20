@@ -6,7 +6,9 @@ import time
 import pytest
 import search_cache as search_cache_module
 import tasks as tasks_module
+from agent import QuestAgent
 from knowledge import KnowledgeStore, knowledge_store
+from schemas import InvestigationState, SearchPlan
 from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
 from source_registry import game_source_registry
 from storage import conversation_store, shared_database
@@ -175,6 +177,66 @@ def test_identical_concurrent_search_misses_share_one_upstream_call() -> None:
     assert upstream.calls == 1
     assert client.upstream_calls == 1
     assert client.cache_hits == workers - 1
+
+
+def test_search_usage_scope_reports_request_local_cost_only() -> None:
+    class Search:
+        def search(self, **_kwargs):
+            return {"results": []}
+
+    client = CachedSearchClient(Search(), TTLSearchCache(ttl_seconds=60, max_entries=4))
+
+    with client.usage_scope():
+        client.search(query="synthetic", max_results=2)
+        client.search(query="synthetic", max_results=2)
+        assert client.request_usage() == {"tavily_paid_calls": 1, "tavily_cache_hits": 1}
+
+    assert client.request_usage() == {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+
+
+def test_search_usage_scope_enforces_paid_call_budget() -> None:
+    class Search:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def search(self, **_kwargs):
+            self.calls += 1
+            return {"results": [{"title": "result"}]}
+
+    upstream = Search()
+    client = CachedSearchClient(upstream, TTLSearchCache(ttl_seconds=60, max_entries=4))
+
+    with client.usage_scope(max_paid_calls=1):
+        first = client.search(query="synthetic-one", max_results=2)
+        second = client.search(query="synthetic-two", max_results=2)
+        assert first["results"]
+        assert second == {"results": []}
+        assert client.request_usage()["tavily_paid_calls"] == 1
+
+    assert upstream.calls == 1
+
+
+def test_three_model_calls_are_reported_as_a_complex_evidence_path() -> None:
+    class Search:
+        def usage_snapshot(self):
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+
+    class LLM:
+        def request_usage(self):
+            return {"model_calls": 3}
+
+    agent = object.__new__(QuestAgent)
+    agent.search_provider = Search()
+    agent.llm = LLM()
+
+    usage = agent._request_usage(
+        {"tavily_paid_calls": 0, "tavily_cache_hits": 0},
+        InvestigationState(goal="Verify a conditional relationship"),
+        SearchPlan(),
+    )
+
+    assert usage["model_calls"] == 3
+    assert usage["complex_evidence_path"] == 1
 
 
 async def test_cancelled_background_index_is_marked_failed() -> None:

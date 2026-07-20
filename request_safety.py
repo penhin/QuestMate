@@ -46,6 +46,22 @@ _CONTEXT_EXTRACTION_PATTERN = re.compile(
     r"(?:你(?:被|需要).{0,24}(?:遵循|执行|给出).{0,24}(?:什么|哪些)(?:指令|规则))",
     re.IGNORECASE,
 )
+_ACCESS_CONTROL_BYPASS_PATTERN = re.compile(
+    # This is a boundary policy rather than game-intent parsing: it only
+    # triggers when an evasion request is paired with an external access
+    # control. The alternatives cover ordinary paraphrases, not game terms.
+    r"(?:bypass|evade|circumvent|defeat|work\s*around|avoid|skip|disable|remove|"
+    r"access\s+without\s+(?:permission|authorization)|绕过|绕开|规避|避开|突破|破解|跳过|关闭|取消).{0,64}"
+    r"(?:website|site|service|access(?:\s+control)?|restriction|paywall|rate\s*limit|"
+    r"login|authentication|verification|captcha|网站|站点|服务|访问(?:控制|限制)?|限制|付费墙|频率限制|反爬|"
+    r"登录|认证|验证|验证码)|"
+    r"(?:website|site|service|access(?:\s+control)?|restriction|paywall|rate\s*limit|"
+    r"login|authentication|verification|captcha|网站|站点|服务|访问(?:控制|限制)?|限制|付费墙|频率限制|反爬|"
+    r"登录|认证|验证|验证码).{0,64}"
+    r"(?:bypass|evade|circumvent|defeat|work\s*around|avoid|skip|disable|remove|"
+    r"access\s+without\s+(?:permission|authorization)|绕过|绕开|规避|避开|突破|破解|跳过|关闭|取消)",
+    re.IGNORECASE,
+)
 
 
 def requires_safe_refusal(question: str) -> bool:
@@ -58,4 +74,5 @@ def requires_safe_refusal(question: str) -> bool:
             and _INTERNAL_INFO_REQUEST_PATTERN.search(question)
         )
         or _CONTEXT_EXTRACTION_PATTERN.search(question)
+        or _ACCESS_CONTROL_BYPASS_PATTERN.search(question)
     )

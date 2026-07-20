@@ -73,6 +73,15 @@ def test_planner_accepts_generic_game_identity_intent() -> None:
     assert plan.intent == "game_identity"
 
 
+def test_planner_preserves_model_selected_relation_verification() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"general","version_sensitive":false,"requires_relation_verification":true,"named_entity_groups":[["Amber Relay"],["Blue Gate"]],"aliases":[],"queries":[{"source_type":"wiki","query":"Amber Relay Blue Gate condition"}],"missing_info":[]}',
+        fallback_question="Does the Amber Relay open the Blue Gate?",
+    )
+
+    assert plan.requires_relation_verification is True
+
+
 def test_answer_revision_cannot_add_new_facts_or_detach_citations() -> None:
     prompt = GuideLLM._answer_revision_system_prompt()
 
@@ -211,7 +220,7 @@ def test_legacy_answer_with_available_claims_uses_claim_ledger() -> None:
     assert rendered.endswith("[1]")
 
 
-def test_structured_answer_retains_unreferenced_direct_evidence_chain() -> None:
+def test_structured_answer_does_not_append_unselected_evidence_claims() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay and what opens it?")
     sources = [
         Source(
@@ -237,8 +246,8 @@ def test_structured_answer_retains_unreferenced_direct_evidence_chain() -> None:
     )
 
     assert "继电器在东侧档案库。[1]" in rendered
-    assert "证据补充" in rendered
-    assert "[2]" in rendered
+    assert "证据补充" not in rendered
+    assert "[2]" not in rendered
 
 
 def test_structured_answer_drops_unbound_fact_blocks() -> None:
@@ -696,6 +705,44 @@ def test_openai_compatible_provider_uses_a_bounded_request_timeout() -> None:
         import asyncio
 
         asyncio.run(provider.aclose())
+
+
+@pytest.mark.asyncio
+async def test_planner_timeout_uses_vocabulary_free_fallback_without_blocking_answer_budget() -> None:
+    class SlowProvider:
+        async def complete(self, **_kwargs):
+            import asyncio
+
+            await asyncio.sleep(1)
+            return '{"intent":"item_location","queries":[]}'
+
+    llm = GuideLLM(provider=SlowProvider(), settings=Settings())
+    llm.settings.planner_model_timeout_seconds = 0.01
+
+    plan = await llm.plan_search(
+        request=ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?"),
+    )
+
+    assert plan.intent == "general"
+    assert plan.queries
+
+
+@pytest.mark.asyncio
+async def test_answer_timeout_returns_a_conservative_response() -> None:
+    class SlowProvider:
+        async def complete(self, **_kwargs):
+            import asyncio
+
+            await asyncio.sleep(1)
+            return '{"blocks":[]}'
+
+    llm = GuideLLM(provider=SlowProvider(), settings=Settings())
+    llm.settings.answer_model_timeout_seconds = 0.01
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+
+    answer = await llm.answer(request=request, sources=[], plan=SearchPlan(intent="general"))
+
+    assert "没有找到" in answer or "没有可靠" in answer
 
 
 def test_search_planner_sanitizes_prompt_injection_text() -> None:

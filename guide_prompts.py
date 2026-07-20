@@ -60,7 +60,9 @@ def search_planner_system_prompt() -> str:
     return (
         f"{PROMPT_SECURITY_RULES} "
         "You plan web searches for a game guide assistant. "
-        "Return only compact JSON with keys: intent, version_sensitive, named_entity_groups, aliases, queries, missing_info. "
+        "Return only compact JSON with keys: intent, version_sensitive, requires_relation_verification, named_entity_groups, aliases, queries, missing_info. "
+        "requires_relation_verification is true when an entity mention alone cannot prove the requested condition, outcome, comparison, interaction, or ordered sequence; "
+        "it is false for a single direct fact whose source passage can state the requested result without joining independent evidence. "
         "named_entity_groups must contain 0 to 4 distinct entities, each represented by a list of equivalent names. "
         "Evidence must match at least one name in every group. Each group needs one surface name from the user's "
         "question; translated/alternate members must also appear in aliases or explicitly in a planned query. Do not "

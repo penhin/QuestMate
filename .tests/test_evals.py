@@ -17,7 +17,7 @@ from evals.run_evals import (
     sealed_holdout_report,
     validate_sealed_holdout_run,
 )
-from evals.scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
+from evals.scoring import SCORING_SCHEMA_VERSION, evaluation_contract, evaluate_case, summarize
 
 
 def test_evaluation_suite_has_diverse_unique_cases() -> None:
@@ -686,6 +686,30 @@ def test_question_entity_can_ground_answer_without_curated_terms() -> None:
     assert unrelated["passed"] is False
 
 
+def test_citation_grounding_allows_game_bound_cjk_orthographic_entity_variants() -> None:
+    case = {
+        "id": "orthographic-entity",
+        "game": "Synthetic Adventure",
+        "question": "雲紋鑰匙如何使用？",
+        "expected_behavior": "answer",
+        "required_terms": ["雲紋鑰匙"],
+    }
+    response = {
+        "answer": "雲紋鑰匙可用於開啟北門。[1]",
+        "sources": [{
+            "title": "Synthetic Adventure 云纹钥匙指南",
+            "url": "https://example.com/cloud-key",
+            "source_type": "wiki",
+            "evidence": "云纹钥匙用于开启北门。",
+        }],
+    }
+
+    result = evaluate_case(case, response)
+
+    assert result["citation_grounding_pass"] is True
+    assert result["passed"] is True
+
+
 def test_citation_grounding_requires_relationship_evidence_but_allows_cross_script_aliases() -> None:
     case = {
         "id": "translated-boss-name",
@@ -694,6 +718,7 @@ def test_citation_grounding_requires_relationship_evidence_but_allows_cross_scri
         "category": "boss_strategy",
         "expected_behavior": "answer",
         "required_terms": ["星辉守卫"],
+        "evidence_terms": ["distance", "dodge"],
     }
     answer = "星辉守卫的横扫需要拉开距离后闪避。[1]"
     entity_only = evaluate_case(
@@ -801,6 +826,32 @@ def test_summary_reports_quality_dimensions_and_segments() -> None:
     assert summary["by_expected_behavior"]["answer"]["needs_game_confirmation_rate"] == 0
     assert summary["by_expected_behavior"]["confirmation"]["needs_game_confirmation_rate"] == 1
     assert summary["needs_game_confirmation_rate"] == 0.5
+
+
+def test_summary_reports_eligible_cohorts_and_usage_without_case_data() -> None:
+    results = [
+        {
+            "case": {"category": "quest", "split": "validation", "tier": "mainstream", "difficulty": "standard", "expected_behavior": "answer"},
+            "evaluation": {"passed": True, "citation_required": True, "citation_pass": True, "citation_grounding_pass": True, "needs_game_confirmation": False, "behavior_pass": True, "forbidden_terms_pass": True, "source_count": 1},
+            "usage": {"model_calls": 2, "tavily_paid_calls": 1, "tavily_cache_hits": 1, "complex_evidence_path": 0},
+            "latency_ms": 100,
+        },
+        {
+            "case": {"category": "safety", "split": "validation", "tier": "safety", "difficulty": "hard", "expected_behavior": "safe_refusal"},
+            "evaluation": {"passed": True, "citation_required": False, "citation_pass": True, "citation_grounding_pass": True, "needs_game_confirmation": False, "behavior_pass": True, "forbidden_terms_pass": True, "source_count": 0},
+            "usage": {"model_calls": 0, "tavily_paid_calls": 0, "tavily_cache_hits": 0, "complex_evidence_path": 0},
+            "latency_ms": 120,
+        },
+    ]
+
+    summary = summarize(results)
+
+    assert summary["cohorts"]["citation_required"]["citation_grounding_pass_rate"] == 1
+    assert summary["cohorts"]["normal_guide"]["needs_game_confirmation_rate"] == 0
+    assert summary["cohorts"]["safety"]["behavior_pass_rate"] == 1
+    assert summary["resource_usage"]["model_calls"]["max"] == 2
+    assert summary["budget"]["model_calls_within_budget_rate"] == 1
+    assert evaluation_contract(summary)["passed"] is True
 
 
 def test_summary_aggregates_stage_timings_without_case_details() -> None:

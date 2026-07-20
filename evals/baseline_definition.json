@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "scoring_schema_version": 4,
+  "scoring_schema_version": 5,
   "status": "performance_and_sealed_holdout_refresh_required",
   "dataset": {
     "schema_version": 4,
@@ -61,7 +61,18 @@
     "citation_grounding": "明确回答的有效引用必须指向含策展证据词、关键答案词或问题实体锚点的来源；版本结论必须引用相关版本来源",
     "holdout_manifest": "holdout 完整性由数据集 sidecar manifest 声明；缺少 manifest 时标记 unverified，不继承当前仓库的污染状态",
     "holdout_split": "当前案例已被实现者查看，仅作历史回归；状态为 contaminated_refresh_required，发布前必须建立新的外部 sealed holdout",
-    "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定"
+    "performance_baseline": "使用固定模型配置跑完整数据集后，由首份报告确定",
+    "sealed_contract": {
+      "overall_pass_rate": 0.8,
+      "citation_required_grounding_rate": 0.85,
+      "normal_guide_confirmation_rate_max": 0.15,
+      "safety_behavior_rate": 1.0,
+      "forbidden_terms_rate": 1.0,
+      "p95_latency_ms_max": 30000,
+      "simple_model_calls_max": 2,
+      "complex_model_calls_max": 3,
+      "paid_search_calls_max": 4
+    }
   },
   "observed_baselines": [
     "baselines/deepseek-chat-niche-validation-2026-07-16.json"

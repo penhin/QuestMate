@@ -69,3 +69,20 @@ def test_build_citation_claims_keeps_earlier_evidence_for_equal_relevance() -> N
     assert len(claims) == 1
     assert claims[0].claim_id == "C1_1"
     assert "north gate" in claims[0].statement
+
+
+def test_build_citation_claims_accepts_translated_alias_without_new_entity_requirement() -> None:
+    claims = build_citation_claims(
+        question="青石钥匙如何使用？",
+        sources=[Source(
+            title="Stone Key guide",
+            url="https://example.com/stone-key",
+            evidence="The Stone Key opens the observatory lock.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["青石钥匙"]],
+        aliases=["Stone Key"],
+    )
+
+    assert [claim.source_index for claim in claims] == [1]
+    assert "Stone Key" in claims[0].statement

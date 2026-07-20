@@ -15,6 +15,7 @@ def build_citation_claims(
     sources: list[Source],
     eligible_source_indexes: set[int],
     entity_groups: list[list[str]] | None = None,
+    aliases: list[str] | None = None,
     max_claims: int = 8,
 ) -> list[CitationClaim]:
     """Split direct evidence into bounded claims without an extra model call.
@@ -26,6 +27,7 @@ def build_citation_claims(
     """
     tokens = question_relevance_tokens(question)
     groups = entity_groups or []
+    surface_aliases = [value.casefold() for value in (aliases or []) if value.strip()]
     claims: list[CitationClaim] = []
     for source_index, source in enumerate(sources, start=1):
         if source_index not in eligible_source_indexes:
@@ -34,7 +36,7 @@ def build_citation_claims(
         ranked = sorted(
             enumerate(passages),
             key=lambda item: (
-                -_passage_score(item[1], tokens, groups)[0],
+                -_passage_score(item[1], tokens, groups, surface_aliases)[0],
                 len(item[1]),
                 item[0],
             ),
@@ -43,7 +45,7 @@ def build_citation_claims(
         for position, passage in ranked:
             if selected >= 3 or len(claims) >= max_claims:
                 break
-            if _passage_score(passage, tokens, groups)[0] <= 0:
+            if _passage_score(passage, tokens, groups, surface_aliases)[0] <= 0:
                 continue
             claims.append(CitationClaim(
                 claim_id=f"C{source_index}_{position + 1}",
@@ -68,14 +70,21 @@ def _passages(evidence: str) -> list[str]:
 
 
 def _passage_score(
-    passage: str, tokens: list[str], entity_groups: list[list[str]] | None = None
+    passage: str,
+    tokens: list[str],
+    entity_groups: list[list[str]] | None = None,
+    aliases: list[str] | None = None,
 ) -> tuple[int, int]:
     lowered = passage.casefold()
     if entity_groups:
         matches = sum(
             1 for group in entity_groups if any(token_in_text(value.casefold(), lowered) for value in group)
         )
-        return matches, -len(passage)
+        # Aliases are alternate surfaces of a requested entity, not extra
+        # relation endpoints. They make translated evidence selectable without
+        # weakening the distinct entity-group requirements.
+        alias_match = any(token_in_text(value, lowered) for value in aliases or [])
+        return matches + int(alias_match), -len(passage)
     matches = sum(
         1
         for token in tokens

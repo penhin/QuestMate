@@ -206,6 +206,55 @@ async def test_direct_single_entity_evidence_skips_expensive_investigation() -> 
     assert outcome.investigation.hop_count == 0
 
 
+async def test_relation_verification_plan_uses_one_bounded_investigation_check() -> None:
+    class EmptyKnowledge:
+        async def retrieve(self, *, game: str, query: str):
+            return []
+
+    class Search:
+        async def search(self, query: str, game: str, **kwargs):
+            return [Source(
+                title="Amber Relay guide",
+                url="https://example.com/amber-relay",
+                evidence="The Amber Relay is found in the old tower.",
+                source_type="wiki",
+            )]
+
+    class Investigator:
+        def __init__(self):
+            self.calls = 0
+
+        async def update_investigation(self, **kwargs):
+            self.calls += 1
+            return kwargs["investigation"].model_copy(update={
+                "complete": False,
+                "next_queries": [],
+                "stop_reason": "insufficient_evidence",
+            })
+
+    investigator = Investigator()
+    coordinator = RetrievalCoordinator(
+        knowledge=EmptyKnowledge(), search_provider=Search(), llm=investigator, max_results=5
+    )
+    request = ChatRequest(game="Example Game", question="Does the Amber Relay open the Blue Gate?")
+
+    outcome = await coordinator.investigate(
+        request=request,
+        history=[],
+        plan=SearchPlan(
+            intent="general",
+            requires_relation_verification=True,
+            named_entity_groups=[["Amber Relay"], ["Blue Gate"]],
+        ),
+        game_resolution=GameResolution(
+            input_name=request.game, confirmed_name=request.game, confidence=1
+        ),
+    )
+
+    assert investigator.calls == 1
+    assert outcome.investigation.stop_reason == "insufficient_evidence"
+
+
 async def test_answer_completeness_judge_reports_missing_access_step() -> None:
     class JudgeProvider:
         async def complete(self, **kwargs):

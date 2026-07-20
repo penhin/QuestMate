@@ -85,6 +85,23 @@ def test_default_first_wave_interleaves_independent_planned_semantics() -> None:
     assert "site:" not in queries[1][0]
 
 
+def test_initial_entity_group_keeps_planner_alias_for_cross_language_retrieval() -> None:
+    plan = SearchPlan(
+        aliases=["Stone Key"],
+        named_entity_groups=[["青石钥匙"]],
+        queries=[{"source_type": "wiki", "query": "青石钥匙 使用条件"}],
+    )
+
+    queries = build_search_queries(
+        game="示例游戏",
+        question="青石钥匙如何使用？",
+        plan=plan,
+        sources=SOURCE_POLICIES,
+    )
+
+    assert any("Stone Key" in query for query, _source in queries)
+
+
 def test_query_portfolio_stays_within_global_and_refinement_limits() -> None:
     plan = SearchPlan(
         queries=[
@@ -162,10 +179,10 @@ def test_plan_merge_unions_overlapping_alias_groups_for_one_entity() -> None:
 async def test_first_wave_never_exceeds_request_query_budget() -> None:
     class CountingClient:
         def __init__(self) -> None:
-            self.calls: list[str] = []
+            self.calls: list[tuple[str, str | None]] = []
 
         def search(self, **kwargs):
-            self.calls.append(kwargs["query"])
+            self.calls.append((kwargs["query"], kwargs.get("search_depth")))
             return {"results": []}
 
     client = CountingClient()
@@ -197,6 +214,84 @@ async def test_first_wave_never_exceeds_request_query_budget() -> None:
     )
 
     assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_identity_reserves_one_paid_query_for_recovery() -> None:
+    class CountingClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def search(self, **kwargs):
+            self.calls.append(kwargs["query"])
+            return {"results": []}
+
+    client = CountingClient()
+    provider = TavilySearchProvider(
+        settings=Settings(
+            mediawiki_direct_search=False,
+            search_cache_use_redis=False,
+            tavily_first_wave_queries=3,
+            tavily_max_queries_per_request=4,
+            tavily_unconfirmed_identity_reserve=1,
+        ),
+        client=client,
+    )
+    await provider.search(
+        "How does the Quartz Relay work?",
+        "Synthetic Adventure",
+        plan=SearchPlan(
+            queries=[
+                {"source_type": "wiki", "query": "Synthetic Adventure Quartz Relay"},
+                {"source_type": "community", "query": "Quartz Relay behavior"},
+                {"source_type": "web", "query": "Quartz Relay guide"},
+                {"source_type": "web", "query": "Quartz Relay source"},
+            ],
+        ),
+        game_resolution=GameResolution(input_name="Synthetic Adventure", confirmed_name="Synthetic Adventure"),
+    )
+
+    assert len(client.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_relation_verification_reserves_search_capacity_for_investigation() -> None:
+    class CountingClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str | None]] = []
+
+        def search(self, **kwargs):
+            self.calls.append((kwargs["query"], kwargs.get("search_depth")))
+            return {"results": []}
+
+    client = CountingClient()
+    provider = TavilySearchProvider(
+        settings=Settings(
+            mediawiki_direct_search=False,
+            search_cache_use_redis=False,
+            tavily_first_wave_queries=3,
+            tavily_max_queries_per_request=4,
+        ),
+        client=client,
+    )
+    await provider.search(
+        "Does the Amber Relay open the Blue Gate?",
+        "Example Game",
+        plan=SearchPlan(
+            requires_relation_verification=True,
+            queries=[
+                {"source_type": "wiki", "query": "Amber Relay Blue Gate condition"},
+                {"source_type": "community", "query": "Amber Relay Blue Gate report"},
+                {"source_type": "web", "query": "Amber Relay Blue Gate"},
+            ],
+        ),
+        game_resolution=GameResolution(
+            input_name="Example Game", confirmed_name="Example Game", confidence=1
+        ),
+    )
+
+    assert len(client.calls) == 2
+    assert {depth for _query, depth in client.calls} == {"advanced"}
 
 
 def test_fallback_plan_keeps_novel_question_as_an_open_candidate() -> None:
