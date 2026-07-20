@@ -255,6 +255,60 @@ async def test_relation_verification_plan_uses_one_bounded_investigation_check()
     assert outcome.investigation.stop_reason == "insufficient_evidence"
 
 
+async def test_refinement_handoff_bounds_model_generated_gap_lists_to_plan_schema() -> None:
+    class EmptyKnowledge:
+        async def retrieve(self, *, game: str, query: str):
+            return []
+
+    class Search:
+        def __init__(self) -> None:
+            self.refinement_missing_info: list[str] | None = None
+
+        async def search(self, query: str, game: str, **kwargs):
+            plan = kwargs.get("plan")
+            if plan and plan.refinement:
+                self.refinement_missing_info = plan.missing_info
+                return [Source(
+                    title="Refined relay route",
+                    url="https://example.com/refined-relay",
+                    evidence="The Amber Relay opens the Blue Gate.",
+                )]
+            return [Source(
+                title="Initial relay route",
+                url="https://example.com/initial-relay",
+                evidence="The Amber Relay is in the archive.",
+            )]
+
+    class Investigator:
+        async def update_investigation(self, *, investigation, **_kwargs):
+            return investigation.model_copy(update={
+                "unresolved_questions": [f"gap {index}" for index in range(6)],
+                "next_queries": [PlannedSearchQuery(source_type="wiki", query="Amber Relay Blue Gate")],
+                "stop_reason": "needs_search",
+            })
+
+    search = Search()
+    coordinator = RetrievalCoordinator(
+        knowledge=EmptyKnowledge(), search_provider=search, llm=Investigator(), max_results=5
+    )
+    request = ChatRequest(game="Synthetic Adventure", question="Does the Amber Relay open the Blue Gate?")
+
+    await coordinator.investigate(
+        request=request,
+        history=[],
+        plan=SearchPlan(
+            intent="general",
+            requires_relation_verification=True,
+            named_entity_groups=[["Amber Relay"], ["Blue Gate"]],
+        ),
+        game_resolution=GameResolution(
+            input_name=request.game, confirmed_name=request.game, confidence=1
+        ),
+    )
+
+    assert search.refinement_missing_info == ["gap 0", "gap 1", "gap 2", "gap 3"]
+
+
 async def test_answer_completeness_judge_reports_missing_access_step() -> None:
     class JudgeProvider:
         async def complete(self, **kwargs):

@@ -20,17 +20,23 @@ _SECRET_REQUEST_PATTERN = re.compile(
 )
 _PROTECTED_INTERNAL_INFO_PATTERN = re.compile(
     r"(?:system\s*(?:prompt|instruction|message)|developer\s+message|"
-    r"hidden\s*(?:prompt|instruction|message)|internal\s*(?:prompt|instruction|rule)|"
+    r"hidden\s*(?:prompt|instruction|message|configuration|config)|"
+    r"internal\s*(?:prompt|instruction|rule|configuration|config)|"
     r"系统(?:提示词|指令|消息)|开发者(?:消息|提示词|指令)|"
-    r"隐藏(?:提示词|指令|消息)|内部(?:提示词|指令|规则)|"
-    r"api[ _-]?key|access[ _-]?token|secret|credential|password|"
-    r"密钥|令牌|凭据|密码)",
+    r"隐藏(?:提示词|指令|消息|配置)|内部(?:提示词|指令|规则|配置)|"
+    r"api[ _-]?key|access[ _-]?token|secret|credential|password|private[ _-]?key|"
+    r"authorization\s+header|session\s*(?:id|token|cookie)|environment\s+variables?|"
+    r"(?:database|postgres(?:ql)?)\s*(?:url|connection(?:\s+string)?|string)|\.env|"
+    r"密钥|令牌|凭据|密码|私钥|授权头|会话(?:标识|令牌|Cookie)|环境变量|"
+    r"数据库(?:连接|地址)|配置文件)",
     re.IGNORECASE,
 )
 _INTERNAL_INFO_REQUEST_PATTERN = re.compile(
     r"(?:what(?:'s|\s+is)|tell\s+me|can\s+you\s+(?:share|give|show)|"
     r"may\s+i\s+(?:see|have)|give\s+me|show\s+me|"
-    r"是什么|什么是|告诉我|给我|展示|显示|提供|分享|说一下|能否|可以).{0,80}"
+    r"(?:translate|summari[sz]e|encode|decode|convert|format|serialize|print|export)\b|"
+    r"是什么|什么是|告诉我|给我|展示|显示|提供|分享|说一下|能否|可以|"
+    r"翻译|总结|概括|编码|解码|转换|格式化|打印|导出).{0,80}"
     r"|.{0,80}(?:\?|？)",
     re.IGNORECASE,
 )
@@ -62,6 +68,19 @@ _ACCESS_CONTROL_BYPASS_PATTERN = re.compile(
     r"access\s+without\s+(?:permission|authorization)|绕过|绕开|规避|避开|突破|破解|跳过|关闭|取消)",
     re.IGNORECASE,
 )
+_UNAUTHENTICATED_ACCESS_PATTERN = re.compile(
+    r"(?:access|enter|use|view|reach|log\s*in).{0,64}"
+    r"(?:without|not\s+having|beyond).{0,32}"
+    r"(?:log(?:ging)?\s*in|sign(?:ing)?\s*in|authentication|verification|permission|authorization|account)|"
+    r"(?:without|not\s+having|beyond).{0,32}"
+    r"(?:log(?:ging)?\s*in|sign(?:ing)?\s*in|authentication|verification|permission|authorization|account).{0,64}"
+    r"(?:access|enter|use|view|reach|log\s*in)|"
+    r"(?:访问|进入|查看|使用).{0,48}(?:无需|不(?:用|需要)|没有).{0,24}"
+    r"(?:登录|认证|验证|权限|授权|账号)|"
+    r"(?:无需|不(?:用|需要)|没有).{0,24}(?:登录|认证|验证|权限|授权|账号).{0,48}"
+    r"(?:访问|进入|查看|使用)",
+    re.IGNORECASE,
+)
 
 
 def requires_safe_refusal(question: str) -> bool:
@@ -75,4 +94,5 @@ def requires_safe_refusal(question: str) -> bool:
         )
         or _CONTEXT_EXTRACTION_PATTERN.search(question)
         or _ACCESS_CONTROL_BYPASS_PATTERN.search(question)
+        or _UNAUTHENTICATED_ACCESS_PATTERN.search(question)
     )

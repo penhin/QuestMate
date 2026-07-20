@@ -151,9 +151,13 @@ class RetrievalCoordinator:
                     version_sensitive=merged_plan.version_sensitive,
                     requires_relation_verification=merged_plan.requires_relation_verification,
                     named_entity_groups=merged_plan.named_entity_groups,
-                    aliases=investigation.aliases,
-                    queries=investigation.next_queries,
-                    missing_info=investigation.unresolved_questions,
+                    # Investigation state is model-produced. Preserve the
+                    # schema's bounded request contract at this hand-off even
+                    # if a provider returns more otherwise-valid entries than
+                    # the state parser retained for diagnostics.
+                    aliases=investigation.aliases[:6],
+                    queries=investigation.next_queries[:2],
+                    missing_info=investigation.unresolved_questions[:4],
                     refinement=True,
                 )
                 refined_sources = await self.retrieve_sources(
