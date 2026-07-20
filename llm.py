@@ -688,13 +688,13 @@ class GuideLLM:
         """Expose a bounded, source-indexed claim ledger to answer generation.
 
         This is deliberately deterministic: it does not add another model
-        call, and it never turns a passage into a stronger paraphrase.  A row
-        is eligible only when that single source passes the existing direct
-        entity gate.  The model may compose rows, but every factual sentence
-        must retain the row's source index.
+        call, and it never turns a passage into a stronger paraphrase. A row
+        is eligible when its source passes the direct entity gate or contains
+        a planner-declared alternate entity surface. The model may compose
+        rows, but every factual sentence must retain the row's source index.
         """
         eligible_indexes = GuideLLM._claim_eligible_source_indexes(
-            question=question, sources=sources, entity_groups=entity_groups
+            question=question, sources=sources, entity_groups=entity_groups, aliases=aliases
         )
         claims = build_citation_claims(
             question=question,
@@ -711,7 +711,11 @@ class GuideLLM:
 
     @staticmethod
     def _claim_eligible_source_indexes(
-        *, question: str, sources: list[Source], entity_groups: list[list[str]] | None
+        *,
+        question: str,
+        sources: list[Source],
+        entity_groups: list[list[str]] | None,
+        aliases: list[str] | None = None,
     ) -> set[int]:
         """Keep direct evidence, plus one anchored side of a multi-entity chain."""
         eligible = {
@@ -720,6 +724,15 @@ class GuideLLM:
             if GuideLLM._has_question_specific_sources(question=question, sources=[source])
         }
         if not entity_groups or len(entity_groups) < 2:
+            # Planner aliases are alternate surfaces of an entity already in
+            # the question. They often occur on a localized relation page
+            # where the player's original spelling does not. Let that page
+            # contribute an atomic Claim, without treating aliases as extra
+            # relation endpoints or granting it a free factual conclusion.
+            for index, source in enumerate(sources, start=1):
+                source_text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
+                if any(token_in_text(alias.casefold(), source_text) for alias in aliases or []):
+                    eligible.add(index)
             return eligible
         for index, source in enumerate(sources, start=1):
             source_text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
@@ -748,6 +761,7 @@ class GuideLLM:
                 question=evidence_question,
                 sources=sources,
                 entity_groups=plan.named_entity_groups if plan else None,
+                aliases=plan.aliases if plan else None,
             ),
             entity_groups=plan.named_entity_groups if plan else None,
             aliases=plan.aliases if plan else None,
@@ -780,6 +794,7 @@ class GuideLLM:
                     question=evidence_question,
                     sources=sources,
                     entity_groups=plan.named_entity_groups if plan else None,
+                    aliases=plan.aliases if plan else None,
                 ),
                 entity_groups=plan.named_entity_groups if plan else None,
                 aliases=plan.aliases if plan else None,
@@ -799,6 +814,7 @@ class GuideLLM:
                 question=evidence_question,
                 sources=sources,
                 entity_groups=plan.named_entity_groups if plan else None,
+                aliases=plan.aliases if plan else None,
             ),
             entity_groups=plan.named_entity_groups if plan else None,
             aliases=plan.aliases if plan else None,

@@ -517,6 +517,23 @@ def test_evidence_check_treats_planned_aliases_as_alternatives() -> None:
     assert GuideLLM._has_question_specific_sources(question=evidence_question, sources=sources)
 
 
+def test_claim_ledger_keeps_localized_source_when_it_matches_a_planned_alias() -> None:
+    source = Source(
+        title="Loaded Dice route",
+        url="https://example.com/loaded-dice",
+        evidence="Loaded Dice changes the puzzle outcome after it is inserted into the console.",
+    )
+
+    eligible = GuideLLM._claim_eligible_source_indexes(
+        question="灌铅骰子有什么用？",
+        sources=[source],
+        entity_groups=[],
+        aliases=["Loaded Dice"],
+    )
+
+    assert eligible == {1}
+
+
 def test_structured_entity_groups_are_grounded_and_enforce_group_and_alias_or() -> None:
     question = "超级琥珀核心继电器能打开蓝色大门吗？"
     plan = GuideLLM._parse_search_plan(
