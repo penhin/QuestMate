@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 
-SCORING_SCHEMA_VERSION = 7
+SCORING_SCHEMA_VERSION = 8
 
 
 SCORE_DIMENSIONS = (
@@ -569,30 +569,44 @@ def _usage_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, float |
     return summary
 
 
-def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate opt-in response-stage labels without case-level data."""
-    paths = Counter()
-    evidence_levels = Counter()
-    binding = Counter()
+    def summarize_members(members: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+        paths = Counter()
+        evidence_levels = Counter()
+        binding = Counter()
+        for result in members:
+            diagnostics = result.get("diagnostics") or {}
+            if not isinstance(diagnostics, dict):
+                continue
+            path = diagnostics.get("path")
+            if isinstance(path, str):
+                paths[path] += 1
+            level = diagnostics.get("evidence_level")
+            if isinstance(level, str):
+                evidence_levels[level] += 1
+            if path == "answer":
+                if int(diagnostics.get("citation_count", 0)) > 0:
+                    binding["has_rendered_citation"] += 1
+                else:
+                    binding["no_rendered_citation"] += 1
+        return {
+            "response_path": dict(sorted(paths.items())),
+            "evidence_level": dict(sorted(evidence_levels.items())),
+            "answer_citation_binding": dict(sorted(binding.items())),
+        }
+
+    by_behavior: dict[str, list[dict[str, Any]]] = {}
     for result in results:
-        diagnostics = result.get("diagnostics") or {}
-        if not isinstance(diagnostics, dict):
-            continue
-        path = diagnostics.get("path")
-        if isinstance(path, str):
-            paths[path] += 1
-        level = diagnostics.get("evidence_level")
-        if isinstance(level, str):
-            evidence_levels[level] += 1
-        if path == "answer":
-            if int(diagnostics.get("citation_count", 0)) > 0:
-                binding["has_rendered_citation"] += 1
-            else:
-                binding["no_rendered_citation"] += 1
+        behavior = result.get("case", {}).get("expected_behavior")
+        if isinstance(behavior, str):
+            by_behavior.setdefault(behavior, []).append(result)
     return {
-        "response_path": dict(sorted(paths.items())),
-        "evidence_level": dict(sorted(evidence_levels.items())),
-        "answer_citation_binding": dict(sorted(binding.items())),
+        **summarize_members(results),
+        "by_expected_behavior": {
+            behavior: summarize_members(members)
+            for behavior, members in sorted(by_behavior.items())
+        },
     }
 
 

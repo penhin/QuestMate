@@ -91,6 +91,8 @@ normal evaluator report with `results`.
 `agent_funnel` is also aggregate-only: response paths, evidence levels, and
 rendered-citation presence. It contains no prompt, answer, query, source, URL,
 or per-case identifier.
+It also groups these counters by expected behavior only, so `answer` and
+`safe_refusal` failures can be diagnosed without exposing a case.
 
 ## Rotation / 轮换
 

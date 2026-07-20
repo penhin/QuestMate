@@ -880,6 +880,18 @@ def test_summary_aggregates_response_stages_without_case_data() -> None:
         "response_path": {"answer": 1, "safety_gate": 1},
         "evidence_level": {"direct": 1, "none": 1},
         "answer_citation_binding": {"has_rendered_citation": 1},
+        "by_expected_behavior": {
+            "answer": {
+                "response_path": {"answer": 1},
+                "evidence_level": {"direct": 1},
+                "answer_citation_binding": {"has_rendered_citation": 1},
+            },
+            "safe_refusal": {
+                "response_path": {"safety_gate": 1},
+                "evidence_level": {"none": 1},
+                "answer_citation_binding": {},
+            },
+        },
     }
 
 
