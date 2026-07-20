@@ -41,7 +41,7 @@ _INTERNAL_INFO_REQUEST_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CONTEXT_EXTRACTION_PATTERN = re.compile(
-    r"(?:repeat|quote|recite|list|describe|tell|show|display).{0,48}"
+    r"(?:repeat|quote|recite|list|describe|tell|show|display|write).{0,48}"
     r"(?:(?:above|previous|your).{0,48}(?:prompt|instructions?|rules?|messages?)|"
     r"(?:prompt|instructions?|rules?|messages?).{0,48}(?:above|previous))|"
     r"(?:what|which).{0,48}(?:instructions?|rules?).{0,48}"
@@ -52,6 +52,15 @@ _CONTEXT_EXTRACTION_PATTERN = re.compile(
     r"(?:你(?:被|需要).{0,24}(?:遵循|执行|给出).{0,24}(?:什么|哪些)(?:指令|规则))",
     re.IGNORECASE,
 )
+_VERBATIM_PROTECTED_CONTEXT_PATTERN = re.compile(
+    r"(?:verbatim|word\s+for\s+word|exact(?:ly)?|literal(?:ly)?).{0,56}"
+    r"(?:prompt|instructions?|rules?|messages?|configuration|context)|"
+    r"(?:prompt|instructions?|rules?|messages?|configuration|context).{0,56}"
+    r"(?:verbatim|word\s+for\s+word|exact(?:ly)?|literal(?:ly)?)|"
+    r"(?:原样|逐字|一字不差|完整).{0,48}(?:提示词|指令|规则|消息|配置|上下文)|"
+    r"(?:提示词|指令|规则|消息|配置|上下文).{0,48}(?:原样|逐字|一字不差|完整)",
+    re.IGNORECASE,
+)
 _INSTRUCTION_FLOW_OVERRIDE_PATTERN = re.compile(
     # Detect attempts to replace the assistant's instruction hierarchy.  The
     # pattern deliberately requires instruction/control context, rather than
@@ -60,6 +69,7 @@ _INSTRUCTION_FLOW_OVERRIDE_PATTERN = re.compile(
     r".{0,56}(?:previous|prior|earlier|above|current|all).{0,32}"
     r"(?:instructions?|rules?|constraints?|prompt|context|messages?)|"
     r"(?:new|real|only)\s+(?:instructions?|rules?|task|role)\s*(?:is|are|:)|"
+    r"(?:higher|highest)(?:[-\s]+)(?:priority|authority).{0,32}(?:instructions?|rules?|prompt|message)|"
     r"(?:act|behave|respond|roleplay|pretend).{0,28}(?:as|like).{0,16}"
     r"(?:a\s+)?(?:system|developer|unrestricted|jailbroken)\b|"
     r"<\s*/?\s*(?:system|developer|instruction)\s*>|#{2,}\s*"
@@ -67,6 +77,7 @@ _INSTRUCTION_FLOW_OVERRIDE_PATTERN = re.compile(
     r"(?:忘记|抛弃|替换|不再遵循|不要遵循|忽略).{0,56}"
     r"(?:之前|上面|先前|所有|当前).{0,32}(?:指令|规则|约束|提示词|上下文|消息)|"
     r"(?:新的|真正的|唯一的)(?:指令|规则|任务|角色)(?:是|为|：|:)|"
+    r"(?:更高|最高)(?:优先级|权限).{0,32}(?:指令|规则|提示词|消息)|"
     r"(?:扮演|假装|作为).{0,24}(?:系统|开发者|无限制|越狱)(?:角色|助手)?",
     re.IGNORECASE,
 )
@@ -111,6 +122,7 @@ def requires_safe_refusal(question: str) -> bool:
             and _INTERNAL_INFO_REQUEST_PATTERN.search(question)
         )
         or _CONTEXT_EXTRACTION_PATTERN.search(question)
+        or _VERBATIM_PROTECTED_CONTEXT_PATTERN.search(question)
         or _INSTRUCTION_FLOW_OVERRIDE_PATTERN.search(question)
         or _ACCESS_CONTROL_BYPASS_PATTERN.search(question)
         or _UNAUTHENTICATED_ACCESS_PATTERN.search(question)

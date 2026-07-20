@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
-from query_tokens import exact_identifiers
+from query_tokens import exact_identifiers, question_relevance_tokens
 from schemas import (
     AnswerCompletenessAssessment,
     EvidenceFact,
@@ -204,9 +204,33 @@ def ensure_investigation_query(
     identifiers = exact_identifiers(question)
 
     def planned_query(candidate: str, source_type: str) -> PlannedSearchQuery | None:
-        base = sanitize_text(candidate).strip()[:190]
+        # An evidence-gap description is often narrower than the player's
+        # actual relationship (for example, it may name a prerequisite but
+        # omit the target or condition).  Keep a bounded copy of the original
+        # question in the refinement query so the one permitted follow-up
+        # search cannot silently change what must be proven.
+        base = sanitize_text(candidate).strip()[:120]
         if not base:
             return None
+        contextual_question = sanitize_text(question).strip()
+        question_tokens = set(question_relevance_tokens(contextual_question))
+        base_tokens = set(question_relevance_tokens(base))
+        required_overlap = min(2, len(question_tokens))
+        has_question_context = (
+            contextual_question.casefold() in base.casefold()
+            or len(question_tokens & base_tokens) >= required_overlap
+        )
+        if contextual_question and not has_question_context:
+            remaining = 240 - len(base) - 1
+            if remaining > 0:
+                if len(contextual_question) > remaining:
+                    left = max(1, (remaining * 3) // 5)
+                    right = max(1, remaining - left - 1)
+                    contextual_question = (
+                        f"{contextual_question[:left].rstrip()} "
+                        f"{contextual_question[-right:].lstrip()}"
+                    )
+                base = f"{base} {contextual_question}".strip()
         missing_identifiers = [
             value for value in identifiers
             if value.casefold() not in base.casefold()

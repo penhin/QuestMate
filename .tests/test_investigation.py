@@ -3,7 +3,7 @@ import json
 from llm import GuideLLM
 from ai.investigation import ensure_investigation_query
 from retrieval.coordinator import RetrievalCoordinator
-from schemas import ChatRequest, EvidenceFact, GameResolution, InvestigationState, PlannedSearchQuery, SearchPlan, Source
+from schemas import ChatRequest, EvidenceFact, EvidenceGap, GameResolution, InvestigationState, PlannedSearchQuery, SearchPlan, Source
 
 
 def test_investigation_parser_keeps_only_cited_facts_and_new_queries() -> None:
@@ -65,6 +65,30 @@ def test_investigation_parser_keeps_two_distinct_gap_queries() -> None:
     )
 
     assert [query.query for query in state.next_queries] == ["required key location", "hidden passage access"]
+
+
+def test_gap_query_retains_the_original_relationship_context() -> None:
+    state = InvestigationState(
+        goal="Verify the interaction",
+        evidence_gaps=[
+            EvidenceGap(
+                kind="prerequisite",
+                description="Find the relay prerequisite",
+                query_hint="relay prerequisite source",
+            )
+        ],
+    )
+
+    repaired = ensure_investigation_query(
+        state,
+        question="Does the Quartz Relay activate the Azure Gate after the signal puzzle?",
+        sanitize_text=lambda value: value,
+    )
+
+    query = repaired.next_queries[0].query
+    assert "Quartz Relay" in query
+    assert "Azure Gate" in query
+    assert "signal puzzle" in query
 
 
 async def test_investigation_follows_dependencies_until_path_is_complete() -> None:
