@@ -6,6 +6,7 @@ from pydantic import ValidationError
 import llm as llm_module
 import model_providers as model_providers_module
 from config import Settings
+from ai.citation_claims import build_citation_claims
 from llm import GuideLLM
 from model_providers import OpenAICompatibleProvider, create_model_provider
 from schemas import (
@@ -218,6 +219,29 @@ def test_legacy_answer_with_available_claims_uses_claim_ledger() -> None:
     assert "might be" not in rendered
     assert "The Quartz Relay is inside the eastern archive." in rendered
     assert rendered.endswith("[1]")
+
+
+def test_claim_ledger_diversifies_across_eligible_sources_before_extra_passages() -> None:
+    sources = [
+        Source(
+            title=f"Relay evidence {index}",
+            url=f"https://example.com/relay-{index}",
+            evidence=(
+                f"The Quartz Relay has verified condition {index}. "
+                f"The Quartz Relay has verified route {index}."
+            ),
+        )
+        for index in range(1, 4)
+    ]
+
+    claims = build_citation_claims(
+        question="How does the Quartz Relay work?",
+        sources=sources,
+        eligible_source_indexes={1, 2, 3},
+        max_claims=3,
+    )
+
+    assert [claim.source_index for claim in claims] == [1, 2, 3]
 
 
 def test_structured_answer_does_not_append_unselected_evidence_claims() -> None:

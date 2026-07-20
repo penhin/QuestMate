@@ -28,7 +28,12 @@ def build_citation_claims(
     tokens = question_relevance_tokens(question)
     groups = entity_groups or []
     surface_aliases = [value.casefold() for value in (aliases or []) if value.strip()]
-    claims: list[CitationClaim] = []
+    # Build a per-source ranked queue first.  Taking three passages from the
+    # first pages can exhaust the ledger before a later, independently
+    # eligible source contributes the prerequisite or outcome needed for the
+    # answer.  A round-robin allocation preserves evidence-chain coverage
+    # without increasing the claim or model-call budget.
+    ranked_by_source: list[tuple[int, list[tuple[int, str]]]] = []
     for source_index, source in enumerate(sources, start=1):
         if source_index not in eligible_source_indexes:
             continue
@@ -41,18 +46,29 @@ def build_citation_claims(
                 item[0],
             ),
         )
-        selected = 0
+        selected_passages: list[tuple[int, str]] = []
         for position, passage in ranked:
-            if selected >= 3 or len(claims) >= max_claims:
+            if len(selected_passages) >= 3:
                 break
             if _passage_score(passage, tokens, groups, surface_aliases)[0] <= 0:
                 continue
+            selected_passages.append((position, passage))
+        if selected_passages:
+            ranked_by_source.append((source_index, selected_passages))
+
+    claims: list[CitationClaim] = []
+    for passage_offset in range(3):
+        for source_index, passages in ranked_by_source:
+            if passage_offset >= len(passages) or len(claims) >= max_claims:
+                continue
+            position, passage = passages[passage_offset]
             claims.append(CitationClaim(
                 claim_id=f"C{source_index}_{position + 1}",
                 source_index=source_index,
                 statement=passage,
             ))
-            selected += 1
+        if len(claims) >= max_claims:
+            break
     return claims
 
 
