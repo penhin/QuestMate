@@ -52,6 +52,24 @@ _CONTEXT_EXTRACTION_PATTERN = re.compile(
     r"(?:你(?:被|需要).{0,24}(?:遵循|执行|给出).{0,24}(?:什么|哪些)(?:指令|规则))",
     re.IGNORECASE,
 )
+_INSTRUCTION_FLOW_OVERRIDE_PATTERN = re.compile(
+    # Detect attempts to replace the assistant's instruction hierarchy.  The
+    # pattern deliberately requires instruction/control context, rather than
+    # treating ordinary game requests such as "ignore this enemy" as unsafe.
+    r"(?:forget|discard|replace|override|stop\s+following|do\s+not\s+follow|ignore)"
+    r".{0,56}(?:previous|prior|earlier|above|current|all).{0,32}"
+    r"(?:instructions?|rules?|constraints?|prompt|context|messages?)|"
+    r"(?:new|real|only)\s+(?:instructions?|rules?|task|role)\s*(?:is|are|:)|"
+    r"(?:act|behave|respond|roleplay|pretend).{0,28}(?:as|like).{0,16}"
+    r"(?:a\s+)?(?:system|developer|unrestricted|jailbroken)\b|"
+    r"<\s*/?\s*(?:system|developer|instruction)\s*>|#{2,}\s*"
+    r"(?:system|developer|instruction)\b|"
+    r"(?:忘记|抛弃|替换|不再遵循|不要遵循|忽略).{0,56}"
+    r"(?:之前|上面|先前|所有|当前).{0,32}(?:指令|规则|约束|提示词|上下文|消息)|"
+    r"(?:新的|真正的|唯一的)(?:指令|规则|任务|角色)(?:是|为|：|:)|"
+    r"(?:扮演|假装|作为).{0,24}(?:系统|开发者|无限制|越狱)(?:角色|助手)?",
+    re.IGNORECASE,
+)
 _ACCESS_CONTROL_BYPASS_PATTERN = re.compile(
     # This is a boundary policy rather than game-intent parsing: it only
     # triggers when an evasion request is paired with an external access
@@ -93,6 +111,7 @@ def requires_safe_refusal(question: str) -> bool:
             and _INTERNAL_INFO_REQUEST_PATTERN.search(question)
         )
         or _CONTEXT_EXTRACTION_PATTERN.search(question)
+        or _INSTRUCTION_FLOW_OVERRIDE_PATTERN.search(question)
         or _ACCESS_CONTROL_BYPASS_PATTERN.search(question)
         or _UNAUTHENTICATED_ACCESS_PATTERN.search(question)
     )

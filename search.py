@@ -227,17 +227,20 @@ class TavilySearchProvider:
                 max_query_count,
                 max(1, self.settings.tavily_max_queries_per_request - self.settings.tavily_unconfirmed_identity_reserve),
             )
-        # Relation-sensitive plans reserve a query slot for the one permitted
-        # investigation refinement.  A broad first wave can find an entity,
-        # yet still leave its requested condition unsupported; spending the
-        # entire search budget before that check prevents recovery.
+        # A refinement may use at most one subsequent query, so retain the
+        # request-wide hard cap while giving every first wave the configured
+        # independent source routes.  Relation questions need this especially:
+        # two routes can find each endpoint separately without returning a
+        # passage that establishes their connection.  With the default budget
+        # of four, a three-route first wave still leaves one paid call for the
+        # single permitted evidence-gap refinement.
         relation_verification = bool(plan and plan.requires_relation_verification)
         search_depth = (
             self.settings.tavily_relation_search_depth
             if relation_verification
             else self.settings.tavily_search_depth
         )
-        first_wave_limit = 2 if relation_verification else self.settings.tavily_first_wave_queries
+        first_wave_limit = self.settings.tavily_first_wave_queries
         first_wave_size = min(first_wave_limit, max_query_count)
 
         await self._collect_sources(

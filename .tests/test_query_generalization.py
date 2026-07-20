@@ -255,7 +255,7 @@ async def test_unconfirmed_identity_reserves_one_paid_query_for_recovery() -> No
 
 
 @pytest.mark.asyncio
-async def test_relation_verification_reserves_search_capacity_for_investigation() -> None:
+async def test_relation_verification_keeps_all_independent_first_wave_routes_within_budget() -> None:
     class CountingClient:
         def __init__(self) -> None:
             self.calls: list[tuple[str, str | None]] = []
@@ -290,7 +290,7 @@ async def test_relation_verification_reserves_search_capacity_for_investigation(
         ),
     )
 
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
     assert {depth for _query, depth in client.calls} == {"advanced"}
 
 
