@@ -118,6 +118,9 @@ class QuestAgent:
             }
         )
         game_resolution = state["game_resolution"]
+        response_path = "planner_safety_gate" if state["search_plan"].safety_refusal else "answer"
+        if state["search_plan"].safety_refusal:
+            state["answer"] = self._safety_refusal_message()
         if self._needs_game_confirmation(game_resolution):
             return ChatResponse(
                 session_id=session_id,
@@ -146,7 +149,10 @@ class QuestAgent:
         # A second model rewrite cannot add evidence and can silently remove
         # required action terms or detach citations, so source-backed answers
         # are delivered directly within the two-call budget.
-        if state["sources"]:
+        if state["search_plan"].safety_refusal:
+            answer = state["answer"]
+            state["timings_ms"]["improvement"] = 0
+        elif state["sources"]:
             answer = state["answer"]
             state["timings_ms"]["improvement"] = 0
         else:
@@ -166,7 +172,7 @@ class QuestAgent:
             ),
             diagnostics=self._evaluation_diagnostics(
                 request=request,
-                path="answer",
+                path=response_path,
                 sources=state["sources"],
                 plan=state["search_plan"],
                 game_resolution=state["game_resolution"],
@@ -212,6 +218,18 @@ class QuestAgent:
         planning_started = perf_counter()
         search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
         timings_ms["planning"] = self._elapsed_ms(planning_started)
+
+        if search_plan.safety_refusal:
+            response = ChatResponse(
+                session_id=session_id,
+                answer=self._safety_refusal_message(),
+                sources=[],
+                is_new=is_new_session,
+                timings_ms=timings_ms,
+            )
+            await conversation_store.save_chat(request, response)
+            yield ("done", response)
+            return
 
         yield ("status", self._status_for_search(search_plan))
         outcome, game_resolution = await self._retrieve_after_identity_check(
@@ -309,6 +327,8 @@ class QuestAgent:
         return {**state, "game_resolution": game_resolution}
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
+        if state["search_plan"].safety_refusal:
+            return {**state, "sources": [], "investigation": InvestigationState(goal=state["request"].question)}
         request = state["request"]
         outcome, game_resolution = await self._retrieve_after_identity_check(
             request=request,
@@ -541,6 +561,8 @@ class QuestAgent:
         return source_rank(source=source, query=query, intent=intent)
 
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
+        if state["search_plan"].safety_refusal:
+            return {**state, "answer": self._safety_refusal_message()}
         request = state["request"]
         started = perf_counter()
         answer_kwargs = dict(
@@ -555,6 +577,10 @@ class QuestAgent:
         return {**state, "answer": answer, "timings_ms": {
             **state["timings_ms"], "answer": self._elapsed_ms(started)
         }}
+
+    @staticmethod
+    def _safety_refusal_message() -> str:
+        return "我不能协助绕过安全限制、获取受保护信息或实施不当行为。可以继续回答正常的游戏攻略问题。"
 
     @staticmethod
     def _elapsed_ms(started: float) -> int:

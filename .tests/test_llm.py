@@ -83,6 +83,26 @@ def test_planner_preserves_model_selected_relation_verification() -> None:
     assert plan.requires_relation_verification is True
 
 
+def test_planner_can_return_a_semantic_safety_refusal_without_queries() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"general","safety_refusal":true,"queries":[],"aliases":[],"missing_info":[]}',
+        fallback_question="Synthetic request",
+    )
+
+    assert plan.safety_refusal is True
+    assert plan.queries == []
+
+
+def test_planner_does_not_coerce_a_non_boolean_safety_refusal() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"general","safety_refusal":"yes","queries":["Synthetic objective"]}',
+        fallback_question="Synthetic objective",
+    )
+
+    assert plan.safety_refusal is False
+    assert plan.queries
+
+
 def test_answer_revision_cannot_add_new_facts_or_detach_citations() -> None:
     prompt = GuideLLM._answer_revision_system_prompt()
 

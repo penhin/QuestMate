@@ -1115,6 +1115,9 @@ class GuideLLM:
             )
             return cls._fallback_search_plan(question=fallback_question)
 
+        if plan.safety_refusal:
+            return SearchPlan(safety_refusal=True)
+
         if not plan.queries:
             return cls._fallback_search_plan(question=fallback_question)
 
@@ -1143,6 +1146,7 @@ class GuideLLM:
         sanitized_aliases = cls._sanitize_aliases(plan.aliases)
         return SearchPlan(
             intent=intent,
+            safety_refusal=False,
             version_sensitive=plan.version_sensitive or is_version_sensitive_question(fallback_question),
             requires_relation_verification=plan.requires_relation_verification,
             named_entity_groups=cls._sanitize_named_entity_groups(
@@ -1181,6 +1185,8 @@ class GuideLLM:
         if not isinstance(data, dict):
             raise TypeError("search plan must be an object")
         normalized = dict(data)
+        if not isinstance(normalized.get("safety_refusal"), bool):
+            normalized["safety_refusal"] = False
         if not isinstance(normalized.get("version_sensitive"), bool):
             normalized["version_sensitive"] = False
         if not isinstance(normalized.get("requires_relation_verification"), bool):

@@ -83,6 +83,9 @@ NamedEntityAliasGroup = Annotated[list[str], Field(min_length=1, max_length=4)]
 
 class SearchPlan(BaseModel):
     intent: SearchIntent = "general"
+    # Produced by the existing planning call for requests that should not
+    # enter retrieval or gameplay answering.
+    safety_refusal: bool = False
     version_sensitive: bool = False
     # Chosen by the planner from the question's semantic shape.  It reserves
     # one bounded investigation pass for facts whose entity mention alone
