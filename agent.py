@@ -169,6 +169,7 @@ class QuestAgent:
                 path="answer",
                 sources=state["sources"],
                 plan=state["search_plan"],
+                game_resolution=state["game_resolution"],
                 answer=answer,
             ),
         )
@@ -559,13 +560,14 @@ class QuestAgent:
     def _elapsed_ms(started: float) -> int:
         return round((perf_counter() - started) * 1000)
 
-    @staticmethod
     def _evaluation_diagnostics(
+        self,
         *,
         request: ChatRequest,
         path: str,
         sources: list[Source] | None = None,
         plan: SearchPlan | None = None,
+        game_resolution: GameResolution | None = None,
         answer: str = "",
     ) -> dict[str, str | int]:
         """Expose only aggregate-safe stage counters to opt-in evaluators."""
@@ -577,12 +579,35 @@ class QuestAgent:
             level = evidence_level(
                 question=evidence_question(request=request, plan=plan), sources=source_list
             )
-        return {
+        diagnostics: dict[str, str | int] = {
             "path": path,
             "evidence_level": level,
             "source_count": len(source_list),
             "citation_count": len(re.findall(r"\[(\d+)\]", answer)),
         }
+        if path != "answer":
+            return diagnostics
+        conservative = getattr(self.llm, "_should_return_conservative_answer", None)
+        if callable(conservative):
+            diagnostics["policy_conservative"] = int(bool(conservative(
+                request=request,
+                sources=source_list,
+                plan=plan,
+                game_resolution=game_resolution,
+            )))
+        claim_context = getattr(self.llm, "_citation_claim_context", None)
+        if callable(claim_context):
+            try:
+                context = claim_context(
+                    question=evidence_question(request=request, plan=plan),
+                    sources=source_list,
+                    entity_groups=plan.named_entity_groups if plan else None,
+                    aliases=plan.aliases if plan else None,
+                )
+                diagnostics["claim_count"] = context.count('<claim id=')
+            except (TypeError, ValueError):
+                diagnostics["claim_count"] = 0
+        return diagnostics
 
     def _search_usage_snapshot(self) -> dict[str, int]:
         snapshot = getattr(self.search_provider, "usage_snapshot", None)

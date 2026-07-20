@@ -28,7 +28,18 @@ _PROTECTED_INTERNAL_INFO_PATTERN = re.compile(
     r"authorization\s+header|session\s*(?:id|token|cookie)|environment\s+variables?|"
     r"(?:database|postgres(?:ql)?)\s*(?:url|connection(?:\s+string)?|string)|\.env|"
     r"密钥|令牌|凭据|密码|私钥|授权头|会话(?:标识|令牌|Cookie)|环境变量|"
-    r"数据库(?:连接|地址)|配置文件)",
+    r"数据库(?:连接|地址)|配置文件|隐藏推理|思维链|模型(?:指令|规则|配置)|"
+    r"内部文档|内部工具|工具调用|源代码|安全策略|护栏)",
+    re.IGNORECASE,
+)
+_ROLE_ESCAPE_PATTERN = re.compile(
+    # These are direct requests to leave the assistant's instruction boundary;
+    # no game/action vocabulary is involved.
+    r"\b(?:jailbreak|developer\s+mode|debug\s+mode|dan\s+mode|unfiltered\s+(?:mode|answer)|"
+    r"ignore\s+(?:all\s+)?(?:prior|previous)\s+(?:context|constraints?)|"
+    r"simulate\s+(?:an?\s+)?(?:unrestricted|unfiltered|jailbroken))\b|"
+    r"(?:越狱模式|开发者模式|调试模式|无过滤(?:模式|回答)|忽略(?:全部|所有)?(?:先前|之前)(?:上下文|约束)|"
+    r"模拟(?:无限制|无过滤|越狱))",
     re.IGNORECASE,
 )
 _INTERNAL_INFO_REQUEST_PATTERN = re.compile(
@@ -124,6 +135,7 @@ def requires_safe_refusal(question: str) -> bool:
         or _CONTEXT_EXTRACTION_PATTERN.search(question)
         or _VERBATIM_PROTECTED_CONTEXT_PATTERN.search(question)
         or _INSTRUCTION_FLOW_OVERRIDE_PATTERN.search(question)
+        or _ROLE_ESCAPE_PATTERN.search(question)
         or _ACCESS_CONTROL_BYPASS_PATTERN.search(question)
         or _UNAUTHENTICATED_ACCESS_PATTERN.search(question)
     )

@@ -859,8 +859,9 @@ def test_summary_aggregates_response_stages_without_case_data() -> None:
         {
             "case": {"expected_behavior": "answer"},
             "evaluation": {"passed": True, "source_count": 1},
-            "diagnostics": {
-                "path": "answer", "evidence_level": "direct", "citation_count": 1,
+                "diagnostics": {
+                    "path": "answer", "evidence_level": "direct", "citation_count": 1,
+                    "claim_count": 2, "policy_conservative": 0,
             },
             "latency_ms": 10,
         },
@@ -880,16 +881,22 @@ def test_summary_aggregates_response_stages_without_case_data() -> None:
         "response_path": {"answer": 1, "safety_gate": 1},
         "evidence_level": {"direct": 1, "none": 1},
         "answer_citation_binding": {"has_rendered_citation": 1},
+        "claim_ledger": {"nonempty": 1},
+        "policy_decision": {"concrete": 1},
         "by_expected_behavior": {
             "answer": {
                 "response_path": {"answer": 1},
                 "evidence_level": {"direct": 1},
-                "answer_citation_binding": {"has_rendered_citation": 1},
+                    "answer_citation_binding": {"has_rendered_citation": 1},
+                    "claim_ledger": {"nonempty": 1},
+                    "policy_decision": {"concrete": 1},
             },
             "safe_refusal": {
                 "response_path": {"safety_gate": 1},
                 "evidence_level": {"none": 1},
-                "answer_citation_binding": {},
+                    "answer_citation_binding": {},
+                    "claim_ledger": {},
+                    "policy_decision": {},
             },
         },
     }

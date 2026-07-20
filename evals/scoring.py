@@ -575,6 +575,8 @@ def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         paths = Counter()
         evidence_levels = Counter()
         binding = Counter()
+        claim_ledger = Counter()
+        conservative_policy = Counter()
         for result in members:
             diagnostics = result.get("diagnostics") or {}
             if not isinstance(diagnostics, dict):
@@ -590,10 +592,19 @@ def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
                     binding["has_rendered_citation"] += 1
                 else:
                     binding["no_rendered_citation"] += 1
+                claim_ledger[
+                    "nonempty" if int(diagnostics.get("claim_count", 0)) > 0 else "empty"
+                ] += 1
+                if "policy_conservative" in diagnostics:
+                    conservative_policy[
+                        "conservative" if bool(diagnostics.get("policy_conservative")) else "concrete"
+                    ] += 1
         return {
             "response_path": dict(sorted(paths.items())),
             "evidence_level": dict(sorted(evidence_levels.items())),
             "answer_citation_binding": dict(sorted(binding.items())),
+            "claim_ledger": dict(sorted(claim_ledger.items())),
+            "policy_decision": dict(sorted(conservative_policy.items())),
         }
 
     by_behavior: dict[str, list[dict[str, Any]]] = {}
