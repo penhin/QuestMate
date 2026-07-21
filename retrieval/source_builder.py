@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from quality_policy import SEARCH_RESULT_WEIGHTS, SourcePolicy, domain_quality
+from quality_policy import SEARCH_RESULT_WEIGHTS, SourcePolicy, domain_quality, intent_source_preference
 from retrieval.relevance import result_relevance_score
 from retrieval.source_quality import page_authority_score, page_source_quality
 from schemas import Source
@@ -78,6 +78,7 @@ def build_source(
         float(item.get("score") or 0) * SEARCH_RESULT_WEIGHTS.retrieval
         + page_quality * SEARCH_RESULT_WEIGHTS.trust
         + relevance * SEARCH_RESULT_WEIGHTS.relevance
+        + intent_source_preference(intent, source_policy.source_type) * SEARCH_RESULT_WEIGHTS.intent
         + domain_quality(urlparse(url).netloc) * SEARCH_RESULT_WEIGHTS.domain
         + version * SEARCH_RESULT_WEIGHTS.version
     )

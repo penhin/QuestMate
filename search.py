@@ -693,6 +693,10 @@ class TavilySearchProvider:
     @staticmethod
     def _evidence_anchor_phrases(value: str) -> list[str]:
         """Extract identifier-bearing phrases without knowing any game's entities."""
+        stop_words = {
+            "access", "enter", "exact", "find", "guide", "how", "into", "location",
+            "outside", "requirements", "route", "the", "to", "where",
+        }
         words = re.findall(r"[a-z][a-z'-]*|[a-z]*\d[a-z0-9._-]*|\d{1,6}", value.casefold())
         anchors: list[str] = []
         for index, word in enumerate(words):
@@ -700,7 +704,11 @@ class TavilySearchProvider:
                 continue
             left = max(0, index - 2)
             right = min(len(words), index + 3)
-            local_pairs = [(position, words[position]) for position in range(left, right)]
+            local_pairs = [
+                (position, words[position])
+                for position in range(left, right)
+                if words[position] not in stop_words
+            ]
             local = [token for _position, token in local_pairs]
             identifier_index = next(
                 local_index for local_index, (position, _token) in enumerate(local_pairs) if position == index

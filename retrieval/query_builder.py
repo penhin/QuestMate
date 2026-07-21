@@ -214,6 +214,10 @@ def _source_specific_queries(
     if source.source_type == "wiki":
         candidates.extend(f"site:{domain} {game} {query}" for domain in _unique_text(database_domains))
     candidates.extend(f"site:{domain} {game} {query}" for domain in _unique_text(source.domains))
+    candidates.extend(
+        template.format(game=game, query=query)
+        for template in source.query_templates
+    )
     return candidates
 
 
