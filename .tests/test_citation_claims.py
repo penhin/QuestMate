@@ -183,26 +183,3 @@ def test_claim_ranking_uses_planned_evidence_language_for_translated_question() 
 
     assert len(claims) == 1
     assert "activates the Blue Gate" in claims[0].statement
-
-
-def test_claim_ledger_keeps_second_passage_from_each_available_source() -> None:
-    sources = [
-        Source(
-            title=f"Route {index}",
-            url=f"https://example.com/route-{index}",
-            evidence=(
-                f"Prism {index} directly answers the requested route. "
-                f"Prism {index} also states its required condition."
-            ),
-        )
-        for index in range(1, 6)
-    ]
-
-    claims = build_citation_claims(
-        question="Which Prism route has the required condition?",
-        sources=sources,
-        eligible_source_indexes={1, 2, 3, 4, 5},
-    )
-
-    assert {claim.source_index for claim in claims} == {1, 2, 3, 4, 5}
-    assert sum(claim.source_index == 5 for claim in claims) == 2

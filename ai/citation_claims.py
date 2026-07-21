@@ -34,8 +34,6 @@ def claim_ids_cover_entity_groups(
         for group in entity_groups
     )
 
-
-
 def build_citation_claims(
     *,
     question: str,
@@ -44,7 +42,7 @@ def build_citation_claims(
     entity_groups: list[list[str]] | None = None,
     aliases: list[str] | None = None,
     evidence_queries: list[str] | None = None,
-    max_claims: int = 12,
+    max_claims: int = 8,
 ) -> list[CitationClaim]:
     """Split direct evidence into bounded claims without an extra model call.
 
