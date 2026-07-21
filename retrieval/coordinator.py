@@ -337,11 +337,7 @@ class RetrievalCoordinator:
                 groups.append(result)
         selected = rank_sources(
             sources=[source for group in groups for source in group],
-            # Preserve planner-selected query surfaces through the final
-            # evidence pool. This keeps a translated or disambiguating
-            # relation phrase useful after live retrieval without another
-            # outbound call or a maintained vocabulary.
-            query=[question, *plan.aliases, *(item.query for item in plan.queries)],
+            query=f"{question} {' '.join(plan.aliases)}".strip(),
             intent=plan.intent,
             max_results=self.max_results,
             version_sensitive=plan.version_sensitive,

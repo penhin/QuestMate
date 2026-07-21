@@ -1,6 +1,5 @@
 """Merge, score, and diversify evidence independently of agent state."""
 
-from collections.abc import Sequence
 from urllib.parse import urlparse, urlunparse
 
 from quality_policy import (
@@ -39,7 +38,7 @@ def merge_source_evidence(*, preferred: Source, other: Source) -> Source:
 def source_rank(
     *,
     source: Source,
-    query: str | Sequence[str],
+    query: str,
     intent: str,
     version_sensitive: bool = False,
     entity_groups: list[list[str]] | None = None,
@@ -47,8 +46,6 @@ def source_rank(
     text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
     evidence_text = (source.evidence or source.snippet or "").casefold()
     groups = entity_groups or []
-    query_coverage = _query_coverage(query=query, text=text)
-    query_evidence_coverage = _query_coverage(query=query, text=evidence_text)
     if groups:
         coverage = sum(
             1 for group in groups if any(token_in_text(value.casefold(), text) for value in group)
@@ -56,23 +53,12 @@ def source_rank(
         evidence_coverage = sum(
             1 for group in groups if any(token_in_text(value.casefold(), evidence_text) for value in group)
         ) / len(groups)
-        # Entity coverage prevents an unrelated page from entering the pool,
-        # while planner query surfaces distinguish a relation-bearing passage
-        # from an entity-only overview. A translated surface is evaluated as
-        # an alternative rather than diluted by the player's original wording.
-        # Prefer the explicit entity route whenever it matches. Only fall
-        # back to a planner surface when the player-facing entity spelling is
-        # absent from the page, which is the expected translated-alias case.
-        # This preserves the established ranking for same-language evidence.
-        if coverage == 0:
-            coverage = query_coverage
-        if evidence_coverage == 0:
-            evidence_coverage = query_evidence_coverage
     else:
         # Fallback plans intentionally preserve the full user query. This is a
         # weak, vocabulary-free tie-breaker rather than an eligibility gate.
-        coverage = query_coverage
-        evidence_coverage = query_evidence_coverage
+        tokens = question_relevance_tokens(query)
+        coverage = sum(1 for token in tokens if token_in_text(token, text)) / max(len(tokens), 1)
+        evidence_coverage = sum(1 for token in tokens if token_in_text(token, evidence_text)) / max(len(tokens), 1)
     retrieval_score = min(max(source.score or 0.5, 0), 1)
     version_score = 1.0 if source.game_version or source.published_at else 0.0
     if not version_sensitive and intent not in VERSION_SENSITIVE_INTENTS:
@@ -89,21 +75,10 @@ def source_rank(
     )
 
 
-def _query_coverage(*, query: str | Sequence[str], text: str) -> float:
-    """Return the strongest lexical coverage across request-derived surfaces."""
-    variants = [query] if isinstance(query, str) else list(query)
-    scores: list[float] = []
-    for variant in variants:
-        tokens = question_relevance_tokens(str(variant))
-        if tokens:
-            scores.append(sum(1 for token in tokens if token_in_text(token, text)) / len(tokens))
-    return max(scores, default=0.0)
-
-
 def rank_sources(
     *,
     sources: list[Source],
-    query: str | Sequence[str],
+    query: str,
     intent: str,
     max_results: int,
     version_sensitive: bool = False,
