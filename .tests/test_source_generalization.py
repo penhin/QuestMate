@@ -32,6 +32,33 @@ def test_direct_evidence_outranks_a_higher_trust_title_only_match() -> None:
     assert [source.title for source in sources] == ["Observatory route", "Moonstone acquired location guide"]
 
 
+def test_source_ranking_retains_relation_evidence_from_translated_query_surface() -> None:
+    sources = rank_sources(
+        sources=[
+            Source(
+                title="Amber Relay overview",
+                url="https://example.com/overview",
+                evidence="Amber Relay is an old observatory component.",
+                score=0.95,
+                trust_score=0.9,
+            ),
+            Source(
+                title="Signal route",
+                url="https://example.com/route",
+                evidence="A charged Amber Relay activates the Blue Gate.",
+                score=0.55,
+                trust_score=0.5,
+            ),
+        ],
+        query=["琥珀中继器有什么效果？", "Amber Relay activate Blue Gate"],
+        intent="game_mechanic",
+        max_results=2,
+        entity_groups=[["琥珀中继器"]],
+    )
+
+    assert sources[0].title == "Signal route"
+
+
 def _build(item: dict[str, object], *, policy_name: str = "web"):
     return build_source(
         item=item,
