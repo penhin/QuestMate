@@ -63,8 +63,25 @@ def build_citation_claims(
         if source_index not in eligible_source_indexes:
             continue
         passages = _passages(source.evidence or source.snippet or "")
+        candidates = list(enumerate(passages))
+        # A relationship is often expressed across adjacent sentences: the
+        # first names an object and the next describes its condition, outcome,
+        # or sequence with a pronoun. Keep that original two-sentence span as
+        # one auditable Claim only when it covers more requested endpoints than
+        # either sentence alone. This preserves source wording without
+        # guessing an action vocabulary or adding a model/search call.
+        if len(groups) >= 2:
+            for position in range(len(passages) - 1):
+                combined = f"{passages[position]} {passages[position + 1]}"
+                combined_matches = _passage_score(combined, tokens, groups, surface_aliases)[0]
+                separate_matches = max(
+                    _passage_score(passages[position], tokens, groups, surface_aliases)[0],
+                    _passage_score(passages[position + 1], tokens, groups, surface_aliases)[0],
+                )
+                if combined_matches > separate_matches:
+                    candidates.append((len(passages) + position, combined))
         ranked = sorted(
-            enumerate(passages),
+            candidates,
             key=lambda item: (
                 -_passage_score(item[1], tokens, groups, surface_aliases)[0],
                 len(item[1]),

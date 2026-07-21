@@ -109,3 +109,21 @@ def test_claim_group_coverage_requires_every_relation_endpoint() -> None:
         claim_ids=["C1_1", "C2_1"],
         entity_groups=[["Quartz Relay"], ["Azure Gate"]],
     )
+
+
+def test_build_citation_claims_retains_adjacent_relation_context() -> None:
+    claims = build_citation_claims(
+        question="Does Quartz Relay activate Azure Gate?",
+        sources=[Source(
+            title="Signal route",
+            url="https://example.com/signal",
+            evidence="Quartz Relay sends a signal when charged. The Azure Gate opens after that signal.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "Quartz Relay" in claims[0].statement
+    assert "Azure Gate" in claims[0].statement
