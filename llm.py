@@ -636,6 +636,7 @@ class GuideLLM:
             f"<version_evidence>{version_status}</version_evidence>\n"
             f"<answer_shape>{GuideLLM._answer_shape_for_intent(intent)}</answer_shape>\n"
             f"<required_entity_groups>{GuideLLM._claim_entity_groups(request=request, plan=plan)}</required_entity_groups>\n"
+            f"<answer_requirements>{plan.answer_requirements if plan else []}</answer_requirements>\n"
             f"<citation_claims>{claim_context or 'No directly grounded claims are available.'}</citation_claims>\n"
             f"<investigation_state>{GuideLLM._investigation_context(investigation)}</investigation_state>\n"
             f"<recent_conversation>{GuideLLM._history_context(history) or 'No prior messages.'}</recent_conversation>\n"
@@ -1176,6 +1177,7 @@ class GuideLLM:
             ),
             aliases=sanitized_aliases,
             queries=sanitized_queries,
+            answer_requirements=cls._sanitize_answer_requirements(plan.answer_requirements),
             missing_info=[value.strip() for value in plan.missing_info if value.strip()][:4],
         )
 
@@ -1234,7 +1236,7 @@ class GuideLLM:
                 if cleaned:
                     normalized_groups.append(cleaned[:4])
             normalized["named_entity_groups"] = normalized_groups[:4]
-        for field in ("aliases", "missing_info"):
+        for field in ("aliases", "answer_requirements", "missing_info"):
             if isinstance(normalized.get(field), str):
                 normalized[field] = [normalized[field]]
             elif not isinstance(normalized.get(field), list):
@@ -1307,6 +1309,7 @@ class GuideLLM:
             ),
             aliases=sanitized_aliases,
             queries=[PlannedSearchQuery(source_type=plan.queries[0].source_type, query=query)],
+            answer_requirements=cls._sanitize_answer_requirements(plan.answer_requirements),
             missing_info=plan.missing_info[:4],
             refinement=True,
         )
@@ -1372,6 +1375,18 @@ class GuideLLM:
             if value not in cleaned:
                 cleaned.append(value)
         return cleaned
+
+    @classmethod
+    def _sanitize_answer_requirements(cls, requirements: list[str]) -> list[str]:
+        """Keep planner obligations bounded and free of prompt-control text."""
+        values: list[str] = []
+        for requirement in requirements[:4]:
+            if not isinstance(requirement, str):
+                continue
+            cleaned = cls._sanitize_search_text(requirement).strip()
+            if 3 <= len(cleaned) <= 240 and cleaned not in values:
+                values.append(cleaned)
+        return values
 
     @classmethod
     def _sanitize_named_entity_groups(

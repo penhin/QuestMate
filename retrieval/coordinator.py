@@ -403,5 +403,6 @@ def merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:
         named_entity_groups=named_entity_groups[:4],
         aliases=aliases,
         queries=queries[:6],
+        answer_requirements=initial.answer_requirements[:4],
         missing_info=list(dict.fromkeys([*initial.missing_info, *refined.missing_info]))[:4],
     )

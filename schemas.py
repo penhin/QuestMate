@@ -95,6 +95,7 @@ class SearchPlan(BaseModel):
     named_entity_groups: list[NamedEntityAliasGroup] = Field(default_factory=list, max_length=4)
     aliases: list[str] = Field(default_factory=list, max_length=6)
     queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=6)
+    answer_requirements: list[str] = Field(default_factory=list, max_length=4)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
     refinement: bool = False
 

@@ -84,6 +84,16 @@ def test_planner_preserves_model_selected_relation_verification() -> None:
     assert plan.requires_relation_verification is True
 
 
+def test_planner_preserves_question_derived_answer_requirements() -> None:
+    plan = GuideLLM._parse_search_plan(
+        '{"intent":"general","answer_requirements":["whether Amber Relay opens Blue Gate","required condition"],'
+        '"queries":["Amber Relay Blue Gate"]}',
+        fallback_question="Does Amber Relay open Blue Gate?",
+    )
+
+    assert plan.answer_requirements == ["whether Amber Relay opens Blue Gate", "required condition"]
+
+
 def test_planner_can_return_a_semantic_safety_refusal_without_queries() -> None:
     plan = GuideLLM._parse_search_plan(
         '{"intent":"general","safety_refusal":true,"queries":[],"aliases":[],"missing_info":[]}',
