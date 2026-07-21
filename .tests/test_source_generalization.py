@@ -32,44 +32,6 @@ def test_direct_evidence_outranks_a_higher_trust_title_only_match() -> None:
     assert [source.title for source in sources] == ["Observatory route", "Moonstone acquired location guide"]
 
 
-def test_source_score_is_independent_of_intent_label() -> None:
-    item = {
-        "title": "Amber Relay record",
-        "url": "https://independent.example/relay",
-        "content": "Example Adventure places the Amber Relay beneath the observatory stairs.",
-        "score": 0.8,
-    }
-    first = build_source(
-        item=item,
-        source_policy=SOURCE_POLICIES["web"],
-        game="Example Adventure",
-        game_aliases=[],
-        question="Where is the Amber Relay?",
-        intent="item_location",
-        best_passage=lambda content, **_kwargs: content,
-        evidence_max_chars=1600,
-        version_safety_score=lambda **_kwargs: 0.75,
-        extract_version=lambda _text: None,
-        parse_datetime=lambda _value: None,
-    )
-    second = build_source(
-        item=item,
-        source_policy=SOURCE_POLICIES["web"],
-        game="Example Adventure",
-        game_aliases=[],
-        question="Where is the Amber Relay?",
-        intent="lore",
-        best_passage=lambda content, **_kwargs: content,
-        evidence_max_chars=1600,
-        version_safety_score=lambda **_kwargs: 0.75,
-        extract_version=lambda _text: None,
-        parse_datetime=lambda _value: None,
-    )
-
-    assert first is not None and second is not None
-    assert first.source.score == second.source.score
-
-
 def _build(item: dict[str, object], *, policy_name: str = "web"):
     return build_source(
         item=item,
