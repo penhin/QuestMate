@@ -23,28 +23,29 @@ SOURCE_POLICIES = {
         "official",
         0.95,
         "官方",
-        query_templates=("{game} official {query}", "{game} patch notes update {query}"),
+        query_templates=("{game} official {query}",),
     ),
     "wiki": SourcePolicy(
         "wiki",
         0.8,
         "百科",
         domains=("fandom.com", "wiki.gg", "fextralife.com"),
-        # Open discovery remains available even when no game database has been
-        # identified yet; query builders can mix it with known-domain probes.
-        query_templates=("{game} wiki {query}", "{game} guide {query}"),
+        # This is a source-class route, not a topic template. The entity and
+        # relation wording remains entirely planner-derived.
+        query_templates=("{game} wiki {query}",),
     ),
     "community": SourcePolicy(
         "community",
         0.55,
         "社区",
         domains=("reddit.com", "steamcommunity.com"),
+        query_templates=("{game} community {query}",),
     ),
     "web": SourcePolicy(
         "web",
         0.45,
         "网页",
-        query_templates=("{game} guide {query}", "{game} 攻略 {query}"),
+        query_templates=("{game} {query}",),
     ),
 }
 

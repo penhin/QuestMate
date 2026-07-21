@@ -249,6 +249,7 @@ def test_only_unambiguous_independent_mediawiki_paths_are_probe_candidates() -> 
     )
 
 
-def test_source_policy_offers_open_wiki_discovery_templates() -> None:
+def test_source_policy_offers_source_class_not_guide_topic_templates() -> None:
     templates = SOURCE_POLICIES["wiki"].query_templates
-    assert any("site:" not in template and "wiki" in template for template in templates)
+    assert templates == ("{game} wiki {query}",)
+    assert all("guide" not in template and "攻略" not in template for template in templates)
