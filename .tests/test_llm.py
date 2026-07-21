@@ -246,6 +246,24 @@ def test_structured_relation_answer_rejects_one_sided_claim_coverage() -> None:
     assert accepted == "It activates the gate.[1][2]"
 
 
+def test_structured_answer_enforces_multi_entity_coverage_without_planner_flag() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Does Quartz Relay activate Azure Gate?")
+    sources = [
+        Source(title="Relay", url="https://example.com/relay", evidence="Quartz Relay needs a charged core."),
+        Source(title="Gate", url="https://example.com/gate", evidence="Azure Gate opens after the relay signal."),
+    ]
+    plan = SearchPlan(named_entity_groups=[["Quartz Relay"], ["Azure Gate"]])
+
+    rendered = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"It activates the gate.","claim_ids":["C1_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=plan,
+    )
+
+    assert "It activates the gate." not in rendered
+
+
 def test_structured_answer_requires_coverage_of_planned_requirements() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [Source(

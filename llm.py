@@ -828,11 +828,12 @@ class GuideLLM:
             aliases=plan.aliases if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
-        relation_groups = (
-            GuideLLM._claim_entity_groups(request=request, plan=plan)
-            if plan and plan.requires_relation_verification
-            else []
-        )
+        # The planner may miss a relation classification, but two player-
+        # anchored entity groups still make a one-sided citation unsafe. Apply
+        # the deterministic coverage guard whenever the question itself names
+        # multiple endpoints; this does not infer a relationship or use an
+        # action-word inventory.
+        relation_groups = GuideLLM._claim_entity_groups(request=request, plan=plan)
         rendered: list[str] = []
         requirements = plan.answer_requirements if plan else []
         covered_requirements: set[int] = set()
