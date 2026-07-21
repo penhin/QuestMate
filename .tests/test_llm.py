@@ -163,6 +163,28 @@ def test_answer_prompt_exposes_only_direct_source_indexed_claims() -> None:
     assert 'source_indexes="[2]"' not in prompt
 
 
+def test_answer_prompt_ranks_claims_with_planned_evidence_language() -> None:
+    prompt = GuideLLM._answer_user_prompt(
+        request=ChatRequest(game="Synthetic Adventure", question="琥珀中继器有什么效果？"),
+        history=[],
+        plan=SearchPlan(
+            aliases=["Amber Relay"],
+            queries=[PlannedSearchQuery(source_type="web", query="Amber Relay activate Blue Gate")],
+        ),
+        sources=[Source(
+            title="Amber Relay guide",
+            url="https://example.com/relay",
+            evidence=(
+                "Amber Relay is an old observatory component. "
+                "A charged Amber Relay activates the Blue Gate."
+            ),
+        )],
+    )
+
+    assert "activates the Blue Gate" in prompt
+    assert prompt.index("activates the Blue Gate") < prompt.index("old observatory component")
+
+
 def test_claim_binding_is_rendered_only_when_source_matches_claim() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [
