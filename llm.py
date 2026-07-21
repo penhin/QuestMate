@@ -834,6 +834,8 @@ class GuideLLM:
             else []
         )
         rendered: list[str] = []
+        requirements = plan.answer_requirements if plan else []
+        covered_requirements: set[int] = set()
         cited_source_indexes: set[int] = set()
         unbound_blocks = 0
         for block in blocks[:8]:
@@ -843,6 +845,20 @@ class GuideLLM:
             claim_ids = block.get("claim_ids")
             if not text or not isinstance(claim_ids, list):
                 continue
+            requirement_indexes = block.get("requirement_indexes")
+            if requirements:
+                if not isinstance(requirement_indexes, list):
+                    unbound_blocks += 1
+                    continue
+                valid_requirements = [
+                    index for index in requirement_indexes
+                    if isinstance(index, int) and 0 <= index < len(requirements)
+                ]
+                if not valid_requirements:
+                    unbound_blocks += 1
+                    continue
+            else:
+                valid_requirements = []
             indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
             if not indexes:
                 unbound_blocks += 1
@@ -857,6 +873,9 @@ class GuideLLM:
             citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
             rendered.append(f"{text}{citations}")
             cited_source_indexes.update(indexes)
+            covered_requirements.update(valid_requirements)
+        if requirements and set(range(len(requirements))) - covered_requirements:
+            rendered = []
         if rendered:
             logger.info(
                 "llm.answer_render",

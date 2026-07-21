@@ -168,7 +168,7 @@ def answer_system_prompt() -> str:
     return (
         f"{PROMPT_SECURITY_RULES} "
         "You are QuestMate, a precise game guide assistant. Answer in Chinese. Return compact JSON only: "
-        "{\"blocks\":[{\"text\":\"...\",\"claim_ids\":[\"C1_1\"]}]}. Each factual block needs one or more "
+        "{\"blocks\":[{\"text\":\"...\",\"claim_ids\":[\"C1_1\"],\"requirement_indexes\":[0]}]}. Each factual block needs one or more "
         "claim_ids; a conservative evidence-limit block may use an empty list. "
         "When citation_claims is nonempty and evidence_policy permits a direct answer, emit at least one factual "
         "block with nonempty claim_ids; do not replace available grounded evidence with an empty conservative block. "
@@ -179,6 +179,7 @@ def answer_system_prompt() -> str:
         "When required_entity_groups contains multiple endpoints, a block that answers their relationship must cite "
         "Claim IDs whose combined evidence covers every endpoint; do not use a one-sided Claim as proof. "
         "Treat answer_requirements as a coverage checklist: directly resolve each requirement with bound evidence, or state the evidence limit for that requirement rather than answering a different question. "
+        "When answer_requirements is nonempty, include the zero-based requirement_indexes resolved by every block and cover every requirement at least once. "
         "Goal: give useful, practical game-guide help for the current question. "
         "Use game_resolution as the identity boundary for the game. If the game is unconfirmed or ambiguous, do not "
         "answer gameplay details; ask for a platform link, original title, developer, screenshot, or store page. "

@@ -246,6 +246,32 @@ def test_structured_relation_answer_rejects_one_sided_claim_coverage() -> None:
     assert accepted == "It activates the gate.[1][2]"
 
 
+def test_structured_answer_requires_coverage_of_planned_requirements() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
+    sources = [Source(
+        title="Relay route",
+        url="https://example.com/relay",
+        evidence="Quartz Relay is inside the eastern archive.",
+    )]
+    plan = SearchPlan(answer_requirements=["give the location"])
+
+    rejected = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"In the archive.","claim_ids":["C1_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=plan,
+    )
+    accepted = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"In the archive.","claim_ids":["C1_1"],"requirement_indexes":[0]}]}',
+        request=request,
+        sources=sources,
+        plan=plan,
+    )
+
+    assert "In the archive." not in rejected
+    assert accepted == "In the archive.[1]"
+
+
 def test_structured_answer_extracts_json_from_model_wrapper() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [
