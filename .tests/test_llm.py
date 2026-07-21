@@ -213,6 +213,20 @@ def test_claim_binding_is_rendered_only_when_source_matches_claim() -> None:
     assert "[2]" not in rejected
 
 
+def test_claim_eligibility_rejects_title_only_entity_match() -> None:
+    indexes = GuideLLM._claim_eligible_source_indexes(
+        question="Where is the Cobalt Sigil?",
+        sources=[Source(
+            title="Cobalt Sigil location",
+            url="https://example.com/sigil",
+            evidence="This page contains only unrelated combat lore.",
+        )],
+        entity_groups=[],
+    )
+
+    assert indexes == set()
+
+
 def test_structured_answer_renders_citations_from_claim_ids() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [

@@ -747,10 +747,11 @@ class GuideLLM:
         eligible = {
             index
             for index, source in enumerate(sources, start=1)
-            if has_question_specific_sources(
+            if GuideLLM._claim_source_has_direct_body(
                 question=question,
-                sources=[source],
-                include_url=False,
+                source=source,
+                entity_groups=entity_groups,
+                aliases=aliases,
             )
         }
         if not entity_groups or len(entity_groups) < 2:
@@ -760,18 +761,48 @@ class GuideLLM:
             # contribute an atomic Claim, without treating aliases as extra
             # relation endpoints or granting it a free factual conclusion.
             for index, source in enumerate(sources, start=1):
-                source_text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
+                source_text = (source.evidence or source.snippet or "").casefold()
                 if any(token_in_text(alias.casefold(), source_text) for alias in aliases or []):
                     eligible.add(index)
             return eligible
         for index, source in enumerate(sources, start=1):
-            source_text = f"{source.title} {source.evidence or source.snippet or ''}".casefold()
+            source_text = (source.evidence or source.snippet or "").casefold()
             if any(
                 any(token_in_text(name.casefold(), source_text) for name in group)
                 for group in entity_groups
             ):
                 eligible.add(index)
         return eligible
+
+    @staticmethod
+    def _claim_source_has_direct_body(
+        *,
+        question: str,
+        source: Source,
+        entity_groups: list[list[str]] | None,
+        aliases: list[str] | None,
+    ) -> bool:
+        """Require an evidence passage, not a page title or URL, for a Claim."""
+        body = source.evidence or source.snippet or ""
+        if not body.strip():
+            return False
+        lowered = body.casefold()
+        if entity_groups:
+            return any(
+                any(token_in_text(name.casefold(), lowered) for name in group)
+                for group in entity_groups
+            )
+        if any(token_in_text(alias.casefold(), lowered) for alias in aliases or []):
+            return True
+        # Preserve the generic direct-evidence policy while making the body
+        # itself carry the match. Source titles and URLs remain useful for
+        # retrieval, but cannot independently license an answer Claim.
+        body_only = source.model_copy(update={"title": ""})
+        return has_question_specific_sources(
+            question=question,
+            sources=[body_only],
+            include_url=False,
+        )
 
     @staticmethod
     def _render_claim_bound_answer(
