@@ -1414,12 +1414,13 @@ class GuideLLM:
 
     @staticmethod
     def _fallback_search_plan(*, question: str) -> SearchPlan:
-        safe_question = GuideLLM._sanitize_search_text(question).strip() or "game guide"
+        safe_question = GuideLLM._sanitize_search_text(question).strip() or "unresolved request"
         return fallback_search_plan(question=safe_question)
 
     @staticmethod
     def _fallback_search_subject(question: str) -> str:
-        return fallback_search_subject(question) or "game guide"
+        safe_question = GuideLLM._sanitize_search_text(question).strip()
+        return fallback_search_subject(safe_question) or "unresolved request"
 
     @staticmethod
     def _sanitize_search_text(value: str) -> str:
@@ -1446,6 +1447,9 @@ class GuideLLM:
             lowered = value.lower()
             if any(token in lowered for token in ("http://", "https://", "site:", "ignore", "system prompt", "api key")):
                 continue
+            # A malformed planner can emit a generic class label rather than
+            # an alias. This fallback-only rejection stops it from replacing a
+            # named surface; it never ranks sources or derives gameplay facts.
             if lowered in {"wiki", "guide", "boss", "item", "quest", "攻略", "打法", "位置"}:
                 continue
             if value not in cleaned:

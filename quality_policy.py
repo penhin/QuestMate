@@ -15,7 +15,6 @@ class SourcePolicy:
     trust_score: float
     trust_label: str
     domains: tuple[str, ...] = ()
-    query_templates: tuple[str, ...] = ()
 
 
 SOURCE_POLICIES = {
@@ -23,16 +22,12 @@ SOURCE_POLICIES = {
         "official",
         0.95,
         "官方",
-        query_templates=("{game} official {query}", "{game} patch notes update {query}"),
     ),
     "wiki": SourcePolicy(
         "wiki",
         0.8,
         "百科",
         domains=("fandom.com", "wiki.gg", "fextralife.com"),
-        # Open discovery remains available even when no game database has been
-        # identified yet; query builders can mix it with known-domain probes.
-        query_templates=("{game} wiki {query}", "{game} guide {query}"),
     ),
     "community": SourcePolicy(
         "community",
@@ -44,7 +39,6 @@ SOURCE_POLICIES = {
         "web",
         0.45,
         "网页",
-        query_templates=("{game} guide {query}", "{game} 攻略 {query}"),
     ),
 }
 
@@ -79,17 +73,6 @@ EVIDENCE_POOL_WEIGHTS = RankingWeights(
     trust=0.2,
     version=0.05,
 )
-
-INTENT_SOURCE_PREFERENCES = {
-    "boss_strategy": {"wiki": 0.8, "community": 1.0, "web": 0.45, "official": 0.2},
-    "item_location": {"wiki": 1.0, "web": 0.65, "community": 0.35, "official": 0.2},
-    "quest_step": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.2},
-    "item_usage": {"wiki": 1.0, "web": 0.65, "community": 0.45, "official": 0.25},
-    "build": {"community": 1.0, "wiki": 0.65, "web": 0.45, "official": 0.2},
-    "patch": {"official": 1.0, "wiki": 0.55, "web": 0.45, "community": 0.25},
-    "lore": {"wiki": 0.9, "web": 0.65, "community": 0.35, "official": 0.2},
-}
-DEFAULT_INTENT_SOURCE_PREFERENCE = 0.4
 
 DOMAIN_QUALITY_GROUPS = (
     # These scores are deliberately modest priors.  Page-level identity and
@@ -224,13 +207,6 @@ PROGRESSIVE_STRICT_SOURCE_TARGET = 2
 # multiple sequential model/search rounds in a single request.
 MAX_INVESTIGATION_HOPS = 1
 MAX_MERGED_EVIDENCE_CHARS = 3600
-
-
-def intent_source_preference(intent: str, source_type: str) -> float:
-    return INTENT_SOURCE_PREFERENCES.get(intent, {}).get(
-        source_type,
-        DEFAULT_INTENT_SOURCE_PREFERENCE,
-    )
 
 
 def domain_quality(domain: str) -> float:

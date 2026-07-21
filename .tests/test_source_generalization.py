@@ -249,6 +249,5 @@ def test_only_unambiguous_independent_mediawiki_paths_are_probe_candidates() -> 
     )
 
 
-def test_source_policy_offers_open_wiki_discovery_templates() -> None:
-    templates = SOURCE_POLICIES["wiki"].query_templates
-    assert any("site:" not in template and "wiki" in template for template in templates)
+def test_source_policy_does_not_embed_guide_or_action_query_templates() -> None:
+    assert not hasattr(SOURCE_POLICIES["wiki"], "query_templates")
