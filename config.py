@@ -38,12 +38,36 @@ class Settings(BaseSettings):
     # Must remain below evaluator/client deadlines so provider failures can
     # degrade to a conservative response instead of becoming an API timeout.
     model_request_timeout_seconds: int = Field(default=30, ge=5, le=55)
+    # A guide request is sequential (plan -> retrieve -> answer), so each
+    # model phase gets a smaller wall-clock budget than the provider client's
+    # connection-level timeout.  These caps preserve time for retrieval and a
+    # conservative response when an upstream model is slow.
+    planner_model_timeout_seconds: int = Field(default=9, ge=3, le=30)
+    investigation_model_timeout_seconds: int = Field(default=9, ge=3, le=30)
+    answer_model_timeout_seconds: int = Field(default=12, ge=3, le=30)
+    # End-to-end circuit breaker. It must leave a small margin below the
+    # evaluator's 30-second p95 contract and client deadline.
+    agent_request_timeout_seconds: int = Field(default=28, ge=10, le=55)
+    planner_model_max_tokens: int = Field(default=700, ge=128, le=1800)
+    investigation_model_max_tokens: int = Field(default=600, ge=128, le=1200)
+    answer_model_max_tokens: int = Field(default=900, ge=128, le=1800)
     tavily_max_concurrency: int = Field(default=3, ge=1, le=8)
+    # Keep ordinary lookups on the lower-cost route. Complex relation checks
+    # opt into the deeper retrieval route only after the planner asks for it.
+    tavily_search_depth: str = Field(default="basic", pattern="^(basic|advanced|fast|ultra-fast)$")
+    tavily_relation_search_depth: str = Field(default="advanced", pattern="^(basic|advanced|fast|ultra-fast)$")
     tavily_search_cache_ttl_seconds: int = Field(default=86400, ge=0, le=2592000)
     tavily_search_cache_max_entries: int = Field(default=512, ge=16, le=10000)
     search_cache_use_redis: bool = True
-    tavily_first_wave_queries: int = Field(default=2, ge=1, le=4)
-    tavily_max_queries_per_request: int = Field(default=2, ge=1, le=8)
+    # A three-route first wave covers the planner's distinct source/language
+    # angles in parallel. Four remains the hard per-request paid-search cap
+    # enforced by CachedSearchClient, including identity recovery.
+    tavily_first_wave_queries: int = Field(default=3, ge=1, le=4)
+    tavily_max_queries_per_request: int = Field(default=4, ge=1, le=4)
+    # Keep one paid lookup available for identity recovery when a discovery
+    # request starts without a server-confirmed title. The first evidence wave
+    # stays optimistic; it simply cannot exhaust the entire request budget.
+    tavily_unconfirmed_identity_reserve: int = Field(default=1, ge=0, le=3)
     mediawiki_direct_search: bool = True
     wiki_auto_index_enabled: bool = True
     wiki_auto_index_pages_per_query: int = Field(default=3, ge=1, le=10)

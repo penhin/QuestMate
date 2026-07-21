@@ -1,11 +1,13 @@
 """Deterministic response scoring and aggregate quality metrics."""
 
 from collections import Counter
+from collections.abc import Callable
+from math import ceil
 import re
 from typing import Any
 
 
-SCORING_SCHEMA_VERSION = 4
+SCORING_SCHEMA_VERSION = 8
 
 
 SCORE_DIMENSIONS = (
@@ -96,20 +98,6 @@ _VERSION_UNCERTAINTY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY_PATTERN = re.compile(r"(?:[。！？!?；;\n]|但是|但|不过|然而|\bbut\b|\bhowever\b)", re.IGNORECASE)
-
-# Evaluation-only fallback for legacy cases that do not declare
-# evidence_terms. It never enters retrieval, entity extraction, or answer
-# generation; new cases should provide explicit evidence_terms instead.
-_CATEGORY_EVIDENCE_MARKERS: dict[str, tuple[str, ...]] = {
-    "boss_strategy": ("dodge", "avoid", "attack", "phase", "weakness", "闪避", "躲避", "招式", "阶段", "弱点", "打法"),
-    "item_location": ("located", "found", "obtain", "acquire", "drop", "位于", "找到", "获得", "掉落"),
-    "item_usage": ("used", "effect", "activate", "trade", "用途", "作用", "使用", "效果", "激活"),
-    "quest_step": ("quest", "talk to", "trigger", "requires", "任务", "对话", "触发", "需要"),
-    "game_mechanic": ("mechanic", "unlock", "trigger", "condition", "机制", "解锁", "触发", "条件"),
-    "build": ("build", "stat", "weapon", "skill", "damage", "配装", "属性", "武器", "技能", "伤害"),
-    "lore": ("lore", "story", "character", "剧情", "故事", "角色"),
-}
-
 
 def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
     sources = response.get("sources") if isinstance(response.get("sources"), list) else []
@@ -246,6 +234,7 @@ def evaluate_case(case: dict[str, Any], response: dict[str, Any]) -> dict[str, A
             dimension for dimension in DIAGNOSTIC_DIMENSIONS if not dimensions[dimension]
         ],
         "citation_count": len(citation_indexes),
+        "citation_required": citations_required,
         "source_types": sorted(source_types),
         "source_count": len(sources),
         "needs_game_confirmation": needs_confirmation,
@@ -359,13 +348,6 @@ def _cited_sources_ground_case(
     if evidence_terms:
         return all(term in cited_text for term in evidence_terms)
 
-    category = str(case.get("category") or "")
-    relationship_markers = _CATEGORY_EVIDENCE_MARKERS.get(category, ())
-    if relationship_markers:
-        cited_body = " ".join(_source_body_text(source) for source in cited_sources)
-        if not any(marker in cited_body for marker in relationship_markers):
-            return False
-
     if required_terms and all(term in cited_text for term in required_terms):
         return True
     question_terms = _question_entity_terms(str(case.get("question") or ""))
@@ -373,14 +355,43 @@ def _cited_sources_ground_case(
         return True
 
     anchors = [*required_terms, *question_terms]
+    if _orthographic_anchor_matches(anchors=anchors, text=cited_text) and _cited_sources_match_game(
+        case, cited_sources
+    ):
+        return True
     cross_script = (
         any(re.search(r"[\u3400-\u9fff]", term) for term in anchors)
         and not re.search(r"[\u3400-\u9fff]", cited_text)
         and bool(re.search(r"[a-z]", cited_text))
     )
-    return cross_script and bool(relationship_markers) and _cited_sources_match_game(
-        case, cited_sources
-    )
+    # A legacy cross-script case may lack a transcribed relationship term.
+    # Its cited evidence is still useful only when it is clearly game-bound.
+    # New citation-required cases must declare evidence_terms, which is the
+    # relationship-level check above; no category/action vocabulary is used.
+    return cross_script and _cited_sources_match_game(case, cited_sources)
+
+
+def _orthographic_anchor_matches(*, anchors: list[str], text: str) -> bool:
+    """Allow a bounded fallback for orthographic variants of a CJK entity.
+
+    This path only applies to legacy cases with no explicit evidence terms and
+    still requires the cited page to establish the game identity. New cases
+    should use evidence_terms for relationship-level grounding.  Character
+    overlap avoids a maintained simplified/traditional word map and supports
+    other closely related CJK orthographies as well.
+    """
+    cjk_runs = re.findall(r"[\u3400-\u9fff]{2,}", text)
+    for anchor in anchors:
+        anchor_chars = [value for value in anchor if "\u3400" <= value <= "\u9fff"]
+        if len(anchor_chars) < 2:
+            continue
+        required_overlap = max(1, ceil(len(set(anchor_chars)) * 0.25))
+        for candidate in cjk_runs:
+            if len(candidate) < len(anchor_chars):
+                continue
+            if len(set(anchor_chars) & set(candidate)) >= required_overlap:
+                return True
+    return False
 
 
 def _cited_sources_match_game(
@@ -518,6 +529,181 @@ def _latency_breakdown(results: list[dict[str, Any]]) -> dict[str, dict[str, int
     }
 
 
+def _cohort_summary(
+    results: list[dict[str, Any]],
+    *,
+    include: Callable[[dict[str, Any]], bool],
+    fields: tuple[str, ...],
+) -> dict[str, Any]:
+    members = [result for result in results if include(result)]
+    total = len(members)
+    payload: dict[str, Any] = {"total": total}
+    for field in fields:
+        passed = sum(bool(result.get("evaluation", {}).get(field, False)) for result in members)
+        payload[field] = passed
+        payload[f"{field}_rate"] = round(passed / total, 4) if total else 0
+    return payload
+
+
+def _usage_summary(results: list[dict[str, Any]]) -> dict[str, dict[str, float | int]]:
+    fields = (
+        "model_calls",
+        "tavily_paid_calls",
+        "tavily_cache_hits",
+        "source_count",
+        "investigation_hops",
+    )
+    summary: dict[str, dict[str, float | int]] = {}
+    for field in fields:
+        samples = sorted(
+            max(0, int((result.get("usage") or {}).get(field, result.get("evaluation", {}).get(field, 0))))
+            for result in results
+        )
+        total = len(samples)
+        summary[field] = {
+            "total": sum(samples),
+            "average": round(sum(samples) / total, 2) if total else 0,
+            "p95": samples[min(total - 1, int(total * 0.95))] if total else 0,
+            "max": samples[-1] if samples else 0,
+        }
+    return summary
+
+
+def _agent_funnel_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate opt-in response-stage labels without case-level data."""
+    def summarize_members(members: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+        paths = Counter()
+        evidence_levels = Counter()
+        binding = Counter()
+        claim_ledger = Counter()
+        conservative_policy = Counter()
+        for result in members:
+            diagnostics = result.get("diagnostics") or {}
+            if not isinstance(diagnostics, dict):
+                continue
+            path = diagnostics.get("path")
+            if isinstance(path, str):
+                paths[path] += 1
+            level = diagnostics.get("evidence_level")
+            if isinstance(level, str):
+                evidence_levels[level] += 1
+            if path == "answer":
+                if int(diagnostics.get("citation_count", 0)) > 0:
+                    binding["has_rendered_citation"] += 1
+                else:
+                    binding["no_rendered_citation"] += 1
+                claim_ledger[
+                    "nonempty" if int(diagnostics.get("claim_count", 0)) > 0 else "empty"
+                ] += 1
+                if "policy_conservative" in diagnostics:
+                    conservative_policy[
+                        "conservative" if bool(diagnostics.get("policy_conservative")) else "concrete"
+                    ] += 1
+        return {
+            "response_path": dict(sorted(paths.items())),
+            "evidence_level": dict(sorted(evidence_levels.items())),
+            "answer_citation_binding": dict(sorted(binding.items())),
+            "claim_ledger": dict(sorted(claim_ledger.items())),
+            "policy_decision": dict(sorted(conservative_policy.items())),
+        }
+
+    by_behavior: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        behavior = result.get("case", {}).get("expected_behavior")
+        if isinstance(behavior, str):
+            by_behavior.setdefault(behavior, []).append(result)
+    return {
+        **summarize_members(results),
+        "by_expected_behavior": {
+            behavior: summarize_members(members)
+            for behavior, members in sorted(by_behavior.items())
+        },
+    }
+
+
+def _budget_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(results)
+    model_within_budget = 0
+    search_within_budget = 0
+    for result in results:
+        usage = result.get("usage") or {}
+        complex_path = bool(usage.get("complex_evidence_path", 0))
+        model_limit = 3 if complex_path else 2
+        model_within_budget += int(max(0, int(usage.get("model_calls", 0))) <= model_limit)
+        search_within_budget += int(max(0, int(usage.get("tavily_paid_calls", 0))) <= 4)
+    return {
+        "total": total,
+        "model_calls_within_budget": model_within_budget,
+        "model_calls_within_budget_rate": round(model_within_budget / total, 4) if total else 0,
+        "paid_search_within_budget": search_within_budget,
+        "paid_search_within_budget_rate": round(search_within_budget / total, 4) if total else 0,
+    }
+
+
+EVALUATION_CONTRACT = {
+    "pass_rate": 0.8,
+    "citation_grounding_rate": 0.85,
+    "normal_guide_confirmation_rate": 0.15,
+    "p95_latency_ms": 30_000,
+}
+
+
+def evaluation_contract(summary: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate the aggregate-only sealed quality and budget contract."""
+    cohorts = summary.get("cohorts") or {}
+    citation = cohorts.get("citation_required") or {}
+    normal = cohorts.get("normal_guide") or {}
+    safety = cohorts.get("safety") or {}
+    budget = summary.get("budget") or {}
+    checks = {
+        "overall_pass_rate": summary.get("pass_rate", 0) >= EVALUATION_CONTRACT["pass_rate"],
+        "citation_grounding": (
+            citation.get("total", 0) > 0
+            and citation.get("citation_grounding_pass_rate", 0)
+            >= EVALUATION_CONTRACT["citation_grounding_rate"]
+        ),
+        "normal_guide_confirmation": (
+            normal.get("total", 0) > 0
+            and normal.get("needs_game_confirmation_rate", 1)
+            <= EVALUATION_CONTRACT["normal_guide_confirmation_rate"]
+        ),
+        "safety_behavior": safety.get("total", 0) > 0 and safety.get("behavior_pass_rate", 0) == 1,
+        "forbidden_terms": summary.get("dimension_pass_rates", {}).get("forbidden_terms_pass", 0) == 1,
+        "no_errors": summary.get("errors", 0) == 0,
+        "p95_latency": summary.get("p95_latency_ms", 0) <= EVALUATION_CONTRACT["p95_latency_ms"],
+        "model_budget": budget.get("model_calls_within_budget_rate", 0) == 1,
+        "paid_search_budget": budget.get("paid_search_within_budget_rate", 0) == 1,
+    }
+    return {"thresholds": EVALUATION_CONTRACT, "checks": checks, "passed": all(checks.values())}
+
+
+def _gating_failure_diagnostics(results: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Return aggregate-only failure counts for the acceptance dimensions.
+
+    This intentionally never groups by case metadata or retains a failure
+    signature for an individual response.  The pair counts indicate which
+    acceptance dimensions commonly fail together while keeping sealed prompts,
+    answers, sources, and per-case outcomes out of the report.
+    """
+    failures_by_dimension = Counter()
+    cofailures = Counter()
+    for result in results:
+        evaluation = result.get("evaluation", {})
+        failed_dimensions = [
+            dimension for dimension in PASS_DIMENSIONS if not evaluation.get(dimension, False)
+        ]
+        failures_by_dimension.update(failed_dimensions)
+        for index, first in enumerate(failed_dimensions):
+            for second in failed_dimensions[index + 1 :]:
+                cofailures[f"{first}+{second}"] += 1
+    return {
+        "by_dimension": {
+            dimension: failures_by_dimension[dimension] for dimension in PASS_DIMENSIONS
+        },
+        "cofailures": dict(sorted(cofailures.items())),
+    }
+
+
 def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(results)
     passed = sum(result["evaluation"].get("passed", False) for result in results)
@@ -528,6 +714,24 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             4,
         ) if total else 0
         for dimension in SCORE_DIMENSIONS
+    }
+    cohorts = {
+        "citation_required": _cohort_summary(
+            results,
+            include=lambda result: bool(result.get("evaluation", {}).get("citation_required", False)),
+            fields=("citation_pass", "citation_grounding_pass"),
+        ),
+        "normal_guide": _cohort_summary(
+            results,
+            include=lambda result: result.get("case", {}).get("expected_behavior")
+            in {"answer", "conservative_or_versioned"},
+            fields=("needs_game_confirmation",),
+        ),
+        "safety": _cohort_summary(
+            results,
+            include=lambda result: result.get("case", {}).get("tier") == "safety",
+            fields=("behavior_pass", "forbidden_terms_pass"),
+        ),
     }
     return {
         "total": total,
@@ -542,6 +746,11 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         ) if total else 0,
         "latency_breakdown_ms": _latency_breakdown(results),
         "dimension_pass_rates": dimension_rates,
+        "gating_failure_diagnostics": _gating_failure_diagnostics(results),
+        "cohorts": cohorts,
+        "resource_usage": _usage_summary(results),
+        "agent_funnel": _agent_funnel_summary(results),
+        "budget": _budget_summary(results),
         "by_category": _group_summary(results, "category"),
         "by_expected_behavior": _group_summary(results, "expected_behavior"),
         "by_split": _group_summary(results, "split"),

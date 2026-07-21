@@ -2,6 +2,8 @@
 
 from collections import OrderedDict
 from concurrent.futures import Future
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from hashlib import sha256
 import json
@@ -142,6 +144,10 @@ class CachedSearchClient:
         self._cache = cache
         self.upstream_calls = 0
         self.cache_hits = 0
+        self._request_usage: ContextVar[dict[str, int] | None] = ContextVar(
+            f"questmate_search_usage_{id(self)}",
+            default=None,
+        )
         self._flight_lock = Lock()
         self._flights: dict[str, Future[dict[str, Any]]] = {}
 
@@ -174,6 +180,10 @@ class CachedSearchClient:
                 self._increment_cache_hits()
                 flight.set_result(cached)
                 return cached
+            if not self._reserve_paid_call():
+                result = {"results": []}
+                flight.set_result(result)
+                return result
             result = self._client.search(**kwargs)
             with self._flight_lock:
                 self.upstream_calls += 1
@@ -191,3 +201,39 @@ class CachedSearchClient:
     def _increment_cache_hits(self) -> None:
         with self._flight_lock:
             self.cache_hits += 1
+        self._record_usage("tavily_cache_hits")
+
+    @contextmanager
+    def usage_scope(self, *, max_paid_calls: int | None = None):
+        """Collect per-request search cost without retaining query contents."""
+        token = self._request_usage.set({
+            "tavily_paid_calls": 0,
+            "tavily_cache_hits": 0,
+            "max_paid_calls": max_paid_calls if max_paid_calls is not None else -1,
+        })
+        try:
+            yield
+        finally:
+            self._request_usage.reset(token)
+
+    def request_usage(self) -> dict[str, int]:
+        usage = self._request_usage.get() or {}
+        return {
+            key: int(usage.get(key, 0))
+            for key in ("tavily_paid_calls", "tavily_cache_hits")
+        }
+
+    def _reserve_paid_call(self) -> bool:
+        usage = self._request_usage.get()
+        if usage is None:
+            return True
+        limit = int(usage.get("max_paid_calls", -1))
+        if limit >= 0 and usage.get("tavily_paid_calls", 0) >= limit:
+            return False
+        usage["tavily_paid_calls"] = usage.get("tavily_paid_calls", 0) + 1
+        return True
+
+    def _record_usage(self, field: str) -> None:
+        usage = self._request_usage.get()
+        if usage is not None:
+            usage[field] = usage.get(field, 0) + 1

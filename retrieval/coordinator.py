@@ -44,12 +44,20 @@ class RetrievalCoordinator:
         llm: PlanRefiner,
         max_results: int,
         max_hops: int = MAX_INVESTIGATION_HOPS,
+        max_investigation_model_calls: int | None = None,
     ) -> None:
         self.knowledge = knowledge
         self.search_provider = search_provider
         self.llm = llm
         self.max_results = max_results
         self.max_hops = max_hops
+        # Keep custom/offline coordinators backwards-compatible while letting
+        # the production agent impose its stricter request cost contract.
+        self.max_investigation_model_calls = (
+            max_hops + 1
+            if max_investigation_model_calls is None
+            else max(0, max_investigation_model_calls)
+        )
 
     async def retrieve_with_refinement(
         self,
@@ -108,6 +116,7 @@ class RetrievalCoordinator:
             evidence_level(question=evidence_query, sources=merged_sources) == "direct"
             and not plan.missing_info
             and not plan.version_sensitive
+            and not plan.requires_relation_verification
             and not requires_semantic_relation_judgment(request.question)
             and len(plan.named_entity_groups) < 2
         ):
@@ -120,7 +129,7 @@ class RetrievalCoordinator:
 
         update_investigation = getattr(self.llm, "update_investigation", None)
         if callable(update_investigation):
-            for hop in range(0, self.max_hops + 1):
+            for hop in range(self.max_investigation_model_calls):
                 investigation = await update_investigation(
                     request=request,
                     plan=merged_plan,
@@ -137,14 +146,18 @@ class RetrievalCoordinator:
                         update={"next_queries": [], "stop_reason": "budget_exhausted"}
                     )
                     break
-
                 refined_plan = SearchPlan(
                     intent=merged_plan.intent,
                     version_sensitive=merged_plan.version_sensitive,
+                    requires_relation_verification=merged_plan.requires_relation_verification,
                     named_entity_groups=merged_plan.named_entity_groups,
-                    aliases=investigation.aliases,
-                    queries=investigation.next_queries,
-                    missing_info=investigation.unresolved_questions,
+                    # Investigation state is model-produced. Preserve the
+                    # schema's bounded request contract at this hand-off even
+                    # if a provider returns more otherwise-valid entries than
+                    # the state parser retained for diagnostics.
+                    aliases=investigation.aliases[:6],
+                    queries=investigation.next_queries[:2],
+                    missing_info=investigation.unresolved_questions[:4],
                     refinement=True,
                 )
                 refined_sources = await self.retrieve_sources(
@@ -383,8 +396,13 @@ def merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:
     return SearchPlan(
         intent=initial.intent,
         version_sensitive=initial.version_sensitive or refined.version_sensitive,
+        requires_relation_verification=(
+            initial.requires_relation_verification
+            or refined.requires_relation_verification
+        ),
         named_entity_groups=named_entity_groups[:4],
         aliases=aliases,
         queries=queries[:6],
+        answer_requirements=initial.answer_requirements[:4],
         missing_info=list(dict.fromkeys([*initial.missing_info, *refined.missing_info]))[:4],
     )

@@ -82,7 +82,18 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     async def health(settings: Settings = Depends(get_settings)) -> dict[str, str]:
-        return {"status": "ok", "service": settings.app_name, "env": settings.app_env}
+        # Model identifiers are operational metadata, not credentials. Expose
+        # the server-owned default so aggregate evaluators can accurately
+        # record what ran without receiving a key or request payload.
+        default_provider = "deepseek" if settings.deepseek_api_key else "anthropic"
+        default_model = settings.deepseek_model if default_provider == "deepseek" else settings.anthropic_model
+        return {
+            "status": "ok",
+            "service": settings.app_name,
+            "env": settings.app_env,
+            "default_provider": default_provider,
+            "default_model": default_model,
+        }
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest, agent: QuestAgent = Depends(lambda: quest_agent)):

@@ -56,6 +56,15 @@ hash matches and the dataset is eligible to be treated as sealed.
 Start a dedicated evaluation API instance with an isolated database/cache and
 test-only model credentials, then run:
 
+当 API 使用服务器 `.env` 内的密钥时，模型由 API 的 `DEEPSEEK_MODEL`（或对应服务端配置）
+决定；评测命令的 `--ai-model` 不会覆盖它。只有设置了请求专用的
+`QUESTMATE_EVAL_AI_API_KEY` 时，才可在评测命令中传入 `--ai-model` 与 `--ai-base-url`。
+
+When the API uses a server-owned `.env` key, its `DEEPSEEK_MODEL` (or equivalent
+server configuration) determines the model; evaluator `--ai-model` does not
+override it. Pass `--ai-model` and `--ai-base-url` only when a request-owned
+`QUESTMATE_EVAL_AI_API_KEY` is configured.
+
 ```bash
 uv run python evals/run_evals.py \
   --cases /secure/questmate-holdout.jsonl \
@@ -64,13 +73,26 @@ uv run python evals/run_evals.py \
   --output /secure/reports/holdout-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-输出仅为聚合结果且仅负责人可读。只发布聚合/分层得分、延迟、来源数量和失败维度
-比例；不要发布私有数据集、请求日志、含问题的 API 日志或带 `results` 的常规报告。
+输出仅为聚合结果且仅负责人可读。除通过率外，报告会给出验收维度失败数及两两共同
+失败数；这些数据不会按案例、类别、问题、答案、URL 或响应分组。只发布聚合/分层得分、
+延迟、来源数量和失败维度比例；不要发布私有数据集、请求日志、含问题的 API 日志或带
+`results` 的常规报告。
 
-The output is aggregate-only and owner-readable. Publish only aggregate and
-stratified scores, latency, source counts, and failure-dimension rates. Do not
+`agent_funnel` 同样只包含聚合数据：响应路径、证据等级和是否渲染引用；其中不含问题、
+答案、查询、来源、URL 或逐题标识。
+
+The output is aggregate-only and owner-readable. It includes pass rates plus
+acceptance-dimension failure counts and pairwise co-failure counts; these are
+not grouped by case, category, prompt, answer, URL, or response. Publish only
+aggregate and stratified scores, latency, source counts, and failure-dimension rates. Do not
 publish the private dataset, request logs, API logs containing questions, or a
 normal evaluator report with `results`.
+
+`agent_funnel` is also aggregate-only: response paths, evidence levels, and
+rendered-citation presence. It contains no prompt, answer, query, source, URL,
+or per-case identifier.
+It also groups these counters by expected behavior only, so `answer` and
+`safe_refusal` failures can be diagnosed without exposing a case.
 
 ## Rotation / 轮换
 

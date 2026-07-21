@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -16,11 +17,16 @@ import httpx
 
 try:
     from evals.dataset import dataset_metadata, filter_cases, load_cases
-    from evals.scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
+    from evals.scoring import (
+        SCORING_SCHEMA_VERSION,
+        evaluation_contract,
+        evaluate_case,
+        summarize,
+    )
 except ModuleNotFoundError:  # Support `python evals/run_evals.py` from the repository root.
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from dataset import dataset_metadata, filter_cases, load_cases
-    from scoring import SCORING_SCHEMA_VERSION, evaluate_case, summarize
+    from scoring import SCORING_SCHEMA_VERSION, evaluation_contract, evaluate_case, summarize
 
 
 ROOT = Path(__file__).resolve().parent
@@ -59,6 +65,7 @@ def sealed_holdout_report(
     summary: dict[str, Any],
     model: dict[str, Any],
     evaluation_mode: str,
+    runtime: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Produce a report safe to share with implementers.
 
@@ -83,6 +90,7 @@ def sealed_holdout_report(
             )
         },
         "model": model,
+        "runtime": runtime or {"service_commit": "unknown", "environment_id": "unspecified"},
         "filters": {"mode": evaluation_mode, "split": "holdout"},
         "summary": summary,
     }
@@ -104,6 +112,24 @@ def validate_sealed_holdout_run(
         raise ValueError("--sealed-holdout may run only a non-empty holdout split")
     if mode != "discovery":
         raise ValueError("--sealed-holdout requires --mode discovery")
+
+
+def evaluation_runtime(environment_id: str | None) -> dict[str, str]:
+    """Return non-sensitive provenance that is safe in sealed aggregate reports."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        commit = "unknown"
+    return {
+        "service_commit": commit or "unknown",
+        "environment_id": environment_id or os.getenv("QUESTMATE_EVAL_ENVIRONMENT_ID", "unspecified"),
+    }
 
 
 def evaluation_database_domains(case: dict[str, Any]) -> list[str]:
@@ -170,6 +196,8 @@ async def run_case(
             "evaluation": evaluation,
             "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000),
             "timings_ms": response.get("timings_ms") if isinstance(response.get("timings_ms"), dict) else {},
+            "usage": response.get("usage") if isinstance(response.get("usage"), dict) else {},
+            "diagnostics": response.get("diagnostics") if isinstance(response.get("diagnostics"), dict) else {},
         }
     except Exception as exc:
         return {
@@ -202,18 +230,36 @@ async def main_async(args: argparse.Namespace) -> int:
         print(json.dumps(metadata, ensure_ascii=False, indent=2))
         return 0
     api_key = os.getenv("QUESTMATE_EVAL_AI_API_KEY", "").strip()
+    # Model and endpoint overrides are meaningful only together with the
+    # request-owned evaluation key.  With a server-owned .env key the backend
+    # deliberately selects its own model, so forwarding or reporting these
+    # flags would misstate what actually ran.
     model_config = {
         key: value
         for key, value in {
             "ai_provider": args.ai_provider,
             "ai_api_key": api_key,
-            "ai_model": args.ai_model,
-            "ai_base_url": args.ai_base_url,
+            "ai_model": args.ai_model if api_key else None,
+            "ai_base_url": args.ai_base_url if api_key else None,
         }.items()
         if value
     }
     timeout = httpx.Timeout(args.timeout)
     async with httpx.AsyncClient(timeout=timeout) as client:
+        server_model: dict[str, str] = {}
+        try:
+            health = await client.get(f"{args.api_base_url.rstrip('/')}/health")
+            health.raise_for_status()
+            payload = health.json()
+            if isinstance(payload, dict):
+                for key in ("default_provider", "default_model"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value:
+                        server_model[key] = value
+        except (httpx.HTTPError, ValueError, TypeError):
+            # A health endpoint is observability only; evaluation requests
+            # retain their normal error accounting if the service is unusable.
+            server_model = {}
         semaphore = asyncio.Semaphore(args.concurrency)
 
         async def bounded_run(case: dict[str, Any]) -> dict[str, Any]:
@@ -222,11 +268,14 @@ async def main_async(args: argparse.Namespace) -> int:
 
         results = list(await asyncio.gather(*(bounded_run(case) for case in cases)))
     summary = summarize(results)
+    contract = evaluation_contract(summary)
     model = {
         "provider": args.ai_provider or "backend_default",
-        "model": args.ai_model or "backend_default",
-        "base_url": args.ai_base_url or "backend_default",
+        "model": args.ai_model if api_key and args.ai_model else "backend_default",
+        "base_url": args.ai_base_url if api_key and args.ai_base_url else "backend_default",
         "request_api_key_configured": bool(api_key),
+        "server_default_provider": server_model.get("default_provider", "unknown"),
+        "server_default_model": server_model.get("default_model", "unknown"),
     }
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -234,6 +283,7 @@ async def main_async(args: argparse.Namespace) -> int:
         "dataset": metadata,
         "scoring_schema_version": SCORING_SCHEMA_VERSION,
         "model": model,
+        "runtime": evaluation_runtime(args.environment_id),
         "filters": {
             "mode": args.mode,
             "split": args.split,
@@ -252,6 +302,7 @@ async def main_async(args: argparse.Namespace) -> int:
             "gold_source_urls": "used only after the response for scoring",
         },
         "summary": summary,
+        "contract": contract,
         "error_categories": aggregate_error_categories(results),
         "results": results,
     }
@@ -263,8 +314,10 @@ async def main_async(args: argparse.Namespace) -> int:
             summary=summary,
             model=model,
             evaluation_mode=args.mode,
+            runtime=evaluation_runtime(args.environment_id),
         )
         report["error_categories"] = sealed_error_categories
+        report["contract"] = contract
     output = Path(args.output) if args.output else ROOT / "reports" / f"eval-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -278,8 +331,11 @@ async def main_async(args: argparse.Namespace) -> int:
             if sealed_error_categories is not None
             else report["error_categories"]
         ),
+        "contract_passed": contract["passed"],
     }
     print(json.dumps(console_summary, ensure_ascii=False, indent=2))
+    if args.enforce_contract and not contract["passed"]:
+        return 1
     return 0 if summary["pass_rate"] >= args.fail_under else 1
 
 
@@ -323,6 +379,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ai-model")
     parser.add_argument("--ai-base-url")
     parser.add_argument("--fail-under", type=float, default=0)
+    parser.add_argument(
+        "--environment-id",
+        help="non-sensitive isolated evaluator identifier recorded in aggregate reports",
+    )
+    parser.add_argument(
+        "--enforce-contract",
+        action="store_true",
+        help="return non-zero unless aggregate quality, latency, and budget gates pass",
+    )
     return parser.parse_args()
 
 

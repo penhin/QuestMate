@@ -1,4 +1,4 @@
-from ai.citation_claims import build_citation_claims
+from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
 from schemas import Source
 
 
@@ -69,3 +69,117 @@ def test_build_citation_claims_keeps_earlier_evidence_for_equal_relevance() -> N
     assert len(claims) == 1
     assert claims[0].claim_id == "C1_1"
     assert "north gate" in claims[0].statement
+
+
+def test_build_citation_claims_accepts_translated_alias_without_new_entity_requirement() -> None:
+    claims = build_citation_claims(
+        question="青石钥匙如何使用？",
+        sources=[Source(
+            title="Stone Key guide",
+            url="https://example.com/stone-key",
+            evidence="The Stone Key opens the observatory lock.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["青石钥匙"]],
+        aliases=["Stone Key"],
+    )
+
+    assert [claim.source_index for claim in claims] == [1]
+    assert "Stone Key" in claims[0].statement
+
+
+def test_claim_group_coverage_requires_every_relation_endpoint() -> None:
+    claims = build_citation_claims(
+        question="Does Quartz Relay activate Azure Gate?",
+        sources=[
+            Source(title="Relay note", url="https://example.com/relay", evidence="Quartz Relay needs a charged core."),
+            Source(title="Gate note", url="https://example.com/gate", evidence="Azure Gate opens after the relay signal."),
+        ],
+        eligible_source_indexes={1, 2},
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+
+    assert not claim_ids_cover_entity_groups(
+        claims=claims,
+        claim_ids=["C1_1"],
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+    assert claim_ids_cover_entity_groups(
+        claims=claims,
+        claim_ids=["C1_1", "C2_1"],
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+
+
+def test_build_citation_claims_retains_adjacent_relation_context() -> None:
+    claims = build_citation_claims(
+        question="Does Quartz Relay activate Azure Gate?",
+        sources=[Source(
+            title="Signal route",
+            url="https://example.com/signal",
+            evidence="Quartz Relay sends a signal when charged. The Azure Gate opens after that signal.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "Quartz Relay" in claims[0].statement
+    assert "Azure Gate" in claims[0].statement
+
+
+def test_build_citation_claims_keeps_short_direct_fact_beside_long_noise() -> None:
+    claims = build_citation_claims(
+        question="How does Orb open Gate?",
+        sources=[Source(
+            title="Mixed evidence",
+            url="https://example.com/mixed",
+            evidence="This overview contains unrelated background history and cosmetic lore. Orb opens Gate.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Orb"], ["Gate"]],
+    )
+
+    assert any(claim.statement == "Orb opens Gate." for claim in claims)
+
+
+def test_claim_ranking_prefers_question_relation_over_entity_only_lore() -> None:
+    claims = build_citation_claims(
+        question="How does Amber Relay activate Blue Gate?",
+        sources=[Source(
+            title="Relay guide",
+            url="https://example.com/relay",
+            evidence=(
+                "Amber Relay was built by the old observatory. "
+                "Amber Relay activates Blue Gate after receiving a charged signal."
+            ),
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Amber Relay"]],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "activates Blue Gate" in claims[0].statement
+
+
+def test_claim_ranking_uses_planned_evidence_language_for_translated_question() -> None:
+    claims = build_citation_claims(
+        question="琥珀中继器有什么效果？",
+        sources=[Source(
+            title="Amber Relay guide",
+            url="https://example.com/relay",
+            evidence=(
+                "Amber Relay is an old observatory component. "
+                "A charged Amber Relay activates the Blue Gate."
+            ),
+        )],
+        eligible_source_indexes={1},
+        aliases=["Amber Relay"],
+        evidence_queries=["Amber Relay activate Blue Gate"],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "activates the Blue Gate" in claims[0].statement

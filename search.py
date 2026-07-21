@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import re
 from urllib.parse import urlparse, urlunparse
@@ -11,6 +12,7 @@ from config import Settings, get_settings
 from game_resolution import GameResolver, is_candidate_identity_url, select_game_candidate
 from quality_policy import (
     EXTERNAL_SEARCH_ATTEMPTS,
+    MAX_PAID_SEARCH_CALLS_PER_REQUEST,
     PROGRESSIVE_STRICT_SOURCE_TARGET,
     SOURCE_POLICIES,
     SourcePolicy,
@@ -117,6 +119,17 @@ class TavilySearchProvider:
             extract_version=self._extract_game_version,
         )
 
+    def usage_snapshot(self) -> dict[str, int]:
+        """Return process counters for request-scoped delta accounting."""
+        if self._client is None:
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+        return self._client.request_usage()
+
+    def usage_scope(self):
+        if self._client is None:
+            return nullcontext()
+        return self._client.usage_scope(max_paid_calls=MAX_PAID_SEARCH_CALLS_PER_REQUEST)
+
     async def search(
         self,
         query: str,
@@ -209,7 +222,26 @@ class TavilySearchProvider:
             return selected
 
         max_query_count = min(self.settings.tavily_max_queries_per_request, len(search_queries))
-        first_wave_size = min(self.settings.tavily_first_wave_queries, max_query_count)
+        if not game_resolution.is_confirmed:
+            max_query_count = min(
+                max_query_count,
+                max(1, self.settings.tavily_max_queries_per_request - self.settings.tavily_unconfirmed_identity_reserve),
+            )
+        # A refinement may use at most one subsequent query, so retain the
+        # request-wide hard cap while giving every first wave the configured
+        # independent source routes.  Relation questions need this especially:
+        # two routes can find each endpoint separately without returning a
+        # passage that establishes their connection.  With the default budget
+        # of four, a three-route first wave still leaves one paid call for the
+        # single permitted evidence-gap refinement.
+        relation_verification = bool(plan and plan.requires_relation_verification)
+        search_depth = (
+            self.settings.tavily_relation_search_depth
+            if relation_verification
+            else self.settings.tavily_search_depth
+        )
+        first_wave_limit = self.settings.tavily_first_wave_queries
+        first_wave_size = min(first_wave_limit, max_query_count)
 
         await self._collect_sources(
             search_queries=search_queries[:first_wave_size],
@@ -225,9 +257,14 @@ class TavilySearchProvider:
             database_domains=list(game_resolution.database_domains),
             official_domains=self._resolution_authority_domains(game_resolution),
             named_entity_groups=named_entity_groups,
+            search_depth=search_depth,
         )
 
-        if len(strict_sources_by_url) < min_strict_results and first_wave_size < max_query_count:
+        if (
+            not relation_verification
+            and len(strict_sources_by_url) < min_strict_results
+            and first_wave_size < max_query_count
+        ):
             await self._collect_sources(
                 search_queries=search_queries[first_wave_size:max_query_count],
                 per_query_results=per_query_results,
@@ -242,6 +279,7 @@ class TavilySearchProvider:
                 database_domains=list(game_resolution.database_domains),
                 official_domains=self._resolution_authority_domains(game_resolution),
                 named_entity_groups=named_entity_groups,
+                search_depth=search_depth,
             )
 
         strict_ranked_sources = sorted(
@@ -420,8 +458,11 @@ class TavilySearchProvider:
         database_domains: list[str],
         official_domains: list[str],
         named_entity_groups: list[list[str]],
+        search_depth: str,
     ) -> None:
-        results = await self._fetch_search_results(search_queries, per_query_results)
+        results = await self._fetch_search_results(
+            search_queries, per_query_results, search_depth=search_depth
+        )
         for (search_query, search_source), result in zip(search_queries, results, strict=True):
             required_entity_groups = required_entity_groups_for_query(
                 named_entity_groups,
@@ -534,6 +575,8 @@ class TavilySearchProvider:
         self,
         search_queries: list[tuple[str, SourcePolicy]],
         per_query_results: int,
+        *,
+        search_depth: str,
     ) -> list[dict[str, Any]]:
         semaphore = asyncio.Semaphore(self.settings.tavily_max_concurrency)
 
@@ -545,6 +588,7 @@ class TavilySearchProvider:
                             asyncio.to_thread(
                                 self._client.search,
                                 query=query,
+                                search_depth=search_depth,
                                 max_results=per_query_results,
                                 include_answer=False,
                                 include_raw_content=self.settings.search_include_raw_content,

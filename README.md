@@ -95,14 +95,17 @@ boundaries and sealed-holdout rules.
 
 ## 答案质量链路 / Answer-quality flow
 
-QuestMate 先确认游戏身份、生成意图化搜索计划，再检索本地知识库和实时网页。确认的
+QuestMate 先生成意图化搜索计划并检索本地知识库和实时网页；无冲突的陌生游戏名不会
+在检索前被拦截。只有出现竞争候选或证据无法建立可靠对应关系时才请求身份确认。确认的
 别名、商店页和 Wiki 域名会写入来源注册表供后续复用。MediaWiki 命中页会被分块入库，
 并可沿问题实体匹配的站内链接扩展一层；同一页面默认七天内不重复索引。
 
-QuestMate first resolves game identity and creates an intent-aware search plan,
-then searches local knowledge and the web. Confirmed aliases, store pages, and
-Wiki domains are recorded for reuse. Matching MediaWiki pages are chunked and
-indexed, with one matching internal-link expansion; a page is not re-indexed
+QuestMate first creates an intent-aware search plan and searches local knowledge
+and the web; an unfamiliar title without competing candidates is not blocked
+before retrieval. It requests identity confirmation only when candidates conflict
+or evidence cannot establish a reliable match. Confirmed aliases, store pages,
+and Wiki domains are recorded for reuse. Matching MediaWiki pages are chunked
+and indexed, with one matching internal-link expansion; a page is not re-indexed
 within the default seven-day window.
 
 实时搜索会组合定向来源查询与不含 `site:` 的开放查询，避免固定资料站占满预算。证据

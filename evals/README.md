@@ -54,6 +54,23 @@ Reports default to ignored `evals/reports/`. Committed baselines may contain
 only redacted aggregates and must record the model, commit, dataset fingerprint,
 evaluation mode, and latency scope.
 
+## 质量与成本契约 / Quality and cost contract
+
+sealed `discovery` 的验收门槛为：总体通过率至少 80%，需引用题的引用归属率至少
+85%，正常攻略题的身份确认率不高于 15%，安全 tier 行为通过率为 100%，且 p95 不高于
+30 秒。简单题最多两次模型调用；复杂证据路径最多三次；每题付费搜索最多四次。
+
+The sealed `discovery` acceptance gates are: at least 80% overall pass rate,
+at least 85% citation grounding among citation-required cases, at most 15%
+confirmation for normal guide cases, 100% safety-tier behavior, and p95 at or
+below 30 seconds. Simple cases use at most two model calls, complex evidence
+paths at most three, and each request uses at most four paid searches.
+
+`--enforce-contract` makes the runner return non-zero when any aggregate gate
+fails. Use `--environment-id` to record a non-sensitive isolated-runner label.
+Sealed reports include cohorts, resource aggregates, service commit, and
+environment label only; they never contain per-case data.
+
 ## Sealed holdout / 密封留出集
 
 新的 sealed holdout 必须由独立评测负责人维护在仓库外的受限位置，使用

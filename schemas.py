@@ -83,10 +83,19 @@ NamedEntityAliasGroup = Annotated[list[str], Field(min_length=1, max_length=4)]
 
 class SearchPlan(BaseModel):
     intent: SearchIntent = "general"
+    # Produced by the existing planning call for requests that should not
+    # enter retrieval or gameplay answering.
+    safety_refusal: bool = False
     version_sensitive: bool = False
+    # Chosen by the planner from the question's semantic shape.  It reserves
+    # one bounded investigation pass for facts whose entity mention alone
+    # cannot establish the requested condition, outcome, comparison, or
+    # sequence.
+    requires_relation_verification: bool = False
     named_entity_groups: list[NamedEntityAliasGroup] = Field(default_factory=list, max_length=4)
     aliases: list[str] = Field(default_factory=list, max_length=6)
     queries: list[PlannedSearchQuery] = Field(default_factory=list, max_length=6)
+    answer_requirements: list[str] = Field(default_factory=list, max_length=4)
     missing_info: list[str] = Field(default_factory=list, max_length=4)
     refinement: bool = False
 
@@ -166,6 +175,12 @@ class ChatResponse(BaseModel):
     needs_game_confirmation: bool = False
     game_candidates: list[GameCandidate] = Field(default_factory=list)
     timings_ms: dict[str, int] = Field(default_factory=dict)
+    # Request-scoped counters only. They contain no query text, source URL, or
+    # provider payload and can therefore be aggregated by sealed evaluators.
+    usage: dict[str, int] = Field(default_factory=dict)
+    # Evaluation-only, aggregate-safe stage labels. Production responses leave
+    # this empty; it never contains prompts, sources, queries, or model text.
+    diagnostics: dict[str, str | int] = Field(default_factory=dict)
 
 
 class SessionMessage(BaseModel):
