@@ -17,6 +17,7 @@ from ai.fallback_planning import (
 )
 from ai.investigation import parse_answer_completeness, parse_investigation_state
 from ai.evidence_policy import (
+    evidence_entity_groups,
     evidence_level,
     evidence_policy_for_level,
     evidence_question,
@@ -25,7 +26,7 @@ from ai.evidence_policy import (
     requires_semantic_relation_judgment,
     version_evidence_status,
 )
-from ai.citation_claims import build_citation_claims
+from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
 from retrieval.source_quality import token_in_text
 from guide_prompts import (
     answer_completeness_system_prompt,
@@ -596,7 +597,7 @@ class GuideLLM:
         claim_context = GuideLLM._citation_claim_context(
             question=GuideLLM._evidence_question(request=request, plan=plan),
             sources=sources,
-            entity_groups=plan.named_entity_groups if plan else None,
+            entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
         )
         # The claim ledger is the auditable evidence contract. Avoid repeating
@@ -634,6 +635,7 @@ class GuideLLM:
             f"<evidence_policy>{GuideLLM._evidence_policy_for_level(evidence_level)}</evidence_policy>\n"
             f"<version_evidence>{version_status}</version_evidence>\n"
             f"<answer_shape>{GuideLLM._answer_shape_for_intent(intent)}</answer_shape>\n"
+            f"<required_entity_groups>{GuideLLM._claim_entity_groups(request=request, plan=plan)}</required_entity_groups>\n"
             f"<citation_claims>{claim_context or 'No directly grounded claims are available.'}</citation_claims>\n"
             f"<investigation_state>{GuideLLM._investigation_context(investigation)}</investigation_state>\n"
             f"<recent_conversation>{GuideLLM._history_context(history) or 'No prior messages.'}</recent_conversation>\n"
@@ -710,6 +712,11 @@ class GuideLLM:
         )
 
     @staticmethod
+    def _claim_entity_groups(*, request: ChatRequest, plan: SearchPlan | None) -> list[list[str]]:
+        """Use only player-anchored endpoints for answer-side Claim checks."""
+        return evidence_entity_groups(GuideLLM._evidence_question(request=request, plan=plan))
+
+    @staticmethod
     def _claim_eligible_source_indexes(
         *,
         question: str,
@@ -760,10 +767,10 @@ class GuideLLM:
             eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
                 question=evidence_question,
                 sources=sources,
-                entity_groups=plan.named_entity_groups if plan else None,
+                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
                 aliases=plan.aliases if plan else None,
             ),
-            entity_groups=plan.named_entity_groups if plan else None,
+            entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
@@ -793,10 +800,10 @@ class GuideLLM:
                 eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
                     question=evidence_question,
                     sources=sources,
-                    entity_groups=plan.named_entity_groups if plan else None,
+                    entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
                     aliases=plan.aliases if plan else None,
                 ),
-                entity_groups=plan.named_entity_groups if plan else None,
+                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
                 aliases=plan.aliases if plan else None,
             )
             logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
@@ -813,13 +820,18 @@ class GuideLLM:
             eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
                 question=evidence_question,
                 sources=sources,
-                entity_groups=plan.named_entity_groups if plan else None,
+                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
                 aliases=plan.aliases if plan else None,
             ),
-            entity_groups=plan.named_entity_groups if plan else None,
+            entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
+        relation_groups = (
+            GuideLLM._claim_entity_groups(request=request, plan=plan)
+            if plan and plan.requires_relation_verification
+            else []
+        )
         rendered: list[str] = []
         cited_source_indexes: set[int] = set()
         unbound_blocks = 0
@@ -832,6 +844,13 @@ class GuideLLM:
                 continue
             indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
             if not indexes:
+                unbound_blocks += 1
+                continue
+            if not claim_ids_cover_entity_groups(
+                claims=claims,
+                claim_ids=[claim_id for claim_id in claim_ids if isinstance(claim_id, str)],
+                entity_groups=relation_groups,
+            ):
                 unbound_blocks += 1
                 continue
             citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))

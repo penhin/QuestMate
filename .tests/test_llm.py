@@ -199,6 +199,42 @@ def test_structured_answer_renders_citations_from_claim_ids() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
+def test_structured_relation_answer_rejects_one_sided_claim_coverage() -> None:
+    request = ChatRequest(game="Synthetic Adventure", question="Does Quartz Relay activate Azure Gate?")
+    sources = [
+        Source(
+            title="Relay note",
+            url="https://example.com/relay",
+            evidence="Quartz Relay needs a charged core.",
+        ),
+        Source(
+            title="Gate note",
+            url="https://example.com/gate",
+            evidence="Azure Gate opens after the relay signal.",
+        ),
+    ]
+    plan = SearchPlan(
+        requires_relation_verification=True,
+        named_entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+
+    rejected = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"It activates the gate.","claim_ids":["C1_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=plan,
+    )
+    accepted = GuideLLM._render_structured_answer(
+        answer='{"blocks":[{"text":"It activates the gate.","claim_ids":["C1_1","C2_1"]}]}',
+        request=request,
+        sources=sources,
+        plan=plan,
+    )
+
+    assert "It activates the gate." not in rejected
+    assert accepted == "It activates the gate.[1][2]"
+
+
 def test_structured_answer_extracts_json_from_model_wrapper() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [

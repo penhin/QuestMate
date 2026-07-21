@@ -1,4 +1,4 @@
-from ai.citation_claims import build_citation_claims
+from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
 from schemas import Source
 
 
@@ -86,3 +86,26 @@ def test_build_citation_claims_accepts_translated_alias_without_new_entity_requi
 
     assert [claim.source_index for claim in claims] == [1]
     assert "Stone Key" in claims[0].statement
+
+
+def test_claim_group_coverage_requires_every_relation_endpoint() -> None:
+    claims = build_citation_claims(
+        question="Does Quartz Relay activate Azure Gate?",
+        sources=[
+            Source(title="Relay note", url="https://example.com/relay", evidence="Quartz Relay needs a charged core."),
+            Source(title="Gate note", url="https://example.com/gate", evidence="Azure Gate opens after the relay signal."),
+        ],
+        eligible_source_indexes={1, 2},
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+
+    assert not claim_ids_cover_entity_groups(
+        claims=claims,
+        claim_ids=["C1_1"],
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )
+    assert claim_ids_cover_entity_groups(
+        claims=claims,
+        claim_ids=["C1_1", "C2_1"],
+        entity_groups=[["Quartz Relay"], ["Azure Gate"]],
+    )

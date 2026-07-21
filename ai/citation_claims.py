@@ -9,6 +9,31 @@ from schemas import CitationClaim, Source
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;.])\s*|\n+(?:[-*•]\s*)?")
 
+
+def claim_ids_cover_entity_groups(
+    *,
+    claims: list[CitationClaim],
+    claim_ids: list[str],
+    entity_groups: list[list[str]],
+) -> bool:
+    """Check that a relation block cites evidence for every named endpoint.
+
+    This is deliberately a coverage guard, not a semantic inference engine:
+    it prevents a model from presenting a relationship while citing only one
+    side of it. The answer prompt remains responsible for requiring that the
+    relationship itself is stated by the cited evidence.
+    """
+    if len(entity_groups) < 2:
+        return True
+    selected = [claim for claim in claims if claim.claim_id in set(claim_ids)]
+    return all(
+        any(
+            any(token_in_text(name.casefold(), claim.statement.casefold()) for name in group)
+            for claim in selected
+        )
+        for group in entity_groups
+    )
+
 def build_citation_claims(
     *,
     question: str,

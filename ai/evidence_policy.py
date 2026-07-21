@@ -256,6 +256,12 @@ def evidence_question(*, request: ChatRequest, plan: SearchPlan | None) -> str:
     return f"{request.question}\nEVIDENCE_METADATA:{serialized}"
 
 
+def evidence_entity_groups(question: str) -> list[list[str]]:
+    """Return player-anchored entity groups carried by an evidence question."""
+    _primary_question, _aliases, groups = _evidence_question_metadata(question)
+    return groups
+
+
 def _evidence_question_metadata(question: str) -> tuple[str, list[str], list[list[str]]]:
     primary_question, separator, serialized = question.rpartition("\nEVIDENCE_METADATA:")
     if separator:
