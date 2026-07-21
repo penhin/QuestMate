@@ -118,7 +118,11 @@ def _passages(evidence: str) -> list[str]:
     values: list[str] = []
     for part in _SENTENCE_BOUNDARY.split(evidence):
         cleaned = " ".join(part.split()).strip(" -•")
-        if 24 <= len(cleaned) <= 700:
+        # Short sentences often contain the decisive fact (a binary condition,
+        # location, or version value). Relevance and entity coverage are
+        # checked later, so do not discard them merely because a longer,
+        # unrelated sentence shares the same evidence passage.
+        if 8 <= len(cleaned) <= 700:
             values.append(cleaned)
     if not values:
         cleaned = " ".join(evidence.split())[:700]

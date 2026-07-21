@@ -127,3 +127,18 @@ def test_build_citation_claims_retains_adjacent_relation_context() -> None:
     assert len(claims) == 1
     assert "Quartz Relay" in claims[0].statement
     assert "Azure Gate" in claims[0].statement
+
+
+def test_build_citation_claims_keeps_short_direct_fact_beside_long_noise() -> None:
+    claims = build_citation_claims(
+        question="How does Orb open Gate?",
+        sources=[Source(
+            title="Mixed evidence",
+            url="https://example.com/mixed",
+            evidence="This overview contains unrelated background history and cosmetic lore. Orb opens Gate.",
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Orb"], ["Gate"]],
+    )
+
+    assert any(claim.statement == "Orb opens Gate." for claim in claims)
