@@ -363,11 +363,19 @@ class GuideLLM:
                     f"<completeness_assessment>{assessment.model_dump_json() if assessment else 'local checks found a gap'}</completeness_assessment>\n"
                     f"<draft_answer>{answer}</draft_answer>"
                 ),
+                json_mode=True,
             )
         except Exception:
             return answer
 
-        cleaned = self._render_claim_bound_answer(
+        # A revision used to be rendered through the legacy ``[n]{claim}``
+        # compatibility path.  Models commonly returned plain ``[n]`` there,
+        # which bypassed the Claim ledger entirely and let a polishing pass
+        # attach a page citation to details absent from the selected evidence.
+        # Keep revisions inside the same structured Claim contract as the
+        # first answer; this is independent of game vocabulary and costs no
+        # additional call.
+        cleaned = self._render_structured_answer(
             answer=improved, request=request, sources=sources, plan=plan
         ).strip()
         candidate = cleaned if cleaned else answer
@@ -729,7 +737,11 @@ class GuideLLM:
         eligible = {
             index
             for index, source in enumerate(sources, start=1)
-            if GuideLLM._has_question_specific_sources(question=question, sources=[source])
+            if has_question_specific_sources(
+                question=question,
+                sources=[source],
+                include_url=False,
+            )
         }
         if not entity_groups or len(entity_groups) < 2:
             # Planner aliases are alternate surfaces of an entity already in

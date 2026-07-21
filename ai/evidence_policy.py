@@ -15,7 +15,9 @@ from retrieval.source_quality import required_entity_groups_match, token_in_text
 from schemas import ChatRequest, SearchIntent, SearchPlan, Source
 
 
-def has_question_specific_sources(*, question: str, sources: list[Source]) -> bool:
+def has_question_specific_sources(
+    *, question: str, sources: list[Source], include_url: bool = True
+) -> bool:
     primary_question, aliases, required_entity_groups = _evidence_question_metadata(question)
     tokens = [token for token in question_relevance_tokens(primary_question) if is_query_entity_token(token)]
     entity_groups = [] if required_entity_groups else question_named_entity_groups(primary_question)
@@ -32,7 +34,13 @@ def has_question_specific_sources(*, question: str, sources: list[Source]) -> bo
     focus_tokens = _fallback_focus_tokens(primary_question, tokens)
     minimum_matches = _minimum_direct_matches(tokens)
     for source in sources:
-        source_text = f"{source.title} {source.url} {source.evidence or source.snippet or ''}".casefold()
+        # A URL can help retrieve a candidate page, but it is not evidence for
+        # a fact stated in that page. Claim construction therefore opts out of
+        # URL matching, while retrieval-level callers retain it for recall.
+        source_text = (
+            f"{source.title} {str(source.url) if include_url else ''} "
+            f"{source.evidence or source.snippet or ''}"
+        ).casefold()
         if required_identifiers and not all(
             token_in_text(identifier, source_text)
             for identifier in required_identifiers

@@ -117,7 +117,8 @@ def test_planner_does_not_coerce_a_non_boolean_safety_refusal() -> None:
 def test_answer_revision_cannot_add_new_facts_or_detach_citations() -> None:
     prompt = GuideLLM._answer_revision_system_prompt()
 
-    assert "immediately after the sentence or bullet it supports" in prompt
+    assert "Return compact JSON only" in prompt
+    assert "exact Claim IDs" in prompt
     assert "Do not introduce any new factual claim" in prompt
 
 

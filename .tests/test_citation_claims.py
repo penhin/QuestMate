@@ -142,3 +142,23 @@ def test_build_citation_claims_keeps_short_direct_fact_beside_long_noise() -> No
     )
 
     assert any(claim.statement == "Orb opens Gate." for claim in claims)
+
+
+def test_claim_ranking_prefers_question_relation_over_entity_only_lore() -> None:
+    claims = build_citation_claims(
+        question="How does Amber Relay activate Blue Gate?",
+        sources=[Source(
+            title="Relay guide",
+            url="https://example.com/relay",
+            evidence=(
+                "Amber Relay was built by the old observatory. "
+                "Amber Relay activates Blue Gate after receiving a charged signal."
+            ),
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["Amber Relay"]],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "activates Blue Gate" in claims[0].statement

@@ -138,6 +138,13 @@ def _passage_score(
     aliases: list[str] | None = None,
 ) -> tuple[int, int]:
     lowered = passage.casefold()
+    # Entity coverage decides whether a passage may establish an endpoint, but
+    # it does not by itself identify the requested relationship. Among
+    # passages with equal endpoint coverage, prefer the one sharing more
+    # question-derived terms. This works for unseen actions and languages
+    # because every term is taken from the player's question, not a maintained
+    # guide vocabulary.
+    relevance_matches = sum(1 for token in tokens if token_in_text(token, lowered))
     if entity_groups:
         matches = sum(
             1 for group in entity_groups if any(token_in_text(value.casefold(), lowered) for value in group)
@@ -146,12 +153,8 @@ def _passage_score(
         # relation endpoints. They make translated evidence selectable without
         # weakening the distinct entity-group requirements.
         alias_match = any(token_in_text(value, lowered) for value in aliases or [])
-        return matches + int(alias_match), -len(passage)
-    matches = sum(
-        1
-        for token in tokens
-        if token_in_text(token, lowered)
-    )
+        return (matches + int(alias_match)) * 100 + min(relevance_matches, 99), -len(passage)
+    matches = relevance_matches
     # The caller keeps the original passage position as the final tie-breaker,
     # so duplicated/translated page bodies cannot displace earlier evidence.
     return matches, -len(passage)
