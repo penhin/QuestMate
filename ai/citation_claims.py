@@ -41,6 +41,7 @@ def build_citation_claims(
     eligible_source_indexes: set[int],
     entity_groups: list[list[str]] | None = None,
     aliases: list[str] | None = None,
+    evidence_queries: list[str] | None = None,
     max_claims: int = 8,
 ) -> list[CitationClaim]:
     """Split direct evidence into bounded claims without an extra model call.
@@ -50,7 +51,15 @@ def build_citation_claims(
     page as one claim, which keeps citations attached to the narrowest
     available evidence span.
     """
-    tokens = question_relevance_tokens(question)
+    # Planner queries may preserve an alias or relationship surface in the
+    # evidence language when the player's question is translated.  They are
+    # ranking hints only: a query never makes an ineligible source factual
+    # evidence, and all terms remain request-derived rather than vocabulary
+    # maintained by the application.
+    tokens = list(dict.fromkeys([
+        *question_relevance_tokens(question),
+        *(token for query in evidence_queries or [] for token in question_relevance_tokens(query)),
+    ]))
     groups = entity_groups or []
     surface_aliases = [value.casefold() for value in (aliases or []) if value.strip()]
     # Build a per-source ranked queue first.  Taking three passages from the

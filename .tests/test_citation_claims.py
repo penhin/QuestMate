@@ -162,3 +162,24 @@ def test_claim_ranking_prefers_question_relation_over_entity_only_lore() -> None
 
     assert len(claims) == 1
     assert "activates Blue Gate" in claims[0].statement
+
+
+def test_claim_ranking_uses_planned_evidence_language_for_translated_question() -> None:
+    claims = build_citation_claims(
+        question="琥珀中继器有什么效果？",
+        sources=[Source(
+            title="Amber Relay guide",
+            url="https://example.com/relay",
+            evidence=(
+                "Amber Relay is an old observatory component. "
+                "A charged Amber Relay activates the Blue Gate."
+            ),
+        )],
+        eligible_source_indexes={1},
+        aliases=["Amber Relay"],
+        evidence_queries=["Amber Relay activate Blue Gate"],
+        max_claims=1,
+    )
+
+    assert len(claims) == 1
+    assert "activates the Blue Gate" in claims[0].statement

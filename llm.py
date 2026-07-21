@@ -607,6 +607,7 @@ class GuideLLM:
             sources=sources,
             entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
+            evidence_queries=GuideLLM._claim_evidence_queries(plan),
         )
         # The claim ledger is the auditable evidence contract. Avoid repeating
         # large raw pages once it exists: that lowers latency and prevents the
@@ -695,6 +696,7 @@ class GuideLLM:
         sources: list[Source],
         entity_groups: list[list[str]] | None = None,
         aliases: list[str] | None = None,
+        evidence_queries: list[str] | None = None,
     ) -> str:
         """Expose a bounded, source-indexed claim ledger to answer generation.
 
@@ -713,6 +715,7 @@ class GuideLLM:
             eligible_source_indexes=eligible_indexes,
             entity_groups=entity_groups,
             aliases=aliases,
+            evidence_queries=evidence_queries,
         )
         return "\n".join(
             f'<claim id="{claim.claim_id}" source_indexes="[{claim.source_index}]">'
@@ -724,6 +727,13 @@ class GuideLLM:
     def _claim_entity_groups(*, request: ChatRequest, plan: SearchPlan | None) -> list[list[str]]:
         """Use only player-anchored endpoints for answer-side Claim checks."""
         return evidence_entity_groups(GuideLLM._evidence_question(request=request, plan=plan))
+
+    @staticmethod
+    def _claim_evidence_queries(plan: SearchPlan | None) -> list[str]:
+        """Keep planner-selected evidence-language surfaces in Claim ranking."""
+        if plan is None:
+            return []
+        return [query.query for query in plan.queries[:4] if query.query.strip()]
 
     @staticmethod
     def _claim_eligible_source_indexes(
@@ -785,6 +795,7 @@ class GuideLLM:
             ),
             entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
+            evidence_queries=GuideLLM._claim_evidence_queries(plan),
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
 
@@ -818,6 +829,7 @@ class GuideLLM:
                 ),
                 entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
                 aliases=plan.aliases if plan else None,
+                evidence_queries=GuideLLM._claim_evidence_queries(plan),
             )
             logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
             if claims:
@@ -838,6 +850,7 @@ class GuideLLM:
             ),
             entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
             aliases=plan.aliases if plan else None,
+            evidence_queries=GuideLLM._claim_evidence_queries(plan),
         )
         claim_sources = {claim.claim_id: claim.source_index for claim in claims}
         # The planner may miss a relation classification, but two player-
