@@ -74,6 +74,39 @@ async def test_candidate_confirmation_never_substitutes_a_different_fresh_result
 
 
 @pytest.mark.asyncio
+async def test_identity_recovery_uses_only_a_verified_registry_resolution() -> None:
+    cached = GameResolution(
+        input_name="Synthetic Adventure",
+        confirmed_name="Synthetic Adventure",
+        aliases=["Synthetic Adventure: Definitive Edition"],
+        confidence=0.9,
+    )
+
+    class Provider:
+        async def get_cached_game_resolution(self, game: str):
+            assert game == "Synthetic Adventure"
+            return cached
+
+        async def resolve_game(self, *_args, **_kwargs):
+            raise AssertionError("verified registry identity should avoid a repeat discovery call")
+
+    agent = object.__new__(QuestAgent)
+    agent.search_provider = Provider()
+
+    recovered = await agent._recover_game_identity_if_needed(
+        request=ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?"),
+        sources=[],
+        current=GameResolution(
+            input_name="Synthetic Adventure",
+            confirmed_name="Synthetic Adventure",
+            confidence=1,
+        ),
+    )
+
+    assert recovered == cached
+
+
+@pytest.mark.asyncio
 async def test_provider_returns_confirmation_state_when_selected_url_disappears(monkeypatch) -> None:
     selected_url = "https://store.steampowered.com/app/201/Shared_Name/"
     other_url = "https://store.steampowered.com/app/202/Shared_Name/"

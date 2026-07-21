@@ -419,7 +419,11 @@ class QuestAgent:
             resolution=game_resolution,
         ):
             resolution_started = perf_counter()
-            resolved = await self._resolve_request_game(request)
+            resolved = await self._recover_game_identity_if_needed(
+                request=request,
+                sources=[],
+                current=game_resolution,
+            )
             if timings_ms is not None:
                 timings_ms["identity_resolution"] = self._elapsed_ms(resolution_started)
             if self._needs_game_confirmation(resolved):
@@ -860,6 +864,11 @@ class QuestAgent:
             return current
         if sources or request.metadata.get("confirmed_game") is True:
             return current
+        cached_resolution = getattr(self.search_provider, "get_cached_game_resolution", None)
+        if callable(cached_resolution):
+            cached = await cached_resolution(request.game)
+            if cached is not None and cached.is_confirmed and not cached.ambiguous:
+                return cached
         recovered = await self._resolve_request_game(request)
         # A retrieval miss is not evidence that the title is ambiguous.  In
         # particular, an identity provider can have a transient miss while a
