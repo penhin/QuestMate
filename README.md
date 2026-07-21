@@ -108,6 +108,27 @@ and Wiki domains are recorded for reuse. Matching MediaWiki pages are chunked
 and indexed, with one matching internal-link expansion; a page is not re-indexed
 within the default seven-day window.
 
+本地知识库与实时网页返回的内容会先作为带来源通道的段落候选进入融合层。同 URL 的互补
+段落会合并，而最终排序由最直接回答问题的段落决定；这样宽泛的高分摘要不会覆盖同页的
+直接证据。该阶段会记录候选数、融合后页面数和各通道数量，供评测和后续自适应检索使用。
+
+Local knowledge and live-web results first enter a channel-aware passage-fusion
+stage. Complementary passages from one URL are retained, while the most direct
+passage determines final ordering so a broad high-score excerpt cannot hide a
+direct answer on the same page. Candidate, fused-page, and channel counts are
+logged for evaluation and later adaptive retrieval.
+
+请求由一个受控编排器依次交给 Identity、Planning、Retrieval/Evidence 和 Answer 四个
+专家。专家之间只传递 `GameResolution`、`SearchPlan`、`Source` 与 `InvestigationState`
+等结构化 artifact；它们不能自行调用其他专家或扩大搜索/模型预算。编排器会记录不含
+查询文本和来源内容的交接计数，便于评测协作路径。
+
+A bounded orchestrator routes requests through Identity, Planning,
+Retrieval/Evidence, and Answer specialists. Specialists exchange only typed
+artifacts such as `GameResolution`, `SearchPlan`, `Source`, and
+`InvestigationState`; they cannot invoke one another or expand search/model
+budgets. The orchestrator records aggregate-safe hand-off counts for evaluation.
+
 实时搜索会组合定向来源查询与不含 `site:` 的开放查询，避免固定资料站占满预算。证据
 按游戏身份、问题实体、直接支持程度、来源弱先验和版本信息重排；未知站点只要直接
 支持问题，也可进入高质量来源池。
@@ -197,6 +218,8 @@ evaluation instances only; production ignores client-supplied aliases and site h
 ## 模块边界 / Module boundaries
 
 - `search.py`：检索编排、渐进查询和来源选择 / retrieval orchestration, progressive queries, and source selection.
+- `retrieval/pipeline.py`：段落候选融合、去重与最终证据池重排 / passage fusion, deduplication, and final evidence-pool reranking.
+- `multi_agent.py`：受控专家 agent 与结构化交接边界 / bounded specialist agents and typed hand-offs.
 - `search_cache.py`：内存/Redis 缓存与调用计数 / memory/Redis cache and call accounting.
 - `source_registry.py`：别名、商店页和 Wiki 入口持久化 / persistence for aliases, store pages, and Wiki entries.
 - `mediawiki_client.py`：免费 MediaWiki API 适配 / free MediaWiki API adapter.

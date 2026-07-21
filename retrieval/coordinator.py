@@ -9,7 +9,8 @@ import structlog
 
 from quality_policy import MAX_INVESTIGATION_HOPS
 from ai.evidence_policy import evidence_level, evidence_question, requires_semantic_relation_judgment
-from retrieval.evidence_pool import canonical_source_url, rank_sources
+from retrieval.evidence_pool import canonical_source_url
+from retrieval.pipeline import RetrievalStage, fuse_and_rank_evidence
 from schemas import ChatRequest, EvidenceGap, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
 logger = structlog.get_logger()
@@ -33,6 +34,15 @@ class RetrievalOutcome:
     plan: SearchPlan
     investigation: InvestigationState
     refined: bool
+    stages: list[RetrievalStage]
+
+
+@dataclass(frozen=True)
+class RetrievalBatch:
+    """One complete recall-to-selection pass, before answer generation."""
+
+    sources: list[Source]
+    stages: list[RetrievalStage]
 
 
 class RetrievalCoordinator:
@@ -83,14 +93,23 @@ class RetrievalCoordinator:
         plan: SearchPlan,
         game_resolution: GameResolution,
         initial_sources: list[Source] | None = None,
+        initial_stages: list[RetrievalStage] | None = None,
     ) -> RetrievalOutcome:
-        merged_sources = (
-            list(initial_sources)
-            if initial_sources is not None
-            else await self.retrieve_sources(
+        if initial_sources is None:
+            initial_batch = await self.retrieve_batch(
                 request.question, request.game, plan=plan, game_resolution=game_resolution
             )
-        )
+            merged_sources = initial_batch.sources
+            stages = list(initial_batch.stages)
+        else:
+            merged_sources = list(initial_sources)
+            stages = list(initial_stages or [])
+            if not stages:
+                stages.append(RetrievalStage(
+                    name="initial_sources_provided",
+                    input_count=len(merged_sources),
+                    output_count=len(merged_sources),
+                ))
         merged_plan = plan
         refined = False
         active_game_resolution = self._with_discovered_wiki_domains(game_resolution, merged_sources)
@@ -112,23 +131,46 @@ class RetrievalCoordinator:
         # on optional detail.  Relation questions, version-sensitive requests,
         # and explicitly declared gaps still use the full investigation loop.
         evidence_query = evidence_question(request=request, plan=plan)
+        initial_evidence_level = evidence_level(question=evidence_query, sources=merged_sources)
+        stages.append(
+            RetrievalStage(
+                name="evidence_assessment",
+                input_count=len(merged_sources),
+                output_count=len(merged_sources),
+                details={"level": initial_evidence_level},
+            )
+        )
         if (
-            evidence_level(question=evidence_query, sources=merged_sources) == "direct"
+            initial_evidence_level == "direct"
             and not plan.missing_info
             and not plan.version_sensitive
             and not plan.requires_relation_verification
             and not requires_semantic_relation_judgment(request.question)
             and len(plan.named_entity_groups) < 2
         ):
-            return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
+            stages.append(RetrievalStage(
+                name="adaptive_decision",
+                input_count=len(merged_sources),
+                output_count=len(merged_sources),
+                details={"decision": "answer_ready"},
+            ))
+            return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
 
         # Do not spend an additional model call when the first retrieval wave
         # has no evidence. The caller can return a conservative response.
         if not merged_sources:
-            return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
+            stages.append(RetrievalStage(
+                name="adaptive_decision",
+                input_count=0,
+                output_count=0,
+                details={"decision": "no_evidence"},
+            ))
+            return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
 
         update_investigation = getattr(self.llm, "update_investigation", None)
-        if callable(update_investigation):
+        supports_investigation = getattr(self.llm, "supports_update_investigation", True)
+        if callable(update_investigation) and supports_investigation:
+            terminal_decision: str | None = None
             for hop in range(self.max_investigation_model_calls):
                 investigation = await update_investigation(
                     request=request,
@@ -160,17 +202,20 @@ class RetrievalCoordinator:
                     missing_info=investigation.unresolved_questions[:4],
                     refinement=True,
                 )
-                refined_sources = await self.retrieve_sources(
+                refined_batch = await self.retrieve_batch(
                     request.question,
                     request.game,
                     plan=refined_plan,
                     game_resolution=active_game_resolution,
                     include_knowledge=False,
                 )
+                refined_sources = refined_batch.sources
+                stages.extend(refined_batch.stages)
                 if not self._has_novel_evidence(existing=merged_sources, candidates=refined_sources):
                     investigation = investigation.model_copy(
                         update={"next_queries": [], "stop_reason": "insufficient_evidence"}
                     )
+                    terminal_decision = "no_novel_evidence"
                     logger.info(
                         "retrieval.investigation_stopped",
                         game=request.game,
@@ -179,14 +224,16 @@ class RetrievalCoordinator:
                     )
                     break
                 merged_plan = merge_search_plans(merged_plan, refined_plan)
-                merged_sources = rank_sources(
-                    sources=[*merged_sources, *refined_sources],
+                merged_pool = fuse_and_rank_evidence(
+                    groups={"accumulated": merged_sources, "refinement": refined_sources},
                     query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
                     intent=merged_plan.intent,
                     max_results=self.max_results,
                     version_sensitive=merged_plan.version_sensitive,
                     entity_groups=merged_plan.named_entity_groups,
                 )
+                merged_sources = merged_pool.sources
+                stages.extend(merged_pool.stages)
                 attempted_queries = list(dict.fromkeys([
                     *investigation.attempted_queries,
                     *(query.query for query in investigation.next_queries),
@@ -202,6 +249,12 @@ class RetrievalCoordinator:
                     active_game_resolution, merged_sources
                 )
                 refined = True
+                stages.append(RetrievalStage(
+                    name="adaptive_refinement",
+                    input_count=len(refined_sources),
+                    output_count=len(merged_sources),
+                    details={"hop": investigation.hop_count},
+                ))
                 logger.info(
                     "retrieval.investigation_hop",
                     game=request.game,
@@ -219,9 +272,16 @@ class RetrievalCoordinator:
                     ]))[:4],
                 }
             )
-            return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
+            stages.append(RetrievalStage(
+                name="adaptive_decision",
+                input_count=len(merged_sources),
+                output_count=len(merged_sources),
+                details={"decision": terminal_decision or investigation.stop_reason or "investigation_stopped"},
+            ))
+            return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
 
         # Compatibility path for lightweight/custom LLM implementations.
+        terminal_decision = None
         for hop in range(1, self.max_hops + 1):
             refined_plan = await self.llm.refine_search_plan(
                 request=request,
@@ -232,14 +292,17 @@ class RetrievalCoordinator:
             )
             if refined_plan is None:
                 break
-            refined_sources = await self.retrieve_sources(
+            refined_batch = await self.retrieve_batch(
                 request.question,
                 request.game,
                 plan=refined_plan,
                 game_resolution=active_game_resolution,
                 include_knowledge=False,
             )
+            refined_sources = refined_batch.sources
+            stages.extend(refined_batch.stages)
             if not self._has_novel_evidence(existing=merged_sources, candidates=refined_sources):
+                terminal_decision = "no_novel_evidence"
                 logger.info(
                     "retrieval.investigation_stopped",
                     game=request.game,
@@ -248,15 +311,23 @@ class RetrievalCoordinator:
                 )
                 break
             merged_plan = merge_search_plans(merged_plan, refined_plan)
-            merged_sources = rank_sources(
-                sources=[*merged_sources, *refined_sources],
+            merged_pool = fuse_and_rank_evidence(
+                groups={"accumulated": merged_sources, "refinement": refined_sources},
                 query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
                 intent=merged_plan.intent,
                 max_results=self.max_results,
                 version_sensitive=merged_plan.version_sensitive,
                 entity_groups=merged_plan.named_entity_groups,
             )
+            merged_sources = merged_pool.sources
+            stages.extend(merged_pool.stages)
             refined = True
+            stages.append(RetrievalStage(
+                name="adaptive_refinement",
+                input_count=len(refined_sources),
+                output_count=len(merged_sources),
+                details={"hop": hop},
+            ))
             active_game_resolution = self._with_discovered_wiki_domains(
                 active_game_resolution, merged_sources
             )
@@ -276,7 +347,30 @@ class RetrievalCoordinator:
                 "stop_reason": "insufficient_evidence" if merged_plan.missing_info else None,
             }
         )
-        return RetrievalOutcome(merged_sources, merged_plan, investigation, refined)
+        stages.append(RetrievalStage(
+            name="adaptive_decision",
+            input_count=len(merged_sources),
+            output_count=len(merged_sources),
+            details={"decision": terminal_decision or ("refinement_complete" if refined else "no_refinement")},
+        ))
+        return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
+
+    @staticmethod
+    def _outcome(
+        sources: list[Source],
+        plan: SearchPlan,
+        investigation: InvestigationState,
+        refined: bool,
+        stages: list[RetrievalStage],
+    ) -> RetrievalOutcome:
+        logger.info(
+            "retrieval.pipeline_outcome",
+            stage_names=[stage.name for stage in stages],
+            selected_count=len(sources),
+            refined=refined,
+            stop_reason=investigation.stop_reason,
+        )
+        return RetrievalOutcome(sources, plan, investigation, refined, stages)
 
     @staticmethod
     def _with_discovered_wiki_domains(
@@ -318,6 +412,24 @@ class RetrievalCoordinator:
         game_resolution: GameResolution,
         include_knowledge: bool = True,
     ) -> list[Source]:
+        batch = await self.retrieve_batch(
+            question,
+            game,
+            plan=plan,
+            game_resolution=game_resolution,
+            include_knowledge=include_knowledge,
+        )
+        return batch.sources
+
+    async def retrieve_batch(
+        self,
+        question: str,
+        game: str,
+        *,
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+        include_knowledge: bool = True,
+    ) -> RetrievalBatch:
         calls = []
         dimensions = []
         if include_knowledge:
@@ -335,8 +447,8 @@ class RetrievalCoordinator:
                 groups.append([])
             else:
                 groups.append(result)
-        selected = rank_sources(
-            sources=[source for group in groups for source in group],
+        pool = fuse_and_rank_evidence(
+            groups={dimension: group for dimension, group in zip(dimensions, groups, strict=True)},
             query=f"{question} {' '.join(plan.aliases)}".strip(),
             intent=plan.intent,
             max_results=self.max_results,
@@ -348,10 +460,15 @@ class RetrievalCoordinator:
             game=game,
             intent=plan.intent,
             dimensions={dimension: len(group) for dimension, group in zip(dimensions, groups, strict=True)},
-            selected_count=len(selected),
-            selected_source_types=[source.source_type for source in selected],
+            pipeline={
+                "candidate_count": pool.candidate_count,
+                "fused_count": pool.fused_count,
+                "channels": pool.channels,
+            },
+            selected_count=len(pool.sources),
+            selected_source_types=[source.source_type for source in pool.sources],
         )
-        return selected
+        return RetrievalBatch(sources=pool.sources, stages=pool.stages)
 
 
 def merge_search_plans(initial: SearchPlan, refined: SearchPlan) -> SearchPlan:

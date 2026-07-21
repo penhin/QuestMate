@@ -16,6 +16,7 @@ from llm import GuideLLM
 from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
+from retrieval.pipeline import RetrievalStage
 from retrieval.source_quality import matches_game_identity
 from retrieval.wiki_domains import normalize_wiki_host
 from game_resolution import (
@@ -25,6 +26,7 @@ from game_resolution import (
 )
 from ai.fallback_planning import fallback_search_plan
 from ai.evidence_policy import evidence_level, evidence_question
+from multi_agent import AgentTrace, AnswerAgent, EvidenceAgent, IdentityAgent, PlanningAgent, RetrievalAgent
 from request_safety import requires_safe_refusal
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
@@ -44,6 +46,7 @@ class QuestAgentState(TypedDict):
     investigation: InvestigationState
     answer: str
     timings_ms: dict[str, int]
+    agent_trace: list[AgentTrace]
 
 
 class QuestAgent:
@@ -56,26 +59,34 @@ class QuestAgent:
         self.knowledge = knowledge or knowledge_store
         self.search_provider = search_provider or TavilySearchProvider(content_index=self.knowledge)
         self.llm = llm or GuideLLM()
+        self.evidence_agent = EvidenceAgent(self.llm)
         self.retrieval = RetrievalCoordinator(
             knowledge=self.knowledge,
             search_provider=self.search_provider,
-            llm=self.llm,
+            llm=self.evidence_agent,
             max_results=get_settings().search_max_results,
             max_investigation_model_calls=1,
         )
+        self.identity_agent = IdentityAgent(
+            initial_context=self._initial_game_context,
+            recover_context=self._recover_game_identity_if_needed,
+        )
+        self.planning_agent = PlanningAgent(self.llm)
+        self.retrieval_agent = RetrievalAgent(self._retrieve_after_identity_check)
+        self.answer_agent = AnswerAgent(self.llm)
         self.graph = self._build_graph()
 
     def _build_graph(self):
         graph = StateGraph(QuestAgentState)
-        graph.add_node("resolve_game", self._resolve_game)
-        graph.add_node("plan", self._plan)
-        graph.add_node("search", self._search)
-        graph.add_node("answer", self._answer)
-        graph.set_entry_point("resolve_game")
-        graph.add_edge("resolve_game", "plan")
-        graph.add_edge("plan", "search")
-        graph.add_edge("search", "answer")
-        graph.add_edge("answer", END)
+        graph.add_node("identity_agent", self._resolve_game)
+        graph.add_node("planning_agent", self._plan)
+        graph.add_node("retrieval_evidence_agents", self._search)
+        graph.add_node("answer_agent", self._answer)
+        graph.set_entry_point("identity_agent")
+        graph.add_edge("identity_agent", "planning_agent")
+        graph.add_edge("planning_agent", "retrieval_evidence_agents")
+        graph.add_edge("retrieval_evidence_agents", "answer_agent")
+        graph.add_edge("answer_agent", END)
         return graph.compile()
 
     async def run(self, request: ChatRequest) -> ChatResponse:
@@ -124,19 +135,17 @@ class QuestAgent:
                 diagnostics=self._evaluation_diagnostics(request=request, path="safety_gate"),
             )
         history = await conversation_store.get_recent_messages(session_id, limit=8)
-        identity_started = perf_counter()
-        game_resolution = await self._initial_game_context(request)
-        timings_ms = {"identity": self._elapsed_ms(identity_started)}
         state = await self.graph.ainvoke(
             {
                 "request": request,
                 "history": history,
-                "game_resolution": game_resolution,
+                "game_resolution": GameResolution(input_name=request.game),
                 "search_plan": SearchPlan(),
                 "sources": [],
                 "investigation": InvestigationState(goal=request.question),
                 "answer": "",
-                "timings_ms": timings_ms,
+                "timings_ms": {},
+                "agent_trace": [],
             }
         )
         game_resolution = state["game_resolution"]
@@ -155,7 +164,9 @@ class QuestAgent:
                 usage=self._request_usage(
                     usage_before, state["investigation"], state["search_plan"]
                 ),
-                diagnostics=self._evaluation_diagnostics(request=request, path="game_confirmation"),
+                diagnostics=self._evaluation_diagnostics(
+                    request=request, path="game_confirmation", agent_trace=state["agent_trace"]
+                ),
             )
         state = {**state, "game_resolution": game_resolution}
         improve_kwargs = dict(
@@ -199,6 +210,7 @@ class QuestAgent:
                 plan=state["search_plan"],
                 game_resolution=state["game_resolution"],
                 answer=answer,
+                agent_trace=state["agent_trace"],
             ),
         )
         await conversation_store.save_chat(request, response)
@@ -234,11 +246,13 @@ class QuestAgent:
         history = await conversation_store.get_recent_messages(session_id, limit=8)
 
         identity_started = perf_counter()
-        game_resolution = await self._initial_game_context(request)
+        game_resolution = await self.identity_agent.initial(request)
         timings_ms = {"identity": self._elapsed_ms(identity_started)}
         yield ("status", self._status_for_plan_start(request.question))
         planning_started = perf_counter()
-        search_plan = await self.llm.plan_search(request=request, history=history, game_resolution=game_resolution)
+        search_plan = await self.planning_agent.plan(
+            request=request, history=history, game_resolution=game_resolution
+        )
         timings_ms["planning"] = self._elapsed_ms(planning_started)
 
         if search_plan.safety_refusal:
@@ -254,7 +268,7 @@ class QuestAgent:
             return
 
         yield ("status", self._status_for_search(search_plan))
-        outcome, game_resolution = await self._retrieve_after_identity_check(
+        outcome, game_resolution = await self.retrieval_agent.investigate(
             request=request,
             history=history,
             plan=search_plan,
@@ -263,7 +277,7 @@ class QuestAgent:
         )
         sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
 
-        game_resolution = await self._recover_game_identity_if_needed(
+        game_resolution = await self.identity_agent.recover(
             request=request,
             sources=sources,
             current=game_resolution,
@@ -295,8 +309,10 @@ class QuestAgent:
             game_resolution=game_resolution,
             history=history,
         )
-        self._add_optional_argument(self.llm.stream_answer, stream_kwargs, "investigation", outcome.investigation)
-        async for chunk in self.llm.stream_answer(**stream_kwargs):
+        self._add_optional_argument(
+            self.answer_agent.stream_answer, stream_kwargs, "investigation", outcome.investigation
+        )
+        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
             chunks.append(chunk)
             yield ("chunk", chunk)
 
@@ -331,28 +347,31 @@ class QuestAgent:
     async def _plan(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
         started = perf_counter()
-        search_plan = await self.llm.plan_search(
+        search_plan = await self.planning_agent.plan(
             request=request,
             history=state["history"],
             game_resolution=state["game_resolution"],
         )
         return {**state, "search_plan": search_plan, "timings_ms": {
             **state["timings_ms"], "planning": self._elapsed_ms(started)
-        }}
+        }, "agent_trace": [*state["agent_trace"], AgentTrace("planning", "plan")]}
 
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
         existing = state.get("game_resolution")
-        if existing is not None:
+        if existing is not None and existing.is_confirmed:
             return state
-        game_resolution = await self.search_provider.resolve_game(request.game, question=request.question)
-        return {**state, "game_resolution": game_resolution}
+        started = perf_counter()
+        game_resolution = await self.identity_agent.initial(request)
+        return {**state, "game_resolution": game_resolution, "timings_ms": {
+            **state["timings_ms"], "identity": self._elapsed_ms(started)
+        }, "agent_trace": [*state["agent_trace"], AgentTrace("identity", "initial")]}
 
     async def _search(self, state: QuestAgentState) -> QuestAgentState:
         if state["search_plan"].safety_refusal:
             return {**state, "sources": [], "investigation": InvestigationState(goal=state["request"].question)}
         request = state["request"]
-        outcome, game_resolution = await self._retrieve_after_identity_check(
+        outcome, game_resolution = await self.retrieval_agent.investigate(
             request=request,
             history=state["history"],
             plan=state["search_plan"],
@@ -365,6 +384,9 @@ class QuestAgent:
             "search_plan": outcome.plan,
             "investigation": outcome.investigation,
             "game_resolution": game_resolution,
+            "agent_trace": [*state["agent_trace"], AgentTrace(
+                "retrieval_evidence", "investigate", len(outcome.sources), outcome.refined
+            )],
         }
 
     async def _retrieve_after_identity_check(
@@ -398,7 +420,7 @@ class QuestAgent:
             )
             return outcome, game_resolution
         retrieval_started = perf_counter()
-        initial_sources = await self.retrieval.retrieve_sources(
+        initial_sources, initial_stages = await self._retrieve_initial_batch(
             request.question,
             request.game,
             plan=plan,
@@ -445,6 +467,7 @@ class QuestAgent:
                 # Do not let those pages become a fallback answer.
                 if initial_sources:
                     initial_sources = []
+                    initial_stages = []
                 resolved = game_resolution
             elif initial_sources and not self._sources_establish_game_identity(
                 sources=initial_sources,
@@ -455,6 +478,7 @@ class QuestAgent:
                 # Continue through the conservative evidence path rather than
                 # presenting a plausible answer from another title.
                 initial_sources = []
+                initial_stages = []
         if (
             not initial_sources
             and resolved.is_confirmed
@@ -467,7 +491,7 @@ class QuestAgent:
             # call or fabricating an answer without evidence.
             fallback_plan = fallback_search_plan(question=request.question)
             retry_started = perf_counter()
-            initial_sources = await self.retrieval.retrieve_sources(
+            initial_sources, initial_stages = await self._retrieve_initial_batch(
                 request.question,
                 request.game,
                 plan=fallback_plan,
@@ -478,16 +502,40 @@ class QuestAgent:
             if initial_sources:
                 plan = merge_search_plans(plan, fallback_plan)
         investigation_started = perf_counter()
-        outcome = await self.retrieval.investigate(
+        investigate_kwargs = dict(
             request=request,
             history=history,
             plan=plan,
             game_resolution=resolved,
             initial_sources=initial_sources,
         )
+        self._add_optional_argument(
+            self.retrieval.investigate, investigate_kwargs, "initial_stages", initial_stages
+        )
+        outcome = await self.retrieval.investigate(**investigate_kwargs)
         if timings_ms is not None:
             timings_ms["investigation"] = self._elapsed_ms(investigation_started)
         return outcome, resolved
+
+    async def _retrieve_initial_batch(
+        self,
+        question: str,
+        game: str,
+        *,
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+    ) -> tuple[list[Source], list[RetrievalStage]]:
+        """Use pipeline batches when available without breaking custom retrievers."""
+        retrieve_batch = getattr(self.retrieval, "retrieve_batch", None)
+        if callable(retrieve_batch):
+            batch = await retrieve_batch(
+                question, game, plan=plan, game_resolution=game_resolution
+            )
+            return list(batch.sources), list(batch.stages)
+        sources = await self.retrieval.retrieve_sources(
+            question, game, plan=plan, game_resolution=game_resolution
+        )
+        return sources, []
 
     @staticmethod
     def _resolution_added_identity(before: GameResolution, after: GameResolution) -> bool:
@@ -598,11 +646,13 @@ class QuestAgent:
             game_resolution=state["game_resolution"],
             history=state["history"],
         )
-        self._add_optional_argument(self.llm.answer, answer_kwargs, "investigation", state["investigation"])
-        answer = await self.llm.answer(**answer_kwargs)
+        self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", state["investigation"])
+        answer = await self.answer_agent.answer(**answer_kwargs)
         return {**state, "answer": answer, "timings_ms": {
             **state["timings_ms"], "answer": self._elapsed_ms(started)
-        }}
+        }, "agent_trace": [*state["agent_trace"], AgentTrace(
+            "answer", "render", len(state["sources"])
+        )]}
 
     @staticmethod
     def _safety_refusal_message() -> str:
@@ -621,6 +671,7 @@ class QuestAgent:
         plan: SearchPlan | None = None,
         game_resolution: GameResolution | None = None,
         answer: str = "",
+        agent_trace: list[AgentTrace] | None = None,
     ) -> dict[str, str | int]:
         """Expose only aggregate-safe stage counters to opt-in evaluators."""
         if not request.metadata.get("evaluation"):
@@ -636,6 +687,7 @@ class QuestAgent:
             "evidence_level": level,
             "source_count": len(source_list),
             "citation_count": len(re.findall(r"\[(\d+)\]", answer)),
+            "agent_handoffs": len(agent_trace or []),
         }
         if path != "answer":
             return diagnostics
@@ -709,7 +761,11 @@ class QuestAgent:
 
     @staticmethod
     def _add_optional_argument(callable_obj, kwargs: dict, name: str, value) -> None:
-        if name in inspect.signature(callable_obj).parameters:
+        signature = inspect.signature(callable_obj)
+        parameters = signature.parameters.values()
+        if name in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        ):
             kwargs[name] = value
 
     @staticmethod
