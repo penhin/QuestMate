@@ -7,8 +7,6 @@ from contextvars import ContextVar
 import inspect
 import structlog
 
-from pydantic import ValidationError
-
 from config import Settings, get_settings
 from ai.fallback_planning import (
     fallback_search_plan,
@@ -26,8 +24,27 @@ from ai.evidence_policy import (
     requires_semantic_relation_judgment,
     version_evidence_status,
 )
-from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
-from retrieval.source_quality import token_in_text
+from ai.citation_rendering import (
+    citation_claim_context,
+    claim_eligible_source_indexes,
+    claim_entity_groups,
+    claim_evidence_queries,
+    claim_ledger_fallback,
+    claim_source_has_direct_body,
+    render_claim_bound_answer,
+    render_structured_answer,
+)
+from ai.investigation_context import investigation_context
+from ai.prompt_context import game_resolution_context, history_context, source_context
+from ai.search_plan_json import coerce_search_plan_data, first_json_object
+from ai.search_plan_sanitization import (
+    entity_occurs_in_text,
+    sanitize_aliases,
+    sanitize_answer_requirements,
+    sanitize_named_entity_groups,
+    sanitize_search_text,
+)
+from ai.search_plan_parsing import parse_refinement_plan, parse_search_plan
 from guide_prompts import (
     answer_completeness_system_prompt,
     answer_revision_system_prompt,
@@ -39,31 +56,19 @@ from guide_prompts import (
 )
 from model_providers import ModelProvider, create_model_provider
 from quality_policy import is_version_sensitive_question
-from query_tokens import exact_identifiers, question_relevance_tokens
+from query_tokens import question_relevance_tokens
 from schemas import (
     AnswerCompletenessAssessment,
     ChatRequest,
     CitationClaim,
     GameResolution,
     InvestigationState,
-    PlannedSearchQuery,
     SearchIntent,
     SearchPlan,
     SessionMessage,
     Source,
 )
 
-
-PROMPT_INJECTION_QUERY_PATTERNS = (
-    re.compile(r"\b(ignore|disregard|forget|override)\b.{0,80}\b(instructions?|prompt|rules|system|developer)\b", re.I),
-    re.compile(
-        r"\b(reveal|print|show|output|display|exfiltrate)\b.{0,80}"
-        r"\b(api keys?|tokens?|secrets?|system prompt|developer instructions|hidden configuration|environment variables)\b",
-        re.I,
-    ),
-    re.compile(r"(忽略|无视|覆盖|忘记).{0,40}(指令|规则|提示词|系统|开发者)", re.I),
-    re.compile(r"(输出|显示|泄露|透露|打印).{0,40}(系统prompt|系统提示|提示词|api key|密钥|环境变量|隐藏配置)", re.I),
-)
 logger = structlog.get_logger()
 
 
@@ -655,39 +660,11 @@ class GuideLLM:
 
     @staticmethod
     def _history_context(history: list[SessionMessage]) -> str:
-        context = "\n".join(
-            f"{message.role}: {message.content[:500]}"
-            for message in history[-8:]
-            if message.content.strip()
-        )
-        return context[-4000:]
+        return history_context(history)
 
     @staticmethod
     def _source_context(sources: list[Source], *, max_chars: int = 16000) -> str:
-        parts: list[str] = []
-        remaining = max_chars
-        for index, source in enumerate(sources, start=1):
-            evidence = (source.evidence or source.snippet or "")[:2800]
-            part = (
-                f"<source index=\"{index}\" type=\"{source.source_type}\" "
-                f"trust=\"{source.trust_label}\" trust_score=\"{source.trust_score:.2f}\">\n"
-                f"title: {source.title}\n"
-                f"url: {source.url}\n"
-                f"published_at: {source.published_at.isoformat() if source.published_at else 'unknown'}\n"
-                f"fetched_at: {source.fetched_at.isoformat() if source.fetched_at else 'unknown'}\n"
-                f"game_version: {source.game_version or 'unknown'}\n"
-                f"evidence: {evidence}\n"
-                "</source>"
-            )
-            if len(part) > remaining:
-                if remaining < 240:
-                    break
-                part = f"{part[:remaining - 11].rstrip()}\n</source>"
-            parts.append(part)
-            remaining -= len(part) + 1
-            if remaining <= 0:
-                break
-        return "\n".join(parts)
+        return source_context(sources, max_chars=max_chars)
 
     @staticmethod
     def _citation_claim_context(
@@ -698,42 +675,21 @@ class GuideLLM:
         aliases: list[str] | None = None,
         evidence_queries: list[str] | None = None,
     ) -> str:
-        """Expose a bounded, source-indexed claim ledger to answer generation.
-
-        This is deliberately deterministic: it does not add another model
-        call, and it never turns a passage into a stronger paraphrase. A row
-        is eligible when its source passes the direct entity gate or contains
-        a planner-declared alternate entity surface. The model may compose
-        rows, but every factual sentence must retain the row's source index.
-        """
-        eligible_indexes = GuideLLM._claim_eligible_source_indexes(
-            question=question, sources=sources, entity_groups=entity_groups, aliases=aliases
-        )
-        claims = build_citation_claims(
+        return citation_claim_context(
             question=question,
             sources=sources,
-            eligible_source_indexes=eligible_indexes,
             entity_groups=entity_groups,
             aliases=aliases,
             evidence_queries=evidence_queries,
         )
-        return "\n".join(
-            f'<claim id="{claim.claim_id}" source_indexes="[{claim.source_index}]">'
-            f"{claim.statement}</claim>"
-            for claim in claims
-        )
 
     @staticmethod
     def _claim_entity_groups(*, request: ChatRequest, plan: SearchPlan | None) -> list[list[str]]:
-        """Use only player-anchored endpoints for answer-side Claim checks."""
-        return evidence_entity_groups(GuideLLM._evidence_question(request=request, plan=plan))
+        return claim_entity_groups(request=request, plan=plan)
 
     @staticmethod
     def _claim_evidence_queries(plan: SearchPlan | None) -> list[str]:
-        """Keep planner-selected evidence-language surfaces in Claim ranking."""
-        if plan is None:
-            return []
-        return [query.query for query in plan.queries[:4] if query.query.strip()]
+        return claim_evidence_queries(plan)
 
     @staticmethod
     def _claim_eligible_source_indexes(
@@ -743,36 +699,9 @@ class GuideLLM:
         entity_groups: list[list[str]] | None,
         aliases: list[str] | None = None,
     ) -> set[int]:
-        """Keep direct evidence, plus one anchored side of a multi-entity chain."""
-        eligible = {
-            index
-            for index, source in enumerate(sources, start=1)
-            if GuideLLM._claim_source_has_direct_body(
-                question=question,
-                source=source,
-                entity_groups=entity_groups,
-                aliases=aliases,
-            )
-        }
-        if not entity_groups or len(entity_groups) < 2:
-            # Planner aliases are alternate surfaces of an entity already in
-            # the question. They often occur on a localized relation page
-            # where the player's original spelling does not. Let that page
-            # contribute an atomic Claim, without treating aliases as extra
-            # relation endpoints or granting it a free factual conclusion.
-            for index, source in enumerate(sources, start=1):
-                source_text = (source.evidence or source.snippet or "").casefold()
-                if any(token_in_text(alias.casefold(), source_text) for alias in aliases or []):
-                    eligible.add(index)
-            return eligible
-        for index, source in enumerate(sources, start=1):
-            source_text = (source.evidence or source.snippet or "").casefold()
-            if any(
-                any(token_in_text(name.casefold(), source_text) for name in group)
-                for group in entity_groups
-            ):
-                eligible.add(index)
-        return eligible
+        return claim_eligible_source_indexes(
+            question=question, sources=sources, entity_groups=entity_groups, aliases=aliases,
+        )
 
     @staticmethod
     def _claim_source_has_direct_body(
@@ -782,313 +711,44 @@ class GuideLLM:
         entity_groups: list[list[str]] | None,
         aliases: list[str] | None,
     ) -> bool:
-        """Require an evidence passage, not a page title or URL, for a Claim."""
-        body = source.evidence or source.snippet or ""
-        if not body.strip():
-            return False
-        lowered = body.casefold()
-        if entity_groups:
-            return any(
-                any(token_in_text(name.casefold(), lowered) for name in group)
-                for group in entity_groups
-            )
-        if any(token_in_text(alias.casefold(), lowered) for alias in aliases or []):
-            return True
-        # Preserve the generic direct-evidence policy while making the body
-        # itself carry the match. Source titles and URLs remain useful for
-        # retrieval, but cannot independently license an answer Claim.
-        body_only = source.model_copy(update={"title": ""})
-        return has_question_specific_sources(
-            question=question,
-            sources=[body_only],
-            include_url=False,
+        return claim_source_has_direct_body(
+            question=question, source=source, entity_groups=entity_groups, aliases=aliases,
         )
 
     @staticmethod
     def _render_claim_bound_answer(
         *, answer: str, request: ChatRequest, sources: list[Source], plan: SearchPlan | None
     ) -> str:
-        """Validate optional model Claim IDs and remove them from the user view.
-
-        Compatibility answers without an internal marker keep the existing
-        citation policy. A malformed marker is removed rather than permitted to
-        create an invalid source-to-claim binding.
-        """
-        evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
-        claims = build_citation_claims(
-            question=evidence_question,
-            sources=sources,
-            eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
-                question=evidence_question,
-                sources=sources,
-                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-                aliases=plan.aliases if plan else None,
-            ),
-            entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-            aliases=plan.aliases if plan else None,
-            evidence_queries=GuideLLM._claim_evidence_queries(plan),
+        return render_claim_bound_answer(
+            answer=answer, request=request, sources=sources, plan=plan,
         )
-        claim_sources = {claim.claim_id: claim.source_index for claim in claims}
-
-        def render(match: re.Match[str]) -> str:
-            source_index = int(match.group(1))
-            claim_id = match.group(2)
-            return f"[{source_index}]" if claim_sources.get(claim_id) == source_index else ""
-
-        return re.sub(r"\[(\d+)\]\{(C\d+_\d+)\}", render, answer).strip()
 
     @staticmethod
     def _render_structured_answer(
         *, answer: str, request: ChatRequest, sources: list[Source], plan: SearchPlan | None
     ) -> str:
         """Render source citations from model-selected Claim IDs, never raw indexes."""
-        try:
-            data = GuideLLM._first_json_object(answer)
-            blocks = data.get("blocks") if isinstance(data, dict) else None
-            if not isinstance(blocks, list):
-                raise ValueError("missing blocks")
-        except (json.JSONDecodeError, ValueError, TypeError):
-            evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
-            claims = build_citation_claims(
-                question=evidence_question,
-                sources=sources,
-                eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
-                    question=evidence_question,
-                    sources=sources,
-                    entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-                    aliases=plan.aliases if plan else None,
-                ),
-                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-                aliases=plan.aliases if plan else None,
-                evidence_queries=GuideLLM._claim_evidence_queries(plan),
-            )
-            logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
-            if claims:
-                return GuideLLM._claim_ledger_fallback(claims)
-            return GuideLLM._render_claim_bound_answer(
-                answer=answer, request=request, sources=sources, plan=plan
-            )
-
-        evidence_question = GuideLLM._evidence_question(request=request, plan=plan)
-        claims = build_citation_claims(
-            question=evidence_question,
-            sources=sources,
-            eligible_source_indexes=GuideLLM._claim_eligible_source_indexes(
-                question=evidence_question,
-                sources=sources,
-                entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-                aliases=plan.aliases if plan else None,
-            ),
-            entity_groups=GuideLLM._claim_entity_groups(request=request, plan=plan),
-            aliases=plan.aliases if plan else None,
-            evidence_queries=GuideLLM._claim_evidence_queries(plan),
-        )
-        claim_sources = {claim.claim_id: claim.source_index for claim in claims}
-        # The planner may miss a relation classification, but two player-
-        # anchored entity groups still make a one-sided citation unsafe. Apply
-        # the deterministic coverage guard whenever the question itself names
-        # multiple endpoints; this does not infer a relationship or use an
-        # action-word inventory.
-        relation_groups = GuideLLM._claim_entity_groups(request=request, plan=plan)
-        rendered: list[str] = []
-        requirements = plan.answer_requirements if plan else []
-        covered_requirements: set[int] = set()
-        cited_source_indexes: set[int] = set()
-        unbound_blocks = 0
-        for block in blocks[:8]:
-            if not isinstance(block, dict):
-                continue
-            text = str(block.get("text") or "").strip()
-            claim_ids = block.get("claim_ids")
-            if not text or not isinstance(claim_ids, list):
-                continue
-            requirement_indexes = block.get("requirement_indexes")
-            if requirements:
-                if not isinstance(requirement_indexes, list):
-                    unbound_blocks += 1
-                    continue
-                valid_requirements = [
-                    index for index in requirement_indexes
-                    if isinstance(index, int) and 0 <= index < len(requirements)
-                ]
-                if not valid_requirements:
-                    unbound_blocks += 1
-                    continue
-            else:
-                valid_requirements = []
-            indexes = [claim_sources[claim_id] for claim_id in claim_ids if claim_id in claim_sources]
-            if not indexes:
-                unbound_blocks += 1
-                continue
-            if not claim_ids_cover_entity_groups(
-                claims=claims,
-                claim_ids=[claim_id for claim_id in claim_ids if isinstance(claim_id, str)],
-                entity_groups=relation_groups,
-            ):
-                unbound_blocks += 1
-                continue
-            citations = "".join(f"[{index}]" for index in dict.fromkeys(indexes))
-            rendered.append(f"{text}{citations}")
-            cited_source_indexes.update(indexes)
-            covered_requirements.update(valid_requirements)
-        if requirements and set(range(len(requirements))) - covered_requirements:
-            rendered = []
-        if rendered:
-            logger.info(
-                "llm.answer_render",
-                format="structured",
-                block_count=len(blocks),
-                bound_block_count=len(rendered),
-                unbound_block_count=unbound_blocks,
-                claim_count=len(claims),
-            )
-            return "\n\n".join(rendered)
-        logger.info(
-            "llm.answer_render",
-            format="structured",
-            block_count=len(blocks),
-            bound_block_count=0,
-            unbound_block_count=unbound_blocks,
-            claim_count=len(claims),
-        )
-        if claims:
-            return GuideLLM._claim_ledger_fallback(claims)
-        return GuideLLM._conservative_answer(
+        return render_structured_answer(
+            answer=answer,
             request=request,
             sources=sources,
             plan=plan,
+            conservative_answer=GuideLLM._conservative_answer,
         )
 
     @staticmethod
     def _claim_ledger_fallback(claims: list[CitationClaim]) -> str:
         """Return only atomic evidence when the model fails Claim selection."""
-        lines = ["已核实的资料："]
-        for claim in claims[:4]:
-            lines.append(f"- {claim.statement}[{claim.source_index}]")
-        return "\n".join(lines)
+        return claim_ledger_fallback(claims)
 
 
     @staticmethod
     def _investigation_context(investigation: InvestigationState | None) -> str:
-        if investigation is None:
-            return "Not provided."
-        max_chars = 7000
-        data = investigation.model_dump(mode="json")
-        data["goal"] = str(data.get("goal") or "")[:700]
-        data["known_facts"] = [
-            {**fact, "statement": str(fact.get("statement") or "")[:350]}
-            for fact in data.get("known_facts", [])[-10:]
-        ]
-        data["evidence_gaps"] = [
-            {
-                **gap,
-                "description": str(gap.get("description") or "")[:240],
-                "query_hint": str(gap.get("query_hint") or "")[:180] or None,
-            }
-            for gap in data.get("evidence_gaps", [])[:6]
-        ]
-        data["unresolved_questions"] = [
-            str(value)[:240] for value in data.get("unresolved_questions", [])[:6]
-        ]
-        data["attempted_queries"] = [
-            str(value)[:180] for value in data.get("attempted_queries", [])[-10:]
-        ]
-        data["aliases"] = [str(value)[:80] for value in data.get("aliases", [])[:6]]
-        data["next_queries"] = [
-            {
-                **query,
-                "query": str(query.get("query") or "")[:180],
-            }
-            for query in data.get("next_queries", [])[:2]
-            if isinstance(query, dict)
-        ]
-
-        # Typed gaps already carry their descriptions, so do not spend prompt
-        # budget repeating the same text in the compatibility list.
-        gap_descriptions = {
-            " ".join(str(gap.get("description") or "").casefold().split())
-            for gap in data["evidence_gaps"]
-        }
-        data["unresolved_questions"] = [
-            value
-            for value in data["unresolved_questions"]
-            if " ".join(value.casefold().split()) not in gap_descriptions
-        ]
-
-        def serialize() -> str:
-            return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-
-        serialized = serialize()
-        # Compact complete JSON objects rather than slicing serialized JSON.
-        # Evidence is supplied separately, so old fact summaries are the first
-        # expendable field; recent attempted queries remain long enough to stop
-        # the planner from repeating work.
-        while len(serialized) > max_chars and data["known_facts"]:
-            data["known_facts"].pop(0)
-            serialized = serialize()
-        while len(serialized) > max_chars and data["attempted_queries"]:
-            data["attempted_queries"].pop(0)
-            serialized = serialize()
-        while len(serialized) > max_chars and data["aliases"]:
-            data["aliases"].pop()
-            serialized = serialize()
-        while len(serialized) > max_chars and data["unresolved_questions"]:
-            data["unresolved_questions"].pop()
-            serialized = serialize()
-        # Gaps are priority-sorted by the parser. Preserve the highest-priority
-        # one and discard only lower-priority overflow.
-        while len(serialized) > max_chars and len(data["evidence_gaps"]) > 1:
-            data["evidence_gaps"].pop()
-            serialized = serialize()
-        while len(serialized) > max_chars and data["next_queries"]:
-            data["next_queries"].pop()
-            serialized = serialize()
-        if len(serialized) > max_chars:
-            overflow = len(serialized) - max_chars
-            goal = str(data.get("goal") or "")
-            data["goal"] = goal[:max(80, len(goal) - overflow)]
-            serialized = serialize()
-        if len(serialized) > max_chars and data["evidence_gaps"]:
-            gap = data["evidence_gaps"][0]
-            gap["query_hint"] = None
-            gap["description"] = str(gap.get("description") or "")[:120]
-            serialized = serialize()
-        if len(serialized) > max_chars:
-            # Schema limits should make this unreachable, but keep the budget a
-            # hard invariant even if a future field relaxes those limits.
-            data = {
-                "goal": str(data.get("goal") or "")[:80],
-                "known_facts": [],
-                "evidence_gaps": data.get("evidence_gaps", [])[:1],
-                "unresolved_questions": [],
-                "attempted_queries": [],
-                "next_queries": [],
-                "aliases": [],
-                "complete": bool(data.get("complete")),
-                "hop_count": int(data.get("hop_count") or 0),
-                "stop_reason": data.get("stop_reason"),
-            }
-            serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
-        return serialized
+        return investigation_context(investigation)
 
     @staticmethod
     def _game_resolution_context(game_resolution: GameResolution | None) -> str:
-        if game_resolution is None:
-            return "No game resolution was provided."
-        return json.dumps(
-            {
-                "input_name": game_resolution.input_name,
-                "confirmed_name": game_resolution.confirmed_name,
-                "aliases": game_resolution.aliases,
-                "platform_urls": [str(url) for url in game_resolution.platform_urls],
-                "official_urls": [str(url) for url in game_resolution.official_urls],
-                "identity_urls": [str(url) for url in game_resolution.identity_urls],
-                "database_domains": game_resolution.database_domains,
-                "confidence": game_resolution.confidence,
-                "ambiguous": game_resolution.ambiguous,
-            },
-            ensure_ascii=False,
-        )
+        return game_resolution_context(game_resolution)
 
     @staticmethod
     def _answer_shape_for_intent(intent: SearchIntent) -> str:
@@ -1197,143 +857,20 @@ class GuideLLM:
 
     @classmethod
     def _parse_search_plan(cls, content: str, *, fallback_question: str) -> SearchPlan:
-        try:
-            data = cls._coerce_search_plan_data(cls._first_json_object(content))
-            plan = SearchPlan.model_validate(data)
-        except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
-            error_fields = (
-                [".".join(str(part) for part in error["loc"]) for error in exc.errors()][:4]
-                if isinstance(exc, ValidationError)
-                else []
-            )
-            logger.warning(
-                "llm.search_plan_parse_failed", error_type=type(exc).__name__, error_fields=error_fields
-            )
-            return cls._fallback_search_plan(question=fallback_question)
-
-        if plan.safety_refusal:
-            return SearchPlan(safety_refusal=True)
-
-        if not plan.queries:
-            return cls._fallback_search_plan(question=fallback_question)
-
-        sanitized_queries = [
-            PlannedSearchQuery(source_type=query.source_type, query=sanitized)
-            for query in plan.queries[:4]
-            if (sanitized := cls._sanitize_search_text(query.query))
-        ]
-        if not sanitized_queries:
-            return cls._fallback_search_plan(question=fallback_question)
-
-        intent = plan.intent or "general"
-        if (
-            intent in {"item_location", "item_usage", "quest_step", "game_mechanic"}
-            and not any(query.source_type == "web" for query in sanitized_queries)
-        ):
-            web_query = PlannedSearchQuery(
-                source_type="web",
-                query=cls._fallback_search_subject(cls._sanitize_search_text(fallback_question)),
-            )
-            if len(sanitized_queries) >= 4:
-                sanitized_queries[-1] = web_query
-            else:
-                sanitized_queries.append(web_query)
-
-        sanitized_aliases = cls._sanitize_aliases(plan.aliases)
-        return SearchPlan(
-            intent=intent,
-            safety_refusal=False,
-            version_sensitive=plan.version_sensitive or is_version_sensitive_question(fallback_question),
-            requires_relation_verification=plan.requires_relation_verification,
-            named_entity_groups=cls._sanitize_named_entity_groups(
-                plan.named_entity_groups,
-                question=fallback_question,
-                aliases=sanitized_aliases,
-                queries=[query.query for query in sanitized_queries],
-            ),
-            aliases=sanitized_aliases,
-            queries=sanitized_queries,
-            answer_requirements=cls._sanitize_answer_requirements(plan.answer_requirements),
-            missing_info=[value.strip() for value in plan.missing_info if value.strip()][:4],
+        return parse_search_plan(
+            content,
+            fallback_question=fallback_question,
+            fallback_plan=cls._fallback_search_plan,
+            fallback_subject=cls._fallback_search_subject,
         )
 
     @staticmethod
     def _first_json_object(content: str) -> object:
-        """Extract a complete object from model wrappers without relying on delimiters."""
-        decoder = json.JSONDecoder()
-        for index, character in enumerate(content):
-            if character != "{":
-                continue
-            try:
-                value, _ = decoder.raw_decode(content[index:])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                return value
-            if isinstance(value, str):
-                nested, _ = decoder.raw_decode(value.lstrip())
-                if isinstance(nested, dict):
-                    return nested
-        raise ValueError("No complete JSON object found")
+        return first_json_object(content)
 
     @staticmethod
     def _coerce_search_plan_data(data: object) -> dict:
-        """Accept harmless JSON shape variation without inventing plan facts."""
-        if not isinstance(data, dict):
-            raise TypeError("search plan must be an object")
-        normalized = dict(data)
-        if not isinstance(normalized.get("safety_refusal"), bool):
-            normalized["safety_refusal"] = False
-        if not isinstance(normalized.get("version_sensitive"), bool):
-            normalized["version_sensitive"] = False
-        if not isinstance(normalized.get("requires_relation_verification"), bool):
-            normalized["requires_relation_verification"] = False
-        if normalized.get("intent") not in {
-            "game_identity", "boss_strategy", "item_location", "item_usage", "quest_step", "game_mechanic",
-            "build", "patch", "lore", "general",
-        }:
-            normalized["intent"] = "general"
-        groups = normalized.get("named_entity_groups")
-        if isinstance(groups, dict):
-            groups = [groups]
-        if isinstance(groups, list):
-            normalized_groups: list[list[str]] = []
-            for value in groups:
-                if isinstance(value, str):
-                    candidates = [value]
-                elif isinstance(value, dict):
-                    candidates = value.get("names", value.get("aliases", value.get("entity", [])))
-                    candidates = [candidates] if isinstance(candidates, str) else candidates
-                else:
-                    candidates = value
-                if not isinstance(candidates, list):
-                    continue
-                cleaned = [item.strip() for item in candidates if isinstance(item, str) and item.strip()]
-                if cleaned:
-                    normalized_groups.append(cleaned[:4])
-            normalized["named_entity_groups"] = normalized_groups[:4]
-        for field in ("aliases", "answer_requirements", "missing_info"):
-            if isinstance(normalized.get(field), str):
-                normalized[field] = [normalized[field]]
-            elif not isinstance(normalized.get(field), list):
-                normalized[field] = []
-        queries = normalized.get("queries")
-        if isinstance(queries, list):
-            normalized["queries"] = [
-                {"source_type": "web", "query": value}
-                if isinstance(value, str)
-                else {
-                    "source_type": value.get("source_type", value.get("type", "web")),
-                    "query": value.get("query", value.get("text", "")),
-                }
-                if isinstance(value, dict)
-                else value
-                for value in queries
-            ]
-            for query in normalized["queries"]:
-                if isinstance(query, dict) and query.get("source_type") not in {"official", "wiki", "community", "web"}:
-                    query["source_type"] = "web"
-        return normalized
+        return coerce_search_plan_data(data)
 
     @classmethod
     def _parse_refinement_plan(
@@ -1345,49 +882,12 @@ class GuideLLM:
         attempted_queries: list[str],
         version_sensitive: bool = False,
     ) -> SearchPlan | None:
-        try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start < 0 or end <= start:
-                return None
-            plan = SearchPlan.model_validate(json.loads(content[start:end]))
-        except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
-            return None
-
-        if not plan.queries:
-            return None
-        query = cls._sanitize_search_text(plan.queries[0].query)
-        if not query:
-            return None
-
-        missing_identifiers = [
-            identifier
-            for identifier in exact_identifiers(question)
-            if identifier.casefold() not in query.casefold()
-        ]
-        if missing_identifiers:
-            query = f"{query} {' '.join(missing_identifiers)}"[:240].strip()
-
-        normalized_attempts = {" ".join(value.casefold().split()) for value in attempted_queries}
-        if " ".join(query.casefold().split()) in normalized_attempts:
-            return None
-
-        sanitized_aliases = cls._sanitize_aliases(plan.aliases)
-        return SearchPlan(
+        return parse_refinement_plan(
+            content,
+            question=question,
             intent=intent,
-            version_sensitive=version_sensitive or plan.version_sensitive or is_version_sensitive_question(question),
-            requires_relation_verification=plan.requires_relation_verification,
-            named_entity_groups=cls._sanitize_named_entity_groups(
-                plan.named_entity_groups,
-                question=question,
-                aliases=sanitized_aliases,
-                queries=[query],
-            ),
-            aliases=sanitized_aliases,
-            queries=[PlannedSearchQuery(source_type=plan.queries[0].source_type, query=query)],
-            answer_requirements=cls._sanitize_answer_requirements(plan.answer_requirements),
-            missing_info=plan.missing_info[:4],
-            refinement=True,
+            attempted_queries=attempted_queries,
+            version_sensitive=version_sensitive,
         )
 
     @classmethod
@@ -1423,46 +923,15 @@ class GuideLLM:
 
     @staticmethod
     def _sanitize_search_text(value: str) -> str:
-        clauses = re.split(r"([。！？!?；;\n])", value)
-        kept: list[str] = []
-        for index in range(0, len(clauses), 2):
-            clause = clauses[index].strip()
-            separator = clauses[index + 1] if index + 1 < len(clauses) else ""
-            if not clause:
-                continue
-            if any(pattern.search(clause) for pattern in PROMPT_INJECTION_QUERY_PATTERNS):
-                continue
-            kept.append(f"{clause}{separator}")
-
-        return " ".join("".join(kept).split())
+        return sanitize_search_text(value)
 
     @classmethod
     def _sanitize_aliases(cls, aliases: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        for alias in aliases[:6]:
-            value = cls._sanitize_search_text(alias).strip().strip("\"'“”‘’")
-            if not value or len(value) > 80:
-                continue
-            lowered = value.lower()
-            if any(token in lowered for token in ("http://", "https://", "site:", "ignore", "system prompt", "api key")):
-                continue
-            if lowered in {"wiki", "guide", "boss", "item", "quest", "攻略", "打法", "位置"}:
-                continue
-            if value not in cleaned:
-                cleaned.append(value)
-        return cleaned
+        return sanitize_aliases(aliases)
 
     @classmethod
     def _sanitize_answer_requirements(cls, requirements: list[str]) -> list[str]:
-        """Keep planner obligations bounded and free of prompt-control text."""
-        values: list[str] = []
-        for requirement in requirements[:4]:
-            if not isinstance(requirement, str):
-                continue
-            cleaned = cls._sanitize_search_text(requirement).strip()
-            if 3 <= len(cleaned) <= 240 and cleaned not in values:
-                values.append(cleaned)
-        return values
+        return sanitize_answer_requirements(requirements)
 
     @classmethod
     def _sanitize_named_entity_groups(
@@ -1473,43 +942,13 @@ class GuideLLM:
         aliases: list[str],
         queries: list[str],
     ) -> list[list[str]]:
-        """Keep grounded entities and only explicitly routed alternate names."""
-        route_texts = [*aliases, *queries]
-        sanitized: list[list[str]] = []
-        seen_groups: set[tuple[str, ...]] = set()
-        for raw_group in groups[:4]:
-            names = cls._sanitize_aliases(raw_group[:4])
-            if not names:
-                continue
-            grounded = [name for name in names if cls._entity_occurs_in_text(name, question)]
-            if not grounded:
-                continue
-            allowed = [
-                name
-                for name in names
-                if name in grounded
-                or any(cls._entity_occurs_in_text(name, route) for route in route_texts)
-            ]
-            key = tuple(sorted(" ".join(name.casefold().split()) for name in allowed))
-            if not key or key in seen_groups:
-                continue
-            seen_groups.add(key)
-            sanitized.append(allowed)
-        return sanitized
+        return sanitize_named_entity_groups(
+            groups, question=question, aliases=aliases, queries=queries,
+        )
 
     @staticmethod
     def _entity_occurs_in_text(entity: str, text: str) -> bool:
-        normalized_entity = " ".join(entity.casefold().split())
-        normalized_text = " ".join(text.casefold().split())
-        if not normalized_entity:
-            return False
-        if re.fullmatch(r"[a-z0-9][a-z0-9\s'_.:-]*", normalized_entity):
-            parts = re.findall(r"[a-z0-9]+", normalized_entity)
-            pattern = r"[^a-z0-9]+".join(re.escape(part) for part in parts)
-            return re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", normalized_text) is not None
-        compact_entity = "".join(character for character in normalized_entity if character.isalnum())
-        compact_text = "".join(character for character in normalized_text if character.isalnum())
-        return len(compact_entity) >= 2 and compact_entity in compact_text
+        return entity_occurs_in_text(entity, text)
 
     @staticmethod
     def _infer_intent(question: str) -> str:

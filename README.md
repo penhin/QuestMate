@@ -219,7 +219,12 @@ evaluation instances only; production ignores client-supplied aliases and site h
 
 - `search.py`：检索编排、渐进查询和来源选择 / retrieval orchestration, progressive queries, and source selection.
 - `retrieval/pipeline.py`：段落候选融合、去重与最终证据池重排 / passage fusion, deduplication, and final evidence-pool reranking.
-- `multi_agent.py`：受控专家 agent 与结构化交接边界 / bounded specialist agents and typed hand-offs.
+- `agents/`：受控专家 agent、身份解析与兼容适配 / bounded specialists, identity resolution, and compatibility adapters.
+- `orchestration/`：LangGraph、请求状态和评测诊断 / graph construction, request state, and evaluation diagnostics.
+- `retrieval/artifacts.py`：检索阶段交接模型 / typed retrieval hand-off artifacts.
+- `ai/`：证据策略、调查状态提示词压缩、计划解析/清洗与引用渲染 / evidence policy, bounded investigation context, plan parsing/sanitization, and citation rendering.
+- `identity_components/`：身份置信度、候选归一化、URL 校验与不透明选项确认 / identity confidence, candidate normalization, URL validation, and opaque selection confirmation.
+- `search_components/`：证据片段抽取、来源页面分类、版本/时间解析与多样性排序 / evidence extraction, result-page classification, version/date parsing, and diversity ranking.
 - `search_cache.py`：内存/Redis 缓存与调用计数 / memory/Redis cache and call accounting.
 - `source_registry.py`：别名、商店页和 Wiki 入口持久化 / persistence for aliases, store pages, and Wiki entries.
 - `mediawiki_client.py`：免费 MediaWiki API 适配 / free MediaWiki API adapter.

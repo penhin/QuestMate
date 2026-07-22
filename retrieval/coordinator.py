@@ -1,7 +1,6 @@
 """Coordinate local, live, and iterative evidence retrieval."""
 
 import asyncio
-from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -10,6 +9,7 @@ import structlog
 from quality_policy import MAX_INVESTIGATION_HOPS
 from ai.evidence_policy import evidence_level, evidence_question, requires_semantic_relation_judgment
 from retrieval.evidence_pool import canonical_source_url
+from retrieval.artifacts import RetrievalBatch, RetrievalOutcome
 from retrieval.pipeline import RetrievalStage, fuse_and_rank_evidence
 from schemas import ChatRequest, EvidenceGap, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
@@ -26,23 +26,6 @@ class LiveRetriever(Protocol):
 
 class PlanRefiner(Protocol):
     async def refine_search_plan(self, **kwargs: Any) -> SearchPlan | None: ...
-
-
-@dataclass(frozen=True)
-class RetrievalOutcome:
-    sources: list[Source]
-    plan: SearchPlan
-    investigation: InvestigationState
-    refined: bool
-    stages: list[RetrievalStage]
-
-
-@dataclass(frozen=True)
-class RetrievalBatch:
-    """One complete recall-to-selection pass, before answer generation."""
-
-    sources: list[Source]
-    stages: list[RetrievalStage]
 
 
 class RetrievalCoordinator:

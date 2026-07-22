@@ -1,9 +1,28 @@
 import re
 from difflib import SequenceMatcher
 from typing import Any, Protocol
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from query_tokens import relevance_tokens
+from identity_components.scoring import resolution_confidence
+from identity_components.candidate_normalization import (
+    candidate_key as normalized_candidate_key,
+    choose_canonical_candidate_name as normalized_candidate_name,
+    infer_game_tags as normalized_game_tags,
+    is_low_value_game_candidate as normalized_low_value_candidate,
+    title_alias_candidates as normalized_title_aliases,
+    useful_candidate_aliases as normalized_candidate_aliases,
+)
+from identity_components.selection import (
+    canonical_identity_url as _selection_canonical_identity_url,
+    domain_matches as _selection_domain_matches,
+    is_candidate_identity_url as _selection_is_candidate_identity_url,
+    is_platform_product_url as _selection_is_platform_product_url,
+    platform_resource_identity as _selection_platform_resource_identity,
+    resolution_matches_selected_url as _selection_resolution_matches_selected_url,
+    same_platform_resource as _selection_same_platform_resource,
+    select_game_candidate as _selection_select_game_candidate,
+)
 from retrieval.wiki_domains import is_probable_wiki_domain
 from retrieval.source_quality import matches_game_identity
 from quality_policy import (
@@ -140,19 +159,19 @@ class GameResolver:
                 # Article titles describe mechanics, characters, or items and
                 # must never become aliases for the game itself. Only store
                 # identity pages are authoritative enough to supply aliases.
-                item_aliases = list(title_alias_candidates(title, url=url))
-                if is_low_value_game_candidate(title=title, url=url):
+                item_aliases = list(normalized_title_aliases(title, url=url))
+                if normalized_low_value_candidate(title=title, url=url):
                     continue
                 if url not in platform_urls:
                     platform_urls.append(url)
-                name = choose_canonical_candidate_name(game=game, candidates=item_aliases, fallback=game)
-                useful_aliases = useful_candidate_aliases(name=name, candidates=item_aliases)
+                name = normalized_candidate_name(game=game, candidates=item_aliases, fallback=game)
+                useful_aliases = normalized_candidate_aliases(name=name, candidates=item_aliases)
                 raw_score = float(item.get("score") or 0.5)
                 candidates.append(
                     GameCandidate(
                         name=name,
                         aliases=useful_aliases,
-                        tags=infer_game_tags(self.result_text(item)),
+                        tags=normalized_game_tags(self.result_text(item)),
                         platform_urls=[url],
                         confidence=min(
                             1.0,
@@ -163,9 +182,9 @@ class GameResolver:
                     )
                 )
             elif is_generic_official_identity_result(item=item, game=game):
-                item_aliases = list(title_alias_candidates(title, url=url))
-                name = choose_canonical_candidate_name(game=game, candidates=item_aliases, fallback=game)
-                useful_aliases = useful_candidate_aliases(name=name, candidates=item_aliases)
+                item_aliases = list(normalized_title_aliases(title, url=url))
+                name = normalized_candidate_name(game=game, candidates=item_aliases, fallback=game)
+                useful_aliases = normalized_candidate_aliases(name=name, candidates=item_aliases)
                 if url not in identity_urls:
                     identity_urls.append(url)
                 raw_score = float(item.get("score") or 0.5)
@@ -173,7 +192,7 @@ class GameResolver:
                     GameCandidate(
                         name=name,
                         aliases=useful_aliases,
-                        tags=infer_game_tags(self.result_text(item)),
+                        tags=normalized_game_tags(self.result_text(item)),
                         identity_urls=[url],
                         confidence=min(
                             1.0,
@@ -311,13 +330,13 @@ class GameResolver:
                     title=title, url=url, game=game
                 ):
                     continue
-                if is_low_value_game_candidate(title=title, url=url):
+                if normalized_low_value_candidate(title=title, url=url):
                     continue
-                aliases = list(title_alias_candidates(title, url=url))
-                name = choose_canonical_candidate_name(game=game, candidates=aliases, fallback=title[:80])
-                aliases = useful_candidate_aliases(name=name, candidates=aliases)
-                canonical_key = candidate_key(name=name, url=url)
-                tags = infer_game_tags(text)
+                aliases = list(normalized_title_aliases(title, url=url))
+                name = normalized_candidate_name(game=game, candidates=aliases, fallback=title[:80])
+                aliases = normalized_candidate_aliases(name=name, candidates=aliases)
+                canonical_key = normalized_candidate_key(name=name, url=url)
+                tags = normalized_game_tags(text)
                 raw_score = float(item.get("score") or 0.5)
                 confidence = min(
                     1.0,
@@ -399,75 +418,26 @@ class GameResolver:
         identity_urls: list[str],
         database_domains: list[str],
     ) -> float:
-        score = GAME_RESOLUTION_POLICY.base_confidence
-        if aliases:
-            score += GAME_RESOLUTION_POLICY.alias_bonus
-        if platform_urls:
-            score += GAME_RESOLUTION_POLICY.platform_bonus
-        if official_urls:
-            score += GAME_RESOLUTION_POLICY.official_bonus
-        if identity_urls:
-            score += GAME_RESOLUTION_POLICY.identity_candidate_bonus
-        if database_domains:
-            score += GAME_RESOLUTION_POLICY.database_bonus
-        # A page calling itself official is useful as a selectable candidate,
-        # but not enough to silently confirm an identity without an independent
-        # store or database signal.
-        if identity_urls and not platform_urls and not official_urls:
-            score = min(score, GAME_RESOLUTION_POLICY.confirmed_threshold - 0.01)
-        if not relevance_tokens(game):
-            score -= GAME_RESOLUTION_POLICY.invalid_name_penalty
-        return max(0, min(1, score))
+        return resolution_confidence(
+            game=game,
+            aliases=aliases,
+            platform_urls=platform_urls,
+            official_urls=official_urls,
+            identity_urls=identity_urls,
+            database_domains=database_domains,
+        )
 
 
 def infer_game_tags(text: str) -> list[str]:
-    text = text.casefold()
-    tag_rules = (
-        ("RPG", ("rpg", "role-playing", "角色扮演")),
-        ("生存", ("survival", "生存")),
-        ("恐怖", ("horror", "恐怖")),
-        ("解谜", ("puzzle", "解谜", "谜题")),
-        ("冒险", ("adventure", "冒险")),
-        ("动作", ("action", "动作")),
-        ("模拟", ("simulation", "simulator", "模拟")),
-        ("策略", ("strategy", "策略")),
-        ("视觉小说", ("visual novel", "视觉小说")),
-        ("独立游戏", ("indie", "独立")),
-    )
-    tags: list[str] = []
-    for tag, keywords in tag_rules:
-        if any(keyword in text for keyword in keywords):
-            tags.append(tag)
-    return tags[:5]
+    return normalized_game_tags(text)
 
 
 def is_low_value_game_candidate(*, title: str, url: str) -> bool:
-    parsed = urlparse(url)
-    host = parsed.netloc.casefold()
-    path_parts = [part for part in parsed.path.casefold().split("/") if part]
-    # Steam catalog, bundle, and package pages are not game identities. An app
-    # page remains valid even when its localized title contains sale copy.
-    if domain_matches(host, "store.steampowered.com"):
-        return len(path_parts) < 2 or path_parts[0] != "app"
-    normalized_title = " ".join(title.casefold().split()).strip(" -|:：")
-    return normalized_title in {
-        "all games",
-        "games",
-        "所有游戏",
-        "全部游戏",
-        "game collection",
-        "游戏合集",
-    }
+    return normalized_low_value_candidate(title=title, url=url)
 
 
 def candidate_key(*, name: str, url: str) -> str:
-    parsed = urlparse(url)
-    if is_platform_product_url(url):
-        family, resource = _platform_resource_identity(url)
-        return f"{family}:{resource}"
-    host = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
-    path = parsed.path.rstrip("/").casefold()
-    return f"url:{host}{path}" if host and path else compact_identity_text(name) or url
+    return normalized_candidate_key(name=name, url=url)
 
 
 def merge_cross_platform_candidates(
@@ -551,72 +521,20 @@ def _same_cross_platform_identity(left: GameCandidate, right: GameCandidate) -> 
 
 
 def _platform_resource_identity(url: str) -> tuple[str, str]:
-    parsed = urlparse(url)
-    host = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
-    families = (
-        "steampowered.com",
-        "steamcommunity.com",
-        "itch.io",
-        "gog.com",
-        "epicgames.com",
-        "playstation.com",
-        "nintendo.com",
-        "xbox.com",
-        "apps.apple.com",
-        "play.google.com",
-    )
-    family = next((value for value in families if domain_matches(host, value)), host)
-    parts = [part.casefold() for part in parsed.path.split("/") if part]
-    resource = f"{host}{parsed.path.rstrip('/').casefold()}"
-    if domain_matches(host, "store.steampowered.com") and len(parts) >= 2 and parts[0] == "app":
-        resource = f"app:{parts[1]}"
-    elif domain_matches(host, "gog.com") and "game" in parts:
-        resource = f"game:{parts[parts.index('game') + 1]}"
-    elif domain_matches(host, "epicgames.com") and "p" in parts:
-        resource = f"product:{parts[parts.index('p') + 1]}"
-    elif domain_matches(host, "playstation.com") and "product" in parts:
-        resource = f"product:{parts[parts.index('product') + 1]}"
-    elif domain_matches(host, "nintendo.com") and "products" in parts:
-        resource = f"product:{parts[parts.index('products') + 1]}"
-    elif domain_matches(host, "xbox.com") and "store" in parts:
-        resource = f"product:{parts[-1]}"
-    elif host == "apps.apple.com" or host.endswith(".apps.apple.com"):
-        app_id = next((part for part in parts if re.fullmatch(r"id\d+", part)), "")
-        resource = f"app:{app_id}"
-    elif domain_matches(host, "play.google.com"):
-        app_id = (parse_qs(parsed.query).get("id") or [""])[0].casefold()
-        resource = f"app:{app_id}"
-    return family, resource
+    return _selection_platform_resource_identity(url)
 
 
 def same_platform_resource(left_url: str, right_url: str) -> bool:
     """Compare server-discovered product identities without trusting display names."""
-    return (
-        is_platform_product_url(left_url)
-        and is_platform_product_url(right_url)
-        and _platform_resource_identity(left_url) == _platform_resource_identity(right_url)
-    )
+    return _selection_same_platform_resource(left_url, right_url)
 
 
 def _canonical_identity_url(url: str) -> str:
-    parsed = urlparse(url)
-    host = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
-    return f"https://{host}{parsed.path.rstrip('/').casefold()}" if host else ""
+    return _selection_canonical_identity_url(url)
 
 
 def is_candidate_identity_url(url: str) -> bool:
-    parsed = urlparse(url)
-    try:
-        port = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme.casefold() == "https"
-        and parsed.hostname is not None
-        and parsed.username is None
-        and parsed.password is None
-        and port in {None, 443}
-    )
+    return _selection_is_candidate_identity_url(url)
 
 
 def select_game_candidate(
@@ -625,36 +543,10 @@ def select_game_candidate(
     selected_url: str,
 ) -> GameResolution | None:
     """Resolve an opaque UI choice against fresh server-discovered candidates."""
-    selected = next(
-        (
-            candidate
-            for candidate in resolution.candidates
-            if any(same_platform_resource(str(url), selected_url) for url in candidate.platform_urls)
-            or any(
-                is_candidate_identity_url(selected_url)
-                and _canonical_identity_url(str(url)) == _canonical_identity_url(selected_url)
-                for url in candidate.official_urls
-            )
-            or any(
-                is_candidate_identity_url(selected_url)
-                and _canonical_identity_url(str(url)) == _canonical_identity_url(selected_url)
-                for url in candidate.identity_urls
-            )
-        ),
-        None,
-    )
-    if selected is None:
-        return None
-    return GameResolution(
-        input_name=resolution.input_name,
-        confirmed_name=selected.name,
-        aliases=selected.aliases,
-        platform_urls=selected.platform_urls,
-        official_urls=selected.official_urls,
-        identity_urls=selected.identity_urls,
-        database_domains=selected.database_domains,
-        confidence=max(selected.confidence, GAME_RESOLUTION_POLICY.confirmed_threshold),
-        ambiguous=False,
+    return _selection_select_game_candidate(
+        resolution,
+        selected_url=selected_url,
+        confirmed_threshold=GAME_RESOLUTION_POLICY.confirmed_threshold,
     )
 
 
@@ -664,15 +556,7 @@ def resolution_matches_selected_url(
     selected_url: str,
 ) -> bool:
     """Verify that a returned resolution represents the user's opaque choice."""
-    if not is_candidate_identity_url(selected_url):
-        return False
-    if any(same_platform_resource(str(url), selected_url) for url in resolution.platform_urls):
-        return True
-    selected_key = _canonical_identity_url(selected_url)
-    return any(
-        _canonical_identity_url(str(url)) == selected_key
-        for url in [*resolution.official_urls, *resolution.identity_urls]
-    )
+    return _selection_resolution_matches_selected_url(resolution, selected_url=selected_url)
 
 
 def choose_canonical_candidate_name(
@@ -681,23 +565,7 @@ def choose_canonical_candidate_name(
     candidates: list[str] | tuple[str, ...],
     fallback: str,
 ) -> str:
-    """Prefer the title fragment closest to the requested identity over store copy."""
-    cleaned = list(dict.fromkeys(value.strip() for value in candidates if value.strip()))
-    if not cleaned:
-        return fallback
-    game_key = compact_identity_text(game)
-    exact = next((value for value in cleaned if compact_identity_text(value) == game_key), None)
-    if exact:
-        return exact
-    game_tokens = set(relevance_tokens(game))
-
-    def score(value: str) -> tuple[float, int, int]:
-        value_tokens = set(relevance_tokens(value))
-        overlap = len(game_tokens.intersection(value_tokens)) / max(len(game_tokens), 1)
-        contains = int(bool(game_key) and game_key in compact_identity_text(value))
-        return overlap, contains, -len(value)
-
-    return max(cleaned, key=score)
+    return normalized_candidate_name(game=game, candidates=candidates, fallback=fallback)
 
 
 def useful_candidate_aliases(
@@ -705,34 +573,7 @@ def useful_candidate_aliases(
     name: str,
     candidates: list[str] | tuple[str, ...],
 ) -> list[str]:
-    """Keep alternate identities while removing storefront presentation copy."""
-    marketing_markers = (
-        "download",
-        "buy today",
-        "official website",
-        "official site",
-        "games store",
-        "app store",
-        "google play",
-        "playstation store",
-        "xbox store",
-        "epic games",
-        "on steam",
-        "在 steam 上",
-        "立即购买",
-        "官方网站",
-    )
-    aliases: list[str] = []
-    name_key = compact_identity_text(name)
-    for value in candidates:
-        normalized = " ".join(value.split()).strip(" -|:：")
-        key = compact_identity_text(normalized)
-        lowered = normalized.casefold()
-        if not normalized or key == name_key or any(marker in lowered for marker in marketing_markers):
-            continue
-        if normalized not in aliases:
-            aliases.append(normalized)
-    return aliases[:6]
+    return normalized_candidate_aliases(name=name, candidates=candidates)
 
 
 def is_generic_official_identity_result(*, item: dict[str, Any], game: str) -> bool:
@@ -794,76 +635,15 @@ def is_supported_platform_domain(domain: str) -> bool:
 
 def is_platform_product_url(url: str) -> bool:
     """Accept product identities, never storefront search/tag/catalog pages."""
-    parsed = urlparse(url)
-    host = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
-    parts = [part for part in parsed.path.casefold().split("/") if part]
-    if domain_matches(host, "store.steampowered.com"):
-        return len(parts) >= 2 and parts[0] == "app" and parts[1].isdigit()
-    if domain_matches(host, "itch.io"):
-        return host != "itch.io" and bool(parts) and parts[0] not in {"games", "jam", "jams"}
-    if domain_matches(host, "gog.com"):
-        return "game" in parts and parts.index("game") + 1 < len(parts)
-    if domain_matches(host, "epicgames.com"):
-        return "p" in parts and parts.index("p") + 1 < len(parts)
-    if domain_matches(host, "playstation.com"):
-        return "product" in parts and parts.index("product") + 1 < len(parts)
-    if domain_matches(host, "nintendo.com"):
-        return "products" in parts and parts.index("products") + 1 < len(parts)
-    if domain_matches(host, "xbox.com"):
-        return "store" in parts and len(parts) >= parts.index("store") + 3
-    if host == "apps.apple.com" or host.endswith(".apps.apple.com"):
-        return any(re.fullmatch(r"id\d+", part) for part in parts)
-    if host == "play.google.com" or host.endswith(".play.google.com"):
-        return parsed.path.casefold().rstrip("/") == "/store/apps/details" and bool(
-            re.search(r"(?:^|&)id=[^&]+", parsed.query)
-        )
-    return False
+    return _selection_is_platform_product_url(url)
 
 
 def domain_matches(domain: str, candidate: str) -> bool:
-    host = domain.casefold().split(":", 1)[0].strip(".")
-    candidate = candidate.casefold().strip(".")
-    return host == candidate or host.endswith(f".{candidate}")
+    return _selection_domain_matches(domain, candidate)
 
 
 def title_alias_candidates(title: str, *, url: str = "") -> tuple[str, ...]:
-    cleaned = title.strip()
-    for marker in (
-        " on Steam",
-        " on GOG.com",
-        " on GOG",
-        " on itch.io",
-        " Steam",
-        "在 Steam 上",
-        "Steam 上的",
-        " - Steam",
-        " | Steam",
-        " - GOG.com",
-        " | GOG.com",
-        " - itch.io",
-        " | itch.io",
-    ):
-        cleaned = cleaned.replace(marker, "")
-    cleaned = re.sub(r"^在\s*steam\s*上购买", "", cleaned, flags=re.I)
-    cleaned = re.sub(r"立省\s*\d+%.*$", "", cleaned)
-    cleaned = re.sub(r"\s*-\s*\d+%.*$", "", cleaned)
-    cleaned = re.sub(r"\s*所有游戏.*$", "", cleaned)
-    cleaned = " ".join(cleaned.split()).strip(" -|:：")
-    candidates = [cleaned] if 3 <= len(cleaned) <= 80 else []
-    if domain_matches(urlparse(url).netloc, "itch.io") and " by " in cleaned.casefold():
-        candidates.insert(0, re.split(r"\s+by\s+", cleaned, maxsplit=1, flags=re.I)[0].strip())
-    ascii_parts = [
-        part.strip(" -|:：")
-        for part in split_title(cleaned)
-        if any(char.isascii() and char.isalpha() for char in part) and 3 <= len(part.strip()) <= 80
-    ]
-    candidates.extend(ascii_parts)
-    candidates.extend(
-        part.strip()
-        for part in re.findall(r"[A-Za-z0-9][A-Za-z0-9'_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9'_.-]*)+", cleaned)
-        if 3 <= len(part.strip()) <= 80
-    )
-    return tuple(dict.fromkeys(candidate for candidate in candidates if candidate))
+    return normalized_title_aliases(title, url=url)
 
 
 def matches_game_text(*, text: str, game: str, game_aliases: list[str]) -> bool:

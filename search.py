@@ -1,8 +1,7 @@
 import asyncio
 from contextlib import nullcontext
-from datetime import datetime, timezone
-import re
-from urllib.parse import urlparse, urlunparse
+from datetime import datetime
+from urllib.parse import urlparse
 from typing import Any, Protocol
 
 import structlog
@@ -17,12 +16,8 @@ from quality_policy import (
     SOURCE_POLICIES,
     SourcePolicy,
     STABLE_FACT_INTENTS,
-    VERSION_SCORE_POLICY,
-    VERSION_SENSITIVE_INTENTS,
     is_version_sensitive_question,
-    source_domain_limit,
 )
-from query_tokens import question_relevance_tokens
 from retrieval import (
     build_search_queries,
     is_high_quality_source,
@@ -31,11 +26,19 @@ from retrieval import (
 from retrieval.mediawiki_retriever import MediaWikiRetriever
 from retrieval.source_builder import build_source
 from retrieval.source_quality import required_entity_groups_for_query
-from retrieval.wiki_domains import has_strong_wiki_page_signal
 from schemas import GameResolution, PlannedSearchQuery, SearchPlan, Source
 from mediawiki_client import MediaWikiClient
 from search_cache import CachedSearchClient, RedisSearchCache, TTLSearchCache
 from source_registry import GameSourceRegistry, game_source_registry
+from search_components.evidence import best_evidence_passage, combine_page_lead, evidence_anchor_phrases, evidence_window
+from search_components.ranking import canonical_source_key, limit_source_diversity, version_safety_score
+from search_components.policy import (
+    balanced_sources,
+    effective_source_policy,
+    extract_game_version,
+    parse_source_datetime,
+    resolution_authority_domains,
+)
 
 
 logger = structlog.get_logger()
@@ -540,36 +543,17 @@ class TavilySearchProvider:
         database_domains: list[str],
         official_domains: list[str],
     ) -> SourcePolicy:
-        """Classify the actual result page; query intent is only a weak prior."""
-        parsed = urlparse(url)
-        domain = parsed.netloc.casefold().split(":", 1)[0].removeprefix("www.")
-
-        def matches_any(candidates: list[str]) -> bool:
-            normalized = [
-                value.casefold().split(":", 1)[0].strip(".").removeprefix("www.")
-                for value in candidates
-                if value
-            ]
-            return any(domain == value or domain.endswith(f".{value}") for value in normalized)
-
-        if matches_any(["reddit.com", "steamcommunity.com"]):
-            return self.sources["community"]
-        if has_strong_wiki_page_signal(domain, url=url):
-            return self.sources["wiki"]
-        if matches_any(official_domains):
-            return self.sources["official"]
-        if configured.source_type in {"official", "wiki", "community"}:
-            return self.sources["web"]
-        return configured
+        return effective_source_policy(
+            configured=configured,
+            url=url,
+            database_domains=database_domains,
+            official_domains=official_domains,
+            sources=self.sources,
+        )
 
     @staticmethod
     def _resolution_authority_domains(resolution: GameResolution) -> list[str]:
-        domains: list[str] = []
-        for url in [*resolution.official_urls, *resolution.platform_urls]:
-            domain = urlparse(str(url)).netloc.casefold().split(":", 1)[0].removeprefix("www.")
-            if domain and domain not in domains:
-                domains.append(domain)
-        return domains
+        return resolution_authority_domains(resolution)
 
     async def _fetch_search_results(
         self,
@@ -604,48 +588,7 @@ class TavilySearchProvider:
 
     @staticmethod
     def _best_evidence_passage(content: str, *, question: str, max_chars: int = 1600) -> str:
-        """Return a compact passage around the best entity matches in a page."""
-        cleaned = re.sub(r"\s+", " ", content).strip()
-        if not cleaned or len(cleaned) <= max_chars:
-            return cleaned
-
-        tokens = question_relevance_tokens(question)
-        anchors = TavilySearchProvider._evidence_anchor_phrases(question)
-        candidates: list[str] = [cleaned[:max_chars]]
-        lowered = cleaned.lower()
-        for anchor in anchors:
-            start = 0
-            while (position := lowered.find(anchor, start)) >= 0:
-                candidates.append(
-                    TavilySearchProvider._evidence_window(cleaned, focus=position, max_chars=max_chars)
-                )
-                start = position + len(anchor)
-        for token in tokens:
-            start = 0
-            for _ in range(20):
-                position = lowered.find(token, start)
-                if position < 0:
-                    break
-                candidates.append(
-                    TavilySearchProvider._evidence_window(cleaned, focus=position, max_chars=max_chars)
-                )
-                start = position + len(token)
-
-        def passage_score(passage: str) -> tuple[int, int, int]:
-            lowered_passage = passage.lower()
-            anchor_matches = sum(1 for anchor in anchors if anchor in lowered_passage)
-            matched = sum(1 for token in tokens if token in lowered_passage)
-            occurrences = sum(lowered_passage.count(token) for token in tokens)
-            return anchor_matches, matched, occurrences
-
-        focused = max(candidates, key=passage_score)
-        return TavilySearchProvider._combine_page_lead(
-            cleaned,
-            focused=focused,
-            anchors=anchors,
-            tokens=tokens,
-            max_chars=max_chars,
-        )
+        return best_evidence_passage(content, question=question, max_chars=max_chars)
 
     @staticmethod
     def _combine_page_lead(
@@ -656,69 +599,15 @@ class TavilySearchProvider:
         tokens: list[str],
         max_chars: int,
     ) -> str:
-        """Preserve a guide page's overview while retaining its distant focused claim."""
-        focused_position = content.find(focused[: min(120, len(focused))])
-        if focused_position < max_chars // 2:
-            return focused[:max_chars]
-
-        lead_budget = max_chars * 3 // 5
-        lead = content[:lead_budget]
-        boundaries = [lead.rfind(mark) for mark in ".!?。！？;；"]
-        boundary = max(boundaries, default=-1)
-        if boundary >= lead_budget // 2:
-            lead = lead[: boundary + 1]
-        remaining = max_chars - len(lead) - 2
-        if remaining <= 0:
-            return lead[:max_chars]
-
-        lowered = focused.casefold()
-        positions = [lowered.find(value) for value in [*anchors, *tokens] if value]
-        positions = [position for position in positions if position >= 0]
-        focus = min(positions, default=0)
-        detail = TavilySearchProvider._evidence_window(focused, focus=focus, max_chars=remaining)
-        return f"{lead}\n\n{detail}"[:max_chars]
+        return combine_page_lead(content, focused=focused, anchors=anchors, tokens=tokens, max_chars=max_chars)
 
     @staticmethod
     def _evidence_window(content: str, *, focus: int, max_chars: int) -> str:
-        """Keep the focused claim's subject by starting at a nearby sentence boundary."""
-        search_start = max(0, focus - max_chars // 2)
-        prefix = content[search_start:focus]
-        boundaries = [prefix.rfind(mark) for mark in ".!?。！？;；"]
-        boundary = max(boundaries, default=-1)
-        window_start = search_start + boundary + 1 if boundary >= 0 else search_start
-        while window_start < focus and content[window_start].isspace():
-            window_start += 1
-        return content[window_start : window_start + max_chars].strip()
+        return evidence_window(content, focus=focus, max_chars=max_chars)
 
     @staticmethod
     def _evidence_anchor_phrases(value: str) -> list[str]:
-        """Extract identifier-bearing phrases without knowing any game's entities."""
-        stop_words = {
-            "access", "enter", "exact", "find", "guide", "how", "into", "location",
-            "outside", "requirements", "route", "the", "to", "where",
-        }
-        words = re.findall(r"[a-z][a-z'-]*|[a-z]*\d[a-z0-9._-]*|\d{1,6}", value.casefold())
-        anchors: list[str] = []
-        for index, word in enumerate(words):
-            if not any(char.isdigit() for char in word):
-                continue
-            left = max(0, index - 2)
-            right = min(len(words), index + 3)
-            local_pairs = [
-                (position, words[position])
-                for position in range(left, right)
-                if words[position] not in stop_words
-            ]
-            local = [token for _position, token in local_pairs]
-            identifier_index = next(
-                local_index for local_index, (position, _token) in enumerate(local_pairs) if position == index
-            )
-            for start in range(max(0, identifier_index - 2), identifier_index + 1):
-                for end in range(identifier_index + 1, min(len(local), identifier_index + 3) + 1):
-                    phrase = " ".join(local[start:end])
-                    if phrase != word and phrase not in anchors:
-                        anchors.append(phrase)
-        return sorted(anchors, key=len, reverse=True)[:12]
+        return evidence_anchor_phrases(value)
 
     def _build_search_queries(
         self,
@@ -743,25 +632,11 @@ class TavilySearchProvider:
 
     @staticmethod
     def _canonical_source_key(url: str) -> str:
-        parsed = urlparse(url)
-        if any(value in parsed.netloc.lower() for value in ("steamcommunity.com", "reddit.com")):
-            return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
-        return url
+        return canonical_source_key(url)
 
     @staticmethod
     def _limit_source_diversity(sources: list[Source], *, total_results: int) -> list[Source]:
-        selected: list[Source] = []
-        domain_counts: dict[str, int] = {}
-        for source in sources:
-            domain = urlparse(str(source.url)).netloc.lower()
-            limit = source_domain_limit(domain)
-            if domain_counts.get(domain, 0) >= limit:
-                continue
-            selected.append(source)
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-            if len(selected) >= total_results:
-                return selected
-        return selected
+        return limit_source_diversity(sources, total_results=total_results)
 
     @classmethod
     def _balanced_sources(
@@ -772,18 +647,12 @@ class TavilySearchProvider:
         total_results: int,
         min_strict_results: int,
     ) -> list[Source]:
-        selected = cls._limit_source_diversity(strict_sources, total_results=total_results)
-        if len(selected) >= min_strict_results or len(selected) >= total_results:
-            return selected
-
-        selected_keys = {cls._canonical_source_key(str(source.url)) for source in selected}
-        fill_sources = [
-            source
-            for source in relaxed_sources
-            if cls._canonical_source_key(str(source.url)) not in selected_keys
-        ]
-        combined = selected + fill_sources
-        return cls._limit_source_diversity(combined, total_results=total_results)
+        return balanced_sources(
+            strict_sources=strict_sources,
+            relaxed_sources=relaxed_sources,
+            total_results=total_results,
+            min_strict_results=min_strict_results,
+        )
 
     @staticmethod
     def _version_safety_score(
@@ -793,30 +662,14 @@ class TavilySearchProvider:
         text: str,
         version_sensitive: bool = False,
     ) -> float:
-        lowered = text.lower()
-        has_version_signal = is_version_sensitive_question(lowered)
-        version_sensitive = version_sensitive or intent in VERSION_SENSITIVE_INTENTS
-        if version_sensitive and source_type == "official":
-            return VERSION_SCORE_POLICY.official_sensitive
-        if version_sensitive and has_version_signal:
-            return VERSION_SCORE_POLICY.versioned_sensitive
-        if version_sensitive:
-            return VERSION_SCORE_POLICY.undated_sensitive
-        if intent in STABLE_FACT_INTENTS:
-            return VERSION_SCORE_POLICY.stable_fact
-        return VERSION_SCORE_POLICY.default
+        return version_safety_score(
+            intent=intent, source_type=source_type, text=text, version_sensitive=version_sensitive
+        )
 
     @staticmethod
     def _extract_game_version(text: str) -> str | None:
-        match = re.search(r"(?:patch|version|ver\.?|v|补丁|版本)\s*([0-9]+(?:\.[0-9]+){1,3})", text, re.I)
-        return match.group(1) if match else None
+        return extract_game_version(text)
 
     @staticmethod
     def _parse_source_datetime(value: Any) -> datetime | None:
-        if not isinstance(value, str) or not value:
-            return None
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        return parse_source_datetime(value)

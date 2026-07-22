@@ -2,32 +2,34 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import nullcontext
 import inspect
-import re
 from time import perf_counter
-from typing import Literal, TypedDict
+from typing import Literal
 from uuid import uuid4
 
-from langgraph.graph import END, StateGraph
 import structlog
 
 from knowledge import KnowledgeStore, knowledge_store
 from config import get_settings
 from llm import GuideLLM
-from quality_policy import HIGH_TRUST_THRESHOLD
 from retrieval.coordinator import RetrievalCoordinator, merge_search_plans
 from retrieval.evidence_pool import canonical_source_url, merge_source_evidence, rank_sources, source_rank
 from retrieval.pipeline import RetrievalStage
 from retrieval.source_quality import matches_game_identity
-from retrieval.wiki_domains import normalize_wiki_host
-from game_resolution import (
-    is_candidate_identity_url,
-    resolution_matches_selected_url,
-    select_game_candidate,
-)
 from ai.fallback_planning import fallback_search_plan
-from ai.evidence_policy import evidence_level, evidence_question
-from multi_agent import AgentTrace, AnswerAgent, EvidenceAgent, IdentityAgent, PlanningAgent, RetrievalAgent
+from agents import (
+    AgentTrace,
+    AnswerAgent,
+    EvidenceAgent,
+    IdentityAgent,
+    IdentityResolver,
+    PlanningAgent,
+    RetrievalAgent,
+)
 from request_safety import requires_safe_refusal
+from orchestration.diagnostics import evaluation_diagnostics
+from orchestration.graph import build_request_graph
+from orchestration.state import QuestAgentState
+from orchestration import status as orchestration_status
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -35,18 +37,6 @@ from storage import conversation_store
 
 AgentStreamEvent = tuple[Literal["status", "chunk", "done"], str | ChatResponse]
 logger = structlog.get_logger()
-
-
-class QuestAgentState(TypedDict):
-    request: ChatRequest
-    history: list[SessionMessage]
-    game_resolution: GameResolution
-    search_plan: SearchPlan
-    sources: list[Source]
-    investigation: InvestigationState
-    answer: str
-    timings_ms: dict[str, int]
-    agent_trace: list[AgentTrace]
 
 
 class QuestAgent:
@@ -67,6 +57,7 @@ class QuestAgent:
             max_results=get_settings().search_max_results,
             max_investigation_model_calls=1,
         )
+        self.identity_resolver = IdentityResolver(self.search_provider)
         self.identity_agent = IdentityAgent(
             initial_context=self._initial_game_context,
             recover_context=self._recover_game_identity_if_needed,
@@ -77,17 +68,12 @@ class QuestAgent:
         self.graph = self._build_graph()
 
     def _build_graph(self):
-        graph = StateGraph(QuestAgentState)
-        graph.add_node("identity_agent", self._resolve_game)
-        graph.add_node("planning_agent", self._plan)
-        graph.add_node("retrieval_evidence_agents", self._search)
-        graph.add_node("answer_agent", self._answer)
-        graph.set_entry_point("identity_agent")
-        graph.add_edge("identity_agent", "planning_agent")
-        graph.add_edge("planning_agent", "retrieval_evidence_agents")
-        graph.add_edge("retrieval_evidence_agents", "answer_agent")
-        graph.add_edge("answer_agent", END)
-        return graph.compile()
+        return build_request_graph(
+            identity_node=self._resolve_game,
+            planning_node=self._plan,
+            retrieval_node=self._search,
+            answer_node=self._answer,
+        )
 
     async def run(self, request: ChatRequest) -> ChatResponse:
         with self._search_usage_scope():
@@ -673,45 +659,16 @@ class QuestAgent:
         answer: str = "",
         agent_trace: list[AgentTrace] | None = None,
     ) -> dict[str, str | int]:
-        """Expose only aggregate-safe stage counters to opt-in evaluators."""
-        if not request.metadata.get("evaluation"):
-            return {}
-        source_list = sources or []
-        level = "none"
-        if source_list:
-            level = evidence_level(
-                question=evidence_question(request=request, plan=plan), sources=source_list
-            )
-        diagnostics: dict[str, str | int] = {
-            "path": path,
-            "evidence_level": level,
-            "source_count": len(source_list),
-            "citation_count": len(re.findall(r"\[(\d+)\]", answer)),
-            "agent_handoffs": len(agent_trace or []),
-        }
-        if path != "answer":
-            return diagnostics
-        conservative = getattr(self.llm, "_should_return_conservative_answer", None)
-        if callable(conservative):
-            diagnostics["policy_conservative"] = int(bool(conservative(
-                request=request,
-                sources=source_list,
-                plan=plan,
-                game_resolution=game_resolution,
-            )))
-        claim_context = getattr(self.llm, "_citation_claim_context", None)
-        if callable(claim_context):
-            try:
-                context = claim_context(
-                    question=evidence_question(request=request, plan=plan),
-                    sources=source_list,
-                    entity_groups=plan.named_entity_groups if plan else None,
-                    aliases=plan.aliases if plan else None,
-                )
-                diagnostics["claim_count"] = context.count('<claim id=')
-            except (TypeError, ValueError):
-                diagnostics["claim_count"] = 0
-        return diagnostics
+        return evaluation_diagnostics(
+            request=request,
+            path=path,
+            llm=self.llm,
+            sources=sources,
+            plan=plan,
+            game_resolution=game_resolution,
+            answer=answer,
+            agent_trace=agent_trace,
+        )
 
     def _search_usage_snapshot(self) -> dict[str, int]:
         snapshot = getattr(self.search_provider, "usage_snapshot", None)
@@ -770,10 +727,7 @@ class QuestAgent:
 
     @staticmethod
     def _status_for_plan_start(question: str) -> str:
-        # Intent-specific status follows after model/fallback planning.  Before
-        # that point a keyword table would only create misleading certainty for
-        # novel or compound questions.
-        return "理解问题：识别目标和关键关系"
+        return orchestration_status.plan_start(question)
 
     @staticmethod
     def _initial_title(request: ChatRequest) -> str:
@@ -782,17 +736,7 @@ class QuestAgent:
 
     @staticmethod
     def _status_for_search(search_plan: SearchPlan) -> str:
-        labels = {
-            "boss_strategy": "类型：Boss 打法；查弱点/阶段/社区打法",
-            "item_location": "类型：物品位置；查地点/条件/路线",
-            "item_usage": "类型：物品用途；查效果/用法/交互对象",
-            "quest_step": "类型：任务步骤；查 NPC/触发/顺序",
-            "game_mechanic": "类型：游戏机制；查开启条件/触发方式",
-            "build": "类型：配装；查数值/装备/版本",
-            "patch": "类型：版本变化；优先官方补丁",
-            "lore": "类型：剧情背景；查事实和解释",
-        }
-        return labels.get(search_plan.intent, "类型：通用问题；筛选相关来源")
+        return orchestration_status.search(search_plan)
 
     @staticmethod
     def _status_for_game_resolution(game_resolution: GameResolution) -> str:
@@ -827,86 +771,10 @@ class QuestAgent:
         )
 
     async def _resolve_request_game(self, request: ChatRequest) -> GameResolution:
-        confirmed = self._confirmed_resolution_from_request(request)
-        if confirmed is None:
-            return await self.search_provider.resolve_game(
-                request.game,
-                question=request.question,
-            )
-        settings = get_settings()
-        if (
-            settings.allow_evaluation_retrieval_hints
-            and not settings.is_production
-            and request.metadata.get("evaluation") is True
-        ):
-            return confirmed
-        selected_url = request.metadata.get("selected_game_url")
-        if (
-            isinstance(selected_url, str)
-            and len(selected_url) <= 500
-            and is_candidate_identity_url(selected_url)
-        ):
-            selector = getattr(self.search_provider, "select_game_candidate", None)
-            if callable(selector):
-                selected = await selector(
-                    game=request.game,
-                    selected_url=selected_url,
-                    question=request.question,
-                )
-                if (
-                    selected.is_confirmed
-                    and not selected.ambiguous
-                    and resolution_matches_selected_url(
-                        selected,
-                        selected_url=selected_url,
-                    )
-                ):
-                    return selected
-                # A stale or mismatched opaque selection must not fall through
-                # to name-only resolution and silently select another game.
-                return selected.model_copy(
-                    update={
-                        "confidence": 0,
-                        "ambiguous": bool(selected.candidates),
-                    }
-                )
-
-        # A production confirmation is a user choice, not authority for client-
-        # supplied aliases or hosts. Re-resolve the name and accept only an
-        # unambiguous identity or a URL that occurs in the fresh candidate set.
-        discovered = await self.search_provider.resolve_game(
-            request.game,
-            question=request.question,
-        )
-        if isinstance(selected_url, str) and is_candidate_identity_url(selected_url):
-            selected = select_game_candidate(discovered, selected_url=selected_url)
-            if selected is not None:
-                return selected
-            return GameResolution(
-                input_name=request.game,
-                confirmed_name=request.game,
-                confidence=0,
-                candidates=discovered.candidates,
-                ambiguous=bool(discovered.candidates),
-            )
-        if discovered.is_confirmed and not discovered.ambiguous:
-            return discovered
-        return discovered
+        return await self._identity_resolver().resolve_request_game(request)
 
     async def _initial_game_context(self, request: ChatRequest) -> GameResolution:
-        """Use the user-supplied title for retrieval; resolve only explicit choices.
-
-        Identity search is an exception path, not a prerequisite for every
-        guide question. Retrieval can often establish the title directly from
-        source evidence without paying an additional discovery request.
-        """
-        if request.metadata.get("confirmed_game") is True or request.metadata.get("selected_game_url"):
-            return await self._resolve_request_game(request)
-        return GameResolution(
-            input_name=request.game,
-            confirmed_name=request.game,
-            confidence=1,
-        )
+        return await self._identity_resolver().initial_context(request)
 
     async def _recover_game_identity_if_needed(
         self,
@@ -915,70 +783,27 @@ class QuestAgent:
         sources: list[Source],
         current: GameResolution,
     ) -> GameResolution:
-        """Ask for identity confirmation only after retrieval cannot proceed."""
-        if current.ambiguous or not current.is_confirmed:
-            return current
-        if sources or request.metadata.get("confirmed_game") is True:
-            return current
-        cached_resolution = getattr(self.search_provider, "get_cached_game_resolution", None)
-        if callable(cached_resolution):
-            cached = await cached_resolution(request.game)
-            if cached is not None and cached.is_confirmed and not cached.ambiguous:
-                return cached
-        recovered = await self._resolve_request_game(request)
-        # A retrieval miss is not evidence that the title is ambiguous.  In
-        # particular, an identity provider can have a transient miss while a
-        # clearly named game simply lacks indexed material for this question.
-        # Only replace the optimistic request context when discovery actually
-        # found a usable identity or competing candidates.  The former enables
-        # the one cheap retry; the latter is the only case that should interrupt
-        # a normal guide question and ask the player to choose a game.
-        if recovered.is_confirmed or recovered.ambiguous or recovered.candidates:
-            return recovered
-        return current
+        return await self._identity_resolver().recover_if_needed(
+            request=request, sources=sources, current=current
+        )
+
+    def _identity_resolver(self) -> IdentityResolver:
+        """Lazily construct the specialist for legacy lightweight instances."""
+        resolver = getattr(self, "identity_resolver", None)
+        if resolver is None:
+            resolver = IdentityResolver(self.search_provider)
+            self.identity_resolver = resolver
+        elif resolver.search_provider is not self.search_provider:
+            resolver.search_provider = self.search_provider
+        return resolver
 
     @staticmethod
     def _confirmed_resolution_from_request(request: ChatRequest) -> GameResolution | None:
-        if request.metadata.get("confirmed_game") is not True:
-            return None
-        settings = get_settings()
-        allow_hints = (
-            settings.allow_evaluation_retrieval_hints
-            and not settings.is_production
-        )
-        aliases = request.metadata.get("game_aliases") if allow_hints else None
-        database_domains = request.metadata.get("database_domains") if allow_hints else None
-        safe_aliases = [
-            normalized
-            for value in (aliases if isinstance(aliases, list) else [])[:8]
-            if isinstance(value, str)
-            and (normalized := " ".join(value.split()).strip())
-            and len(normalized) <= 120
-            and not any(marker in normalized.casefold() for marker in ("http://", "https://", "site:"))
-        ]
-        safe_domains = [
-            host
-            for value in (database_domains if isinstance(database_domains, list) else [])[:8]
-            if isinstance(value, str)
-            and (host := normalize_wiki_host(value)) is not None
-        ]
-        return GameResolution(
-            input_name=request.game,
-            confirmed_name=request.game,
-            aliases=list(dict.fromkeys(safe_aliases)),
-            database_domains=list(dict.fromkeys(safe_domains)),
-            confidence=1,
-            ambiguous=False,
-        )
+        return IdentityResolver.confirmed_resolution_from_request(request)
 
     @staticmethod
     def _status_for_sources(sources: list[Source]) -> str:
-        if not sources:
-            return "来源筛选：未找到强相关资料"
-        trusted_count = sum(1 for source in sources if source.trust_score >= HIGH_TRUST_THRESHOLD)
-        if trusted_count:
-            return f"来源筛选：保留 {len(sources)} 个，{trusted_count} 个高可信"
-        return f"来源筛选：保留 {len(sources)} 个，交叉核对"
+        return orchestration_status.sources(sources)
 
 
 quest_agent = QuestAgent()
