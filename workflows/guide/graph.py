@@ -56,28 +56,23 @@ class GuideWorkflow:
 
     def _build_graph(self, *, request: ChatRequest, history: list[SessionMessage]):
         graph = StateGraph(GuideState)
+        async def retrieval_node(state: GuideState):
+            return await retrieve(state, request=request, history=history, retrieve_after_identity_check=self._retrieve_after_identity_check)
+        async def verification_node(state: GuideState):
+            return await verify(state, router=self._verification_router)
+        async def answer_node(state: GuideState):
+            return await answer(state, request=request, history=history, render_answer=self._render_answer, safety_refusal_message=self._safety_refusal_message)
         graph.add_node(
             "guide_retrieval",
-            lambda state: retrieve(
-                state,
-                request=request,
-                history=history,
-                retrieve_after_identity_check=self._retrieve_after_identity_check,
-            ),
+            retrieval_node,
         )
         graph.add_node(
             "guide_verification",
-            lambda state: verify(state, router=self._verification_router),
+            verification_node,
         )
         graph.add_node(
             "guide_answer",
-            lambda state: answer(
-                state,
-                request=request,
-                history=history,
-                render_answer=self._render_answer,
-                safety_refusal_message=self._safety_refusal_message,
-            ),
+            answer_node,
         )
         graph.set_entry_point("guide_retrieval")
         graph.add_conditional_edges(

@@ -1,4 +1,4 @@
-"""LangGraph for build and stat requests."""
+"""LangGraph for game mechanics, comparisons, and explanation requests."""
 
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -8,14 +8,14 @@ from langgraph.graph import END, StateGraph
 from retrieval.artifacts import RetrievalOutcome
 from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, SessionMessage
 from workflow import WorkflowRouter
-from workflows.build.nodes.answer import answer
-from workflows.build.nodes.retrieval import retrieve
-from workflows.build.nodes.verification import next_after_research, verify
-from workflows.build.state import BuildState
+from workflows.analysis.nodes.answer import answer
+from workflows.analysis.nodes.retrieval import retrieve
+from workflows.analysis.nodes.verification import next_after_research, verify
+from workflows.analysis.state import AnalysisState
 
 
-class BuildWorkflow:
-    """A build-specific graph over shared retrieval and evidence services."""
+class AnalysisWorkflow:
+    """Analysis graph that shares only retrieval, verification, and citations."""
 
     def __init__(self, *, retrieve_after_identity_check: Callable[..., Awaitable[tuple[RetrievalOutcome, GameResolution]]], render_answer: Callable[..., Awaitable[str]], safety_refusal_message: Callable[[], str], verification_router: WorkflowRouter) -> None:
         self._retrieve_after_identity_check = retrieve_after_identity_check
@@ -23,30 +23,32 @@ class BuildWorkflow:
         self._safety_refusal_message = safety_refusal_message
         self._verification_router = verification_router
 
-    async def run(self, *, request: ChatRequest, history: list[SessionMessage], game_resolution: GameResolution, search_plan: SearchPlan, timings_ms: dict[str, int], agent_trace: list[Any]) -> BuildState:
+    async def run(self, *, request: ChatRequest, history: list[SessionMessage], game_resolution: GameResolution, search_plan: SearchPlan, timings_ms: dict[str, int], agent_trace: list[Any]) -> AnalysisState:
         graph = self._build_graph(request=request, history=history)
         entities = list(dict.fromkeys(alias for group in search_plan.named_entity_groups for alias in group))
         return await graph.ainvoke({
-            "game": game_resolution, "level": "", "stats": [], "equipment": entities,
-            "candidates": entities, "requirements": search_plan.answer_requirements,
+            "game": game_resolution,
+            "mechanic": request.question if search_plan.intent == "game_mechanic" else "",
+            "comparison": entities if len(entities) > 1 else [],
+            "reasoning_requirements": search_plan.answer_requirements,
             "search_plan": search_plan, "evidence": [],
             "investigation": InvestigationState(goal=request.question), "answer": "",
             "timings_ms": timings_ms, "agent_trace": agent_trace,
         })
 
     def _build_graph(self, *, request: ChatRequest, history: list[SessionMessage]):
-        graph = StateGraph(BuildState)
-        async def retrieval_node(state: BuildState):
+        graph = StateGraph(AnalysisState)
+        async def retrieval_node(state: AnalysisState):
             return await retrieve(state, request=request, history=history, retrieve_after_identity_check=self._retrieve_after_identity_check)
-        async def verification_node(state: BuildState):
+        async def verification_node(state: AnalysisState):
             return await verify(state, router=self._verification_router)
-        async def answer_node(state: BuildState):
+        async def answer_node(state: AnalysisState):
             return await answer(state, request=request, history=history, render_answer=self._render_answer, safety_refusal_message=self._safety_refusal_message)
-        graph.add_node("build_retrieval", retrieval_node)
-        graph.add_node("build_verification", verification_node)
-        graph.add_node("build_answer", answer_node)
-        graph.set_entry_point("build_retrieval")
-        graph.add_conditional_edges("build_retrieval", lambda state: next_after_research(state, router=self._verification_router), {"verification": "build_verification", "writer": "build_answer"})
-        graph.add_edge("build_verification", "build_answer")
-        graph.add_edge("build_answer", END)
+        graph.add_node("analysis_retrieval", retrieval_node)
+        graph.add_node("analysis_verification", verification_node)
+        graph.add_node("analysis_answer", answer_node)
+        graph.set_entry_point("analysis_retrieval")
+        graph.add_conditional_edges("analysis_retrieval", lambda state: next_after_research(state, router=self._verification_router), {"verification": "analysis_verification", "writer": "analysis_answer"})
+        graph.add_edge("analysis_verification", "analysis_answer")
+        graph.add_edge("analysis_answer", END)
         return graph.compile()
