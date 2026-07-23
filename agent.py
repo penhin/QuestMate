@@ -32,6 +32,7 @@ from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
 from router import IntentRouter, RouteDecision
 from workflow import WorkflowRouter
+from workflows.guide import GuideWorkflow
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -69,6 +70,12 @@ class QuestAgent:
         self.answer_agent = AnswerAgent(self.llm)
         self.intent_router = IntentRouter()
         self.workflow_router = WorkflowRouter()
+        self.guide_workflow = GuideWorkflow(
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            render_answer=self._render_answer,
+            safety_refusal_message=self._safety_refusal_message,
+            verification_router=self.workflow_router,
+        )
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -76,6 +83,8 @@ class QuestAgent:
             identity_node=self._resolve_game,
             planning_node=self._plan,
             routing_node=self._route,
+            guide_workflow_node=self._run_guide_workflow,
+            task_workflow_router=self._select_task_workflow,
             retrieval_node=self._search,
             verification_node=self._verify,
             workflow_router=self.workflow_router.next_after_research,
@@ -367,6 +376,30 @@ class QuestAgent:
             "agent_trace": [*state["agent_trace"], AgentTrace("workflow_router", route.intent)],
         }
 
+    @staticmethod
+    def _select_task_workflow(state: QuestAgentState) -> str:
+        return state["route"].intent
+
+    async def _run_guide_workflow(self, state: QuestAgentState) -> QuestAgentState:
+        guide_state = await self.guide_workflow.run(
+            request=state["request"],
+            history=state["history"],
+            game_resolution=state["game_resolution"],
+            search_plan=state["search_plan"],
+            timings_ms=state["timings_ms"],
+            agent_trace=state["agent_trace"],
+        )
+        return {
+            **state,
+            "game_resolution": guide_state["game"],
+            "search_plan": guide_state["search_plan"],
+            "sources": guide_state["evidence"],
+            "investigation": guide_state["investigation"],
+            "answer": guide_state["answer"],
+            "timings_ms": guide_state["timings_ms"],
+            "agent_trace": guide_state["agent_trace"],
+        }
+
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
         existing = state.get("game_resolution")
@@ -648,22 +681,40 @@ class QuestAgent:
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         if state["search_plan"].safety_refusal:
             return {**state, "answer": self._safety_refusal_message()}
-        request = state["request"]
         started = perf_counter()
-        answer_kwargs = dict(
-            request=request,
+        answer = await self._render_answer(
+            request=state["request"],
             sources=state["sources"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
             history=state["history"],
+            investigation=state["investigation"],
         )
-        self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", state["investigation"])
-        answer = await self.answer_agent.answer(**answer_kwargs)
         return {**state, "answer": answer, "timings_ms": {
             **state["timings_ms"], "answer": self._elapsed_ms(started)
         }, "agent_trace": [*state["agent_trace"], AgentTrace(
             "answer", "render", len(state["sources"])
         )]}
+
+    async def _render_answer(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+        history: list[SessionMessage],
+        investigation: InvestigationState,
+    ) -> str:
+        answer_kwargs = dict(
+            request=request,
+            sources=sources,
+            plan=plan,
+            game_resolution=game_resolution,
+            history=history,
+        )
+        self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", investigation)
+        return await self.answer_agent.answer(**answer_kwargs)
 
     async def _verify(self, state: QuestAgentState) -> QuestAgentState:
         """Checkpoint required by verification-oriented workflows.
