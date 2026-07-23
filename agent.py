@@ -250,11 +250,20 @@ class QuestAgent:
             provider_scope = getattr(self.llm, "provider_scope", None)
             if callable(provider_scope):
                 async with provider_scope(request):
-                    async for event in self._stream(request):
+                    async for event in self._stream_in_runtime(request):
                         yield event
                 return
-            async for event in self._stream(request):
+            async for event in self._stream_in_runtime(request):
                 yield event
+
+    async def _stream_in_runtime(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
+        user_id = request.metadata.get("user_id")
+        async for event in self.runtime.stream(
+            user_id=user_id if isinstance(user_id, str) else None,
+            tools={"search": self.search_provider, "knowledge": self.knowledge},
+            operation=lambda: self._stream(request),
+        ):
+            yield event
 
     async def _stream(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
         started = perf_counter()
