@@ -14,6 +14,7 @@ def build_request_graph(
     planning_node: Callable[..., Any],
     routing_node: Callable[..., Any] | None = None,
     guide_workflow_node: Callable[..., Any] | None = None,
+    build_workflow_node: Callable[..., Any] | None = None,
     task_workflow_router: Callable[..., str] | None = None,
     retrieval_node: Callable[..., Any],
     answer_node: Callable[..., Any],
@@ -27,26 +28,27 @@ def build_request_graph(
         graph.add_node("workflow_router", routing_node)
     if guide_workflow_node is not None:
         graph.add_node("guide_workflow", guide_workflow_node)
+    if build_workflow_node is not None:
+        graph.add_node("build_workflow", build_workflow_node)
     graph.add_node("retrieval_evidence_agents", retrieval_node)
     if verification_node is not None:
         graph.add_node("verification_agent", verification_node)
     graph.add_node("answer_agent", answer_node)
     graph.set_entry_point("identity_agent")
     graph.add_edge("identity_agent", "planning_agent")
-    if routing_node is not None and guide_workflow_node is not None and task_workflow_router is not None:
+    if routing_node is not None and guide_workflow_node is not None and build_workflow_node is not None and task_workflow_router is not None:
         graph.add_edge("planning_agent", "workflow_router")
         graph.add_conditional_edges(
             "workflow_router",
             task_workflow_router,
             {
                 "guide": "guide_workflow",
-                # Build and analysis remain on the proven common path until
-                # their task graphs are introduced in subsequent commits.
-                "build": "retrieval_evidence_agents",
+                "build": "build_workflow",
                 "analysis": "retrieval_evidence_agents",
             },
         )
         graph.add_edge("guide_workflow", END)
+        graph.add_edge("build_workflow", END)
     elif routing_node is not None:
         graph.add_edge("planning_agent", "workflow_router")
         graph.add_edge("workflow_router", "retrieval_evidence_agents")

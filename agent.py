@@ -33,6 +33,7 @@ from orchestration import status as orchestration_status
 from router import IntentRouter, RouteDecision
 from workflow import WorkflowRouter
 from workflows.guide import GuideWorkflow
+from workflows.build import BuildWorkflow
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -76,6 +77,12 @@ class QuestAgent:
             safety_refusal_message=self._safety_refusal_message,
             verification_router=self.workflow_router,
         )
+        self.build_workflow = BuildWorkflow(
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            render_answer=self._render_answer,
+            safety_refusal_message=self._safety_refusal_message,
+            verification_router=self.workflow_router,
+        )
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -84,6 +91,7 @@ class QuestAgent:
             planning_node=self._plan,
             routing_node=self._route,
             guide_workflow_node=self._run_guide_workflow,
+            build_workflow_node=self._run_build_workflow,
             task_workflow_router=self._select_task_workflow,
             retrieval_node=self._search,
             verification_node=self._verify,
@@ -398,6 +406,19 @@ class QuestAgent:
             "answer": guide_state["answer"],
             "timings_ms": guide_state["timings_ms"],
             "agent_trace": guide_state["agent_trace"],
+        }
+
+    async def _run_build_workflow(self, state: QuestAgentState) -> QuestAgentState:
+        build_state = await self.build_workflow.run(
+            request=state["request"], history=state["history"],
+            game_resolution=state["game_resolution"], search_plan=state["search_plan"],
+            timings_ms=state["timings_ms"], agent_trace=state["agent_trace"],
+        )
+        return {
+            **state, "game_resolution": build_state["game"],
+            "search_plan": build_state["search_plan"], "sources": build_state["evidence"],
+            "investigation": build_state["investigation"], "answer": build_state["answer"],
+            "timings_ms": build_state["timings_ms"], "agent_trace": build_state["agent_trace"],
         }
 
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
