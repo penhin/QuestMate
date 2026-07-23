@@ -24,7 +24,8 @@ def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
 
     assert {
         "identity_agent", "planning_agent", "retrieval_evidence_agents",
-        "workflow_router", "verification_agent", "answer_agent",
+        "workflow_router", "guide_workflow", "build_workflow", "analysis_workflow",
+        "verification_agent", "answer_agent",
     } <= set(graph.nodes)
 
 
@@ -65,6 +66,14 @@ def test_intent_router_emits_typed_task_workflow_decision() -> None:
         },
         "search_intent": "build",
     }
+
+
+def test_intent_router_maps_guide_and_analysis_intents_without_raw_question_rules() -> None:
+    router = IntentRouter()
+    game = GameResolution(input_name="Example Adventure")
+
+    assert router.route(plan=SearchPlan(intent="quest_step"), game_resolution=game).intent == "guide"
+    assert router.route(plan=SearchPlan(intent="game_mechanic"), game_resolution=game).intent == "analysis"
 
 
 async def test_evidence_agent_falls_back_to_legacy_refinement_contract() -> None:
