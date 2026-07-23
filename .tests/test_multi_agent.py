@@ -1,6 +1,8 @@
 from agent import QuestAgent
 from multi_agent import AnswerAgent, EvidenceAgent
-from schemas import ChatRequest, SearchPlan
+from schemas import ChatRequest, GameResolution, SearchPlan
+from router import IntentRouter
+from workflow import WorkflowKind, WorkflowRouter
 
 
 def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
@@ -20,7 +22,49 @@ def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
 
     graph = QuestAgent(search_provider=Search(), llm=LLM()).graph.get_graph()
 
-    assert {"identity_agent", "planning_agent", "retrieval_evidence_agents", "answer_agent"} <= set(graph.nodes)
+    assert {
+        "identity_agent", "planning_agent", "retrieval_evidence_agents",
+        "workflow_router", "verification_agent", "answer_agent",
+    } <= set(graph.nodes)
+
+
+def test_workflow_router_adds_verification_only_for_complex_evidence_paths() -> None:
+    router = WorkflowRouter()
+
+    assert router.classify(SearchPlan(intent="item_location")) is WorkflowKind.EVIDENCE_RESEARCH
+    assert router.classify(SearchPlan(intent="patch", version_sensitive=True)) is WorkflowKind.VERIFIED_RESEARCH
+    assert router.classify(SearchPlan(
+        intent="general", named_entity_groups=[["A"], ["B"]],
+    )) is WorkflowKind.VERIFIED_RESEARCH
+
+
+def test_intent_router_emits_typed_task_workflow_decision() -> None:
+    decision = IntentRouter().route(
+        plan=SearchPlan(
+            intent="build",
+            version_sensitive=True,
+            named_entity_groups=[["Moonblade", "月刃"]],
+            answer_requirements=["recommend a build"],
+        ),
+        game_resolution=GameResolution(
+            input_name="Example Adventure", confirmed_name="Example Adventure"
+        ),
+    )
+
+    assert decision.model_dump() == {
+        "intent": "build",
+        "confidence": 0.9,
+        "game": "Example Adventure",
+        "entities": ["Moonblade", "月刃"],
+        "constraints": {
+            "version_sensitive": True,
+            "requires_relation_verification": False,
+            "safety_refusal": False,
+            "answer_requirements": ["recommend a build"],
+            "missing_info": [],
+        },
+        "search_intent": "build",
+    }
 
 
 async def test_evidence_agent_falls_back_to_legacy_refinement_contract() -> None:

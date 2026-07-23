@@ -129,6 +129,16 @@ artifacts such as `GameResolution`, `SearchPlan`, `Source`, and
 `InvestigationState`; they cannot invoke one another or expand search/model
 budgets. The orchestrator records aggregate-safe hand-off counts for evaluation.
 
+在 Planning 之后，Workflow Router 只依据结构化 `SearchPlan` 选择执行链：普通证据问题走
+`Resolver → Planner → Researcher → Writer`；版本敏感、关系核验或多实体问题额外经过
+`Verifier`。Router 不读取原始提示词来猜测任务，也不扩大模型或检索预算。
+
+After Planning, the Workflow Router selects a chain solely from the typed
+`SearchPlan`: ordinary evidence requests follow `Resolver → Planner → Researcher
+→ Writer`; version-sensitive, relation-verification, or multi-entity requests
+also pass through `Verifier`. The router does not infer work from raw prompts or
+expand model and retrieval budgets.
+
 实时搜索会组合定向来源查询与不含 `site:` 的开放查询，避免固定资料站占满预算。证据
 按游戏身份、问题实体、直接支持程度、来源弱先验和版本信息重排；未知站点只要直接
 支持问题，也可进入高质量来源池。
@@ -221,6 +231,7 @@ evaluation instances only; production ignores client-supplied aliases and site h
 - `retrieval/pipeline.py`：段落候选融合、去重与最终证据池重排 / passage fusion, deduplication, and final evidence-pool reranking.
 - `agents/`：受控专家 agent、身份解析与兼容适配 / bounded specialists, identity resolution, and compatibility adapters.
 - `orchestration/`：LangGraph、请求状态和评测诊断 / graph construction, request state, and evaluation diagnostics.
+- `workflow/router.py`：基于 SearchPlan 的 Workflow Router 与执行链分类 / SearchPlan-driven workflow routing and execution-chain classification.
 - `retrieval/artifacts.py`：检索阶段交接模型 / typed retrieval hand-off artifacts.
 - `ai/`：证据策略、调查状态提示词压缩、计划解析/清洗与引用渲染 / evidence policy, bounded investigation context, plan parsing/sanitization, and citation rendering.
 - `identity_components/`：身份置信度、候选归一化、URL 校验与不透明选项确认 / identity confidence, candidate normalization, URL validation, and opaque selection confirmation.

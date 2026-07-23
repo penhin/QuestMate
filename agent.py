@@ -30,6 +30,8 @@ from orchestration.diagnostics import evaluation_diagnostics
 from orchestration.graph import build_request_graph
 from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
+from router import IntentRouter, RouteDecision
+from workflow import WorkflowRouter
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -65,13 +67,18 @@ class QuestAgent:
         self.planning_agent = PlanningAgent(self.llm)
         self.retrieval_agent = RetrievalAgent(self._retrieve_after_identity_check)
         self.answer_agent = AnswerAgent(self.llm)
+        self.intent_router = IntentRouter()
+        self.workflow_router = WorkflowRouter()
         self.graph = self._build_graph()
 
     def _build_graph(self):
         return build_request_graph(
             identity_node=self._resolve_game,
             planning_node=self._plan,
+            routing_node=self._route,
             retrieval_node=self._search,
+            verification_node=self._verify,
+            workflow_router=self.workflow_router.next_after_research,
             answer_node=self._answer,
         )
 
@@ -127,6 +134,7 @@ class QuestAgent:
                 "history": history,
                 "game_resolution": GameResolution(input_name=request.game),
                 "search_plan": SearchPlan(),
+                "route": RouteDecision(),
                 "sources": [],
                 "investigation": InvestigationState(goal=request.question),
                 "answer": "",
@@ -240,6 +248,7 @@ class QuestAgent:
             request=request, history=history, game_resolution=game_resolution
         )
         timings_ms["planning"] = self._elapsed_ms(planning_started)
+        route = self.intent_router.route(plan=search_plan, game_resolution=game_resolution)
 
         if search_plan.safety_refusal:
             response = ChatResponse(
@@ -254,6 +263,7 @@ class QuestAgent:
             return
 
         yield ("status", self._status_for_search(search_plan))
+        yield ("status", self._status_for_route(route))
         outcome, game_resolution = await self.retrieval_agent.investigate(
             request=request,
             history=history,
@@ -341,6 +351,21 @@ class QuestAgent:
         return {**state, "search_plan": search_plan, "timings_ms": {
             **state["timings_ms"], "planning": self._elapsed_ms(started)
         }, "agent_trace": [*state["agent_trace"], AgentTrace("planning", "plan")]}
+
+    async def _route(self, state: QuestAgentState) -> QuestAgentState:
+        """Create the typed task-workflow hand-off after planning.
+
+        Phase 1 keeps the existing retrieval graph intact.  Subsequent phases
+        replace its common tail with the selected task graph.
+        """
+        route = self.intent_router.route(
+            plan=state["search_plan"], game_resolution=state["game_resolution"]
+        )
+        return {
+            **state,
+            "route": route,
+            "agent_trace": [*state["agent_trace"], AgentTrace("workflow_router", route.intent)],
+        }
 
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
@@ -640,6 +665,21 @@ class QuestAgent:
             "answer", "render", len(state["sources"])
         )]}
 
+    async def _verify(self, state: QuestAgentState) -> QuestAgentState:
+        """Checkpoint required by verification-oriented workflows.
+
+        Evidence policies remain deterministic and answer-side enforcement
+        stays in ``GuideLLM``; this node makes that verification boundary an
+        explicit, inspectable execution step.
+        """
+        workflow = self.workflow_router.classify(state["search_plan"])
+        return {
+            **state,
+            "agent_trace": [*state["agent_trace"], AgentTrace(
+                "verification", workflow.value, len(state["sources"])
+            )],
+        }
+
     @staticmethod
     def _safety_refusal_message() -> str:
         return "我不能协助绕过安全限制、获取受保护信息或实施不当行为。可以继续回答正常的游戏攻略问题。"
@@ -737,6 +777,15 @@ class QuestAgent:
     @staticmethod
     def _status_for_search(search_plan: SearchPlan) -> str:
         return orchestration_status.search(search_plan)
+
+    @staticmethod
+    def _status_for_route(route: RouteDecision) -> str:
+        labels = {
+            "guide": "任务工作流：攻略与路线",
+            "build": "任务工作流：配装与属性",
+            "analysis": "任务工作流：机制与分析",
+        }
+        return labels[route.intent]
 
     @staticmethod
     def _status_for_game_resolution(game_resolution: GameResolution) -> str:
