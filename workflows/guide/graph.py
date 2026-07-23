@@ -12,6 +12,7 @@ from workflows.guide.nodes.answer import answer
 from workflows.guide.nodes.retrieval import retrieve
 from workflows.guide.nodes.verification import next_after_research, verify
 from workflows.guide.state import GuideState
+from workflows.streaming import stream_workflow_answer
 
 
 class GuideWorkflow:
@@ -53,6 +54,27 @@ class GuideWorkflow:
             "timings_ms": timings_ms,
             "agent_trace": agent_trace,
         })
+
+    async def stream(self, **kwargs: Any) -> Any:
+        request: ChatRequest = kwargs["request"]
+        history: list[SessionMessage] = kwargs["history"]
+        search_plan: SearchPlan = kwargs["search_plan"]
+        state: GuideState = {
+            "game": kwargs["game_resolution"],
+            "quest": request.question if search_plan.intent == "quest_step" else "",
+            "location": request.question if search_plan.intent in {"item_location", "item_usage"} else "",
+            "requirements": search_plan.answer_requirements, "search_plan": search_plan,
+            "evidence": [], "investigation": InvestigationState(goal=request.question), "answer": "",
+            "timings_ms": kwargs["timings_ms"], "agent_trace": kwargs["agent_trace"],
+        }
+        async for event in stream_workflow_answer(
+            state=state, request=request, history=history,
+            retrieve_node=retrieve, verify_node=verify, stream_answer=kwargs["stream_answer"],
+            safety_refusal_message=self._safety_refusal_message,
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            verification_router=self._verification_router, workflow_name="guide",
+        ):
+            yield event
 
     def _build_graph(self, *, request: ChatRequest, history: list[SessionMessage]):
         graph = StateGraph(GuideState)

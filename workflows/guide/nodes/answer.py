@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from time import perf_counter
 
 from agents import AgentTrace
+from runtime import active_context
 from schemas import ChatRequest, SessionMessage
 from workflows.guide.state import GuideState
 
@@ -27,7 +28,7 @@ async def answer(
         history=history,
         investigation=state["investigation"],
     )
-    return {
+    result = {
         **state,
         "answer": rendered,
         "timings_ms": {**state["timings_ms"], "answer": round((perf_counter() - started) * 1000)},
@@ -35,3 +36,6 @@ async def answer(
             "guide_answer", "render", len(state["evidence"])
         )],
     }
+    if context := active_context():
+        context.trace.record("node.answer", started)
+    return result

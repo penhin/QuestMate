@@ -332,18 +332,39 @@ class QuestAgent:
         is_new_session: bool,
     ) -> AsyncIterator[AgentStreamEvent]:
         runners = {
-            "guide": self.guide_workflow.run,
-            "build": self.build_workflow.run,
-            "analysis": self.analysis_workflow.run,
+            "guide": self.guide_workflow.stream,
+            "build": self.build_workflow.stream,
+            "analysis": self.analysis_workflow.stream,
         }
-        workflow_state = await runners[route.intent](
+        workflow_state = None
+        async for event_type, payload in runners[route.intent](
             request=request,
             history=history,
             game_resolution=game_resolution,
             search_plan=search_plan,
             timings_ms=timings_ms,
             agent_trace=[],
-        )
+            stream_answer=self._stream_answer,
+        ):
+            if event_type == "chunk":
+                yield ("chunk", payload)
+            elif event_type == "state":
+                workflow_state = payload
+                sources = workflow_state["evidence"]
+                if self._needs_game_confirmation(workflow_state["game"]):
+                    yield ("done", ChatResponse(
+                        session_id=request.session_id or uuid4(),
+                        answer=self._game_confirmation_message(workflow_state["game"]),
+                        sources=[], is_new=is_new_session, needs_game_confirmation=True,
+                        game_candidates=workflow_state["game"].candidates,
+                        timings_ms=workflow_state["timings_ms"],
+                    ))
+                    return
+                yield ("status", self._status_for_sources(sources))
+            elif event_type == "result":
+                workflow_state = payload
+        if workflow_state is None:
+            raise RuntimeError("Task workflow completed without an execution state")
         resolved_game = workflow_state["game"]
         sources = workflow_state["evidence"]
         if self._needs_game_confirmation(resolved_game):
@@ -359,8 +380,6 @@ class QuestAgent:
             return
         yield ("status", self._status_for_sources(sources))
         answer = workflow_state["answer"]
-        if answer:
-            yield ("chunk", answer)
         response = ChatResponse(
             session_id=request.session_id or uuid4(),
             answer=answer,
@@ -764,6 +783,26 @@ class QuestAgent:
         )
         self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", investigation)
         return await self.answer_agent.answer(**answer_kwargs)
+
+    async def _stream_answer(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+        history: list[SessionMessage],
+        investigation: InvestigationState,
+    ) -> AsyncIterator[str]:
+        stream_kwargs = dict(
+            request=request, sources=sources, plan=plan,
+            game_resolution=game_resolution, history=history,
+        )
+        self._add_optional_argument(
+            self.answer_agent.stream_answer, stream_kwargs, "investigation", investigation
+        )
+        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
+            yield chunk
 
     async def _verify(self, state: QuestAgentState) -> QuestAgentState:
         """Checkpoint required by verification-oriented workflows.

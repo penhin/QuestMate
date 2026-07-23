@@ -12,6 +12,7 @@ from workflows.analysis.nodes.answer import answer
 from workflows.analysis.nodes.retrieval import retrieve
 from workflows.analysis.nodes.verification import next_after_research, verify
 from workflows.analysis.state import AnalysisState
+from workflows.streaming import stream_workflow_answer
 
 
 class AnalysisWorkflow:
@@ -35,6 +36,28 @@ class AnalysisWorkflow:
             "investigation": InvestigationState(goal=request.question), "answer": "",
             "timings_ms": timings_ms, "agent_trace": agent_trace,
         })
+
+    async def stream(self, **kwargs: Any) -> Any:
+        request: ChatRequest = kwargs["request"]
+        history: list[SessionMessage] = kwargs["history"]
+        plan: SearchPlan = kwargs["search_plan"]
+        entities = list(dict.fromkeys(alias for group in plan.named_entity_groups for alias in group))
+        state: AnalysisState = {
+            "game": kwargs["game_resolution"],
+            "mechanic": request.question if plan.intent == "game_mechanic" else "",
+            "comparison": entities if len(entities) > 1 else [],
+            "reasoning_requirements": plan.answer_requirements, "search_plan": plan,
+            "evidence": [], "investigation": InvestigationState(goal=request.question), "answer": "",
+            "timings_ms": kwargs["timings_ms"], "agent_trace": kwargs["agent_trace"],
+        }
+        async for event in stream_workflow_answer(
+            state=state, request=request, history=history,
+            retrieve_node=retrieve, verify_node=verify, stream_answer=kwargs["stream_answer"],
+            safety_refusal_message=self._safety_refusal_message,
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            verification_router=self._verification_router, workflow_name="analysis",
+        ):
+            yield event
 
     def _build_graph(self, *, request: ChatRequest, history: list[SessionMessage]):
         graph = StateGraph(AnalysisState)
