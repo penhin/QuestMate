@@ -299,78 +299,66 @@ class QuestAgent:
 
         yield ("status", self._status_for_search(search_plan))
         yield ("status", self._status_for_route(route))
-        outcome, game_resolution = await self.retrieval_agent.investigate(
+        async for event in self._stream_task_workflow(
             request=request,
             history=history,
-            plan=search_plan,
             game_resolution=game_resolution,
+            search_plan=search_plan,
+            route=route,
             timings_ms=timings_ms,
-        )
-        sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
+            is_new_session=is_new_session,
+        ):
+            yield event
+        return
 
-        game_resolution = await self.identity_agent.recover(
+    async def _stream_task_workflow(
+        self,
+        *,
+        request: ChatRequest,
+        history: list[SessionMessage],
+        game_resolution: GameResolution,
+        search_plan: SearchPlan,
+        route: RouteDecision,
+        timings_ms: dict[str, int],
+        is_new_session: bool,
+    ) -> AsyncIterator[AgentStreamEvent]:
+        runners = {
+            "guide": self.guide_workflow.run,
+            "build": self.build_workflow.run,
+            "analysis": self.analysis_workflow.run,
+        }
+        workflow_state = await runners[route.intent](
             request=request,
-            sources=sources,
-            current=game_resolution,
+            history=history,
+            game_resolution=game_resolution,
+            search_plan=search_plan,
+            timings_ms=timings_ms,
+            agent_trace=[],
         )
-        if self._needs_game_confirmation(game_resolution):
-            response = ChatResponse(
-                session_id=session_id,
-                answer=self._game_confirmation_message(game_resolution),
+        resolved_game = workflow_state["game"]
+        sources = workflow_state["evidence"]
+        if self._needs_game_confirmation(resolved_game):
+            yield ("done", ChatResponse(
+                session_id=request.session_id or uuid4(),
+                answer=self._game_confirmation_message(resolved_game),
                 sources=[],
-                title=None,
                 is_new=is_new_session,
                 needs_game_confirmation=True,
-                game_candidates=game_resolution.candidates,
-                timings_ms=timings_ms,
-            )
-            yield ("done", response)
+                game_candidates=resolved_game.candidates,
+                timings_ms=workflow_state["timings_ms"],
+            ))
             return
-
-        if refined:
-            yield ("status", "证据扩展：已针对关键证据缺口补查")
         yield ("status", self._status_for_sources(sources))
-        yield ("status", "整理答案：保留来源，核对版本")
-        chunks: list[str] = []
-        answer_started = perf_counter()
-        stream_kwargs = dict(
-            request=request,
-            sources=sources,
-            plan=search_plan,
-            game_resolution=game_resolution,
-            history=history,
-        )
-        self._add_optional_argument(
-            self.answer_agent.stream_answer, stream_kwargs, "investigation", outcome.investigation
-        )
-        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
-            chunks.append(chunk)
-            yield ("chunk", chunk)
-
-        answer = "".join(chunks)
-        timings_ms["answer"] = self._elapsed_ms(answer_started)
-        improve_kwargs = dict(
-            request=request,
-            sources=sources,
-            answer=answer,
-            plan=search_plan,
-            game_resolution=game_resolution,
-            history=history,
-        )
-        self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", outcome.investigation)
-        improvement_started = perf_counter()
-        improved_answer = await self.llm.improve_answer(**improve_kwargs)
-        timings_ms["improvement"] = self._elapsed_ms(improvement_started)
-        if improved_answer != answer:
-            answer = improved_answer
-        title = self._initial_title(request) if is_new_session else None
+        answer = workflow_state["answer"]
+        if answer:
+            yield ("chunk", answer)
         response = ChatResponse(
-            session_id=session_id,
+            session_id=request.session_id or uuid4(),
             answer=answer,
             sources=sources,
-            title=title,
+            title=self._initial_title(request) if is_new_session else None,
             is_new=is_new_session,
-            timings_ms=timings_ms,
+            timings_ms=workflow_state["timings_ms"],
         )
         await conversation_store.save_chat(request, response)
         yield ("done", response)
