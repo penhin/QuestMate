@@ -31,6 +31,7 @@ from orchestration.graph import build_request_graph
 from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
 from router import IntentRouter, RouteDecision
+from runtime import QuestRuntime
 from workflow import WorkflowRouter
 from workflows.guide import GuideWorkflow
 from workflows.build import BuildWorkflow
@@ -71,6 +72,7 @@ class QuestAgent:
         self.retrieval_agent = RetrievalAgent(self._retrieve_after_identity_check)
         self.answer_agent = AnswerAgent(self.llm)
         self.intent_router = IntentRouter()
+        self.runtime = QuestRuntime()
         self.workflow_router = WorkflowRouter()
         self.guide_workflow = GuideWorkflow(
             retrieve_after_identity_check=self._retrieve_after_identity_check,
@@ -112,8 +114,16 @@ class QuestAgent:
             provider_scope = getattr(self.llm, "provider_scope", None)
             if callable(provider_scope):
                 async with provider_scope(request):
-                    return await self._run_with_timeout(request)
-            return await self._run_with_timeout(request)
+                    return await self._run_in_runtime(request)
+            return await self._run_in_runtime(request)
+
+    async def _run_in_runtime(self, request: ChatRequest) -> ChatResponse:
+        user_id = request.metadata.get("user_id")
+        return await self.runtime.execute(
+            user_id=user_id if isinstance(user_id, str) else None,
+            tools={"search": self.search_provider, "knowledge": self.knowledge},
+            operation=lambda: self._run_with_timeout(request),
+        )
 
     async def _run_with_timeout(self, request: ChatRequest) -> ChatResponse:
         """Keep a stalled upstream from consuming an unbounded user request."""
