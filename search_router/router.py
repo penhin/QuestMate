@@ -1,5 +1,6 @@
 """Deterministic SearXNG-first routing over existing evidence contracts."""
 
+import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable
 from typing import Any
@@ -65,9 +66,13 @@ class SearchRouter:
                     database_domains=tuple(game_resolution.database_domains),
                     game_aliases=tuple(game_resolution.aliases),
                 )
-                results: list[Source] = []
-                for search_query, _policy in queries[:self.settings.searxng_max_queries_per_request]:
-                    results.extend(await self.searxng.search(search_query, max_results=max_results))
+                responses = await asyncio.gather(
+                    *(
+                        self.searxng.search(search_query, max_results=max_results)
+                        for search_query, _policy in queries[:self.settings.searxng_max_queries_per_request]
+                    )
+                )
+                results = [source for response in responses for source in response]
                 merged = self._dedupe([*direct, *results])[:max_results]
                 if len(merged) >= min(PROGRESSIVE_STRICT_SOURCE_TARGET, max_results) or results:
                     self.health.succeeded("searxng")

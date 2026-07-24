@@ -27,6 +27,7 @@ class SearxngProvider:
             response = await client.get(
                 f"{self.base_url}/search",
                 params={"q": query, "format": "json", "language": "all"},
+                headers={"X-Forwarded-For": "127.0.0.1"},
             )
             response.raise_for_status()
         selected: list[Source] = []

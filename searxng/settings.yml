@@ -1,0 +1,11 @@
+use_default_settings: true
+
+server:
+  secret_key: "questmate-local-searxng-development-key"
+  limiter: false
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json

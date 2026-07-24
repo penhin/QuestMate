@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     custom_model_endpoint_hosts: str = ""
 
     tavily_api_key: str = ""
-    searxng_base_url: str = ""
+    searxng_base_url: str = "http://127.0.0.1:8080"
     searxng_timeout_seconds: int = Field(default=12, ge=3, le=60)
     searxng_max_queries_per_request: int = Field(default=3, ge=1, le=4)
     search_provider_cooldown_seconds: int = Field(default=120, ge=5, le=3600)
