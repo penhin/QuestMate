@@ -43,12 +43,12 @@ async def test_initial_context_uses_cached_verified_wiki_profile() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initial_context_discovers_profile_when_cache_misses() -> None:
+async def test_initial_context_starts_without_discovery_when_cache_misses() -> None:
     provider = _Provider()
 
     resolution = await IdentityResolver(provider).initial_context(
         ChatRequest(game="艾尔登法环", question="菈妮支线步骤")
     )
 
-    assert resolution.aliases == ["Elden Ring"]
-    assert provider.resolve_calls == 1
+    assert resolution.confirmed_name == "艾尔登法环"
+    assert provider.resolve_calls == 0

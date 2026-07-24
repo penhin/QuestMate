@@ -59,21 +59,15 @@ class IdentityResolver:
     async def initial_context(self, request: ChatRequest) -> GameResolution:
         if request.metadata.get("confirmed_game") is True or request.metadata.get("selected_game_url"):
             return await self.resolve_request_game(request)
-        # A player-selected game name is sufficient to start a conversation,
-        # but it is not enough to know which game wiki can be queried. Reuse a
-        # server-verified profile first; otherwise resolve once and persist the
-        # result so later requests do not repeatedly spend discovery budget.
+        # Reuse a server-verified profile when available. A normal player
+        # selection still starts immediately when the registry has no match:
+        # identity discovery is not allowed to consume the entire interactive
+        # request budget before retrieval begins.
         cached_resolution = getattr(self.search_provider, "get_cached_game_resolution", None)
         if callable(cached_resolution):
             cached = await cached_resolution(request.game)
             if cached is not None and cached.is_confirmed and not cached.ambiguous:
                 return cached
-        discovered = await self.resolve_request_game(request)
-        if discovered.is_confirmed or discovered.ambiguous or discovered.candidates:
-            return discovered
-        # A transient identity-search failure must not make an ordinary chat
-        # request unusable. Retrieval will remain conservative without known
-        # database domains and can recover identity later if it finds nothing.
         return GameResolution(input_name=request.game, confirmed_name=request.game, confidence=1)
 
     async def recover_if_needed(

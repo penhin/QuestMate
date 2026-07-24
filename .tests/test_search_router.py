@@ -12,7 +12,11 @@ def source(url: str) -> Source:
 
 
 class Wiki:
+    def __init__(self):
+        self.database_domains = []
+
     async def search(self, **_kwargs):
+        self.database_domains = _kwargs["database_domains"]
         return []
 
 
@@ -117,3 +121,27 @@ async def test_tavily_adapter_accepts_only_explicit_provider_contract() -> None:
         plan=SearchPlan(), game_resolution=GameResolution(input_name="Example Adventure"),
     )
     assert str(results[0].url) == "https://tavily.example/moon-key"
+
+
+@pytest.mark.asyncio
+async def test_router_derives_capability_probed_wiki_candidates_from_english_plan() -> None:
+    wiki = Wiki()
+    routed = SearchRouter(
+        mediawiki=MediaWikiProvider(wiki),
+        searxng=Searx(),
+        tavily=tavily_provider(),
+        build_queries=lambda **_kwargs: [("Elden Ring Ranni questline", None)],
+        settings=settings(),
+    )
+
+    await routed.search(
+        query="菈妮支线步骤", game="艾尔登法环", max_results=2,
+        plan=SearchPlan(
+            aliases=["Ranni"],
+            queries=[{"source_type": "wiki", "query": "Elden Ring Ranni questline"}],
+        ),
+        game_resolution=GameResolution(input_name="艾尔登法环", confirmed_name="艾尔登法环", confidence=1),
+    )
+
+    assert "eldenring.fandom.com" in wiki.database_domains
+    assert "eldenring.wiki.gg" in wiki.database_domains

@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 from collections.abc import Callable
+import re
 from typing import Any
 
 import structlog
@@ -48,11 +49,15 @@ class SearchRouter:
         intent = plan.intent if plan else "general"
         aliases = list((plan.aliases if plan else [])[:6])
         entities = list((plan.named_entity_groups if plan else [])[:4])
+        database_domains = list(dict.fromkeys([
+            *game_resolution.database_domains,
+            *self._planned_wiki_domains(plan),
+        ]))
         direct = await self.mediawiki.search(
             game=game, question=query, aliases=aliases,
             planned_queries=[item.query for item in (plan.queries if plan else [])],
             game_aliases=game_resolution.aliases,
-            database_domains=list(game_resolution.database_domains), max_results=max_results,
+            database_domains=database_domains, max_results=max_results,
             named_entity_groups=entities,
         )
         enough = len(direct) >= min(PROGRESSIVE_STRICT_SOURCE_TARGET, max_results)
@@ -103,6 +108,39 @@ class SearchRouter:
             cache_eligible=True, budget_remaining=budget_remaining,
         )
         logger.info("search_router.decision", provider=provider, reason=reason, budget_remaining=budget_remaining)
+
+    @staticmethod
+    def _planned_wiki_domains(plan: SearchPlan | None) -> list[str]:
+        """Derive capability-probed wiki candidates from a planner's English route.
+
+        Localized game names are often absent from a previously learned source
+        registry.  The planner already produces a translated entity query such
+        as ``Elden Ring Ranni questline``.  When an entity alias marks the end
+        of its leading Latin game title, try the common hosted-wiki domains.
+        They remain untrusted until MediaWiki capability and evidence checks
+        succeed inside ``MediaWikiRetriever``.
+        """
+        if plan is None:
+            return []
+        domains: list[str] = []
+        aliases = [alias for alias in plan.aliases if alias.strip()]
+        for planned in plan.queries:
+            if planned.source_type != "wiki":
+                continue
+            query = planned.query.strip()
+            for alias in aliases:
+                match = re.search(re.escape(alias), query, flags=re.IGNORECASE)
+                if match is None:
+                    continue
+                prefix = query[:match.start()].strip(" -:：|/()[]")
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .:'’_-]{1,72}", prefix):
+                    continue
+                slug = re.sub(r"[^a-z0-9]", "", prefix.casefold())
+                if not 4 <= len(slug) <= 48:
+                    continue
+                domains.extend([f"{slug}.fandom.com", f"{slug}.wiki.gg"])
+                break
+        return list(dict.fromkeys(domains))[:4]
 
     @staticmethod
     def _dedupe(sources: list[Source]) -> list[Source]:
