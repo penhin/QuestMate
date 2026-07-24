@@ -14,6 +14,31 @@ from schemas import ChatRequest, CitationClaim, SearchPlan, Source
 
 
 logger = structlog.get_logger()
+_CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+
+
+def order_citations_by_appearance(answer: str, sources: list[Source]) -> tuple[str, list[Source]]:
+    """Renumber citations and sources in the order a player encounters them."""
+    encountered = [
+        int(match.group(1))
+        for match in _CITATION_PATTERN.finditer(answer)
+        if 1 <= int(match.group(1)) <= len(sources)
+    ]
+    ordered_indexes = list(dict.fromkeys(encountered))
+    if not ordered_indexes:
+        return answer, sources
+    remap = {source_index: display_index for display_index, source_index in enumerate(ordered_indexes, start=1)}
+
+    def replace(match: re.Match[str]) -> str:
+        source_index = int(match.group(1))
+        return f"[{remap[source_index]}]" if source_index in remap else match.group(0)
+
+    ordered_sources = [sources[index - 1] for index in ordered_indexes]
+    ordered_sources.extend(
+        source for index, source in enumerate(sources, start=1)
+        if index not in remap
+    )
+    return _CITATION_PATTERN.sub(replace, answer), ordered_sources
 
 
 def claim_entity_groups(*, request: ChatRequest, plan: SearchPlan | None) -> list[list[str]]:

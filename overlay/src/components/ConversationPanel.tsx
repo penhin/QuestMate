@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 
 import type { GameCandidate } from "../api";
 import type { OverlayMode } from "../tauri";
@@ -18,6 +18,17 @@ type Props = {
   onRejectGames: (pendingQuestion?: string) => void;
 };
 
+function renderMessageContent(content: string, sources?: Message["sources"]): ReactNode[] {
+  return content.split(/(\[\d+\])/g).map((part, index) => {
+    const match = /^\[(\d+)\]$/.exec(part);
+    const source = match ? sources?.[Number(match[1]) - 1] : undefined;
+    if (!source || !match) {
+      return part;
+    }
+    return <sup key={`${source.url}-${index}`} className="citation"><a href={source.url} target="_blank" rel="noreferrer" aria-label={`来源 ${match[1]}`}>{match[1]}</a></sup>;
+  });
+}
+
 export function ConversationPanel(props: Props) {
   const { messages, error, question, game, loading, mode, text } = props;
   return (
@@ -35,7 +46,7 @@ export function ConversationPanel(props: Props) {
                   })}
                 </ol>
               </section>
-            ) : <p>{message.content}</p>}
+            ) : <p>{renderMessageContent(message.content, message.sources)}</p>}
             {message.gameCandidates && message.gameCandidates.length > 0 && (
               <div className="game-candidates" aria-label={text.chooseGame}>
                 <span>{text.chooseGame}</span>

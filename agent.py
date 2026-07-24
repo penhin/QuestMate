@@ -16,6 +16,7 @@ from retrieval.evidence_pool import canonical_source_url, merge_source_evidence,
 from retrieval.pipeline import RetrievalStage
 from retrieval.source_quality import matches_game_identity
 from ai.fallback_planning import fallback_search_plan
+from ai.citation_rendering import order_citations_by_appearance
 from agents import (
     AgentTrace,
     AnswerAgent,
@@ -756,7 +757,8 @@ class QuestAgent:
             history=state["history"],
             investigation=state["investigation"],
         )
-        return {**state, "answer": answer, "timings_ms": {
+        answer, ordered_sources = order_citations_by_appearance(answer, state["sources"])
+        return {**state, "answer": answer, "sources": ordered_sources, "timings_ms": {
             **state["timings_ms"], "answer": self._elapsed_ms(started)
         }, "agent_trace": [*state["agent_trace"], AgentTrace(
             "answer", "render", len(state["sources"])
@@ -796,7 +798,7 @@ class QuestAgent:
         # would expose ``blocks``/``claim_ids`` to the player before the
         # citation renderer can validate and format them. Keep the streaming
         # transport, but emit one fully rendered answer chunk.
-        yield await self._render_answer(
+        rendered = await self._render_answer(
             request=request,
             sources=sources,
             plan=plan,
@@ -804,6 +806,9 @@ class QuestAgent:
             history=history,
             investigation=investigation,
         )
+        rendered, ordered_sources = order_citations_by_appearance(rendered, sources)
+        sources[:] = ordered_sources
+        yield rendered
 
 
     @staticmethod

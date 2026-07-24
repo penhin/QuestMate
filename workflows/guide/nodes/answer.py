@@ -5,6 +5,7 @@ from time import perf_counter
 
 from agents import AgentTrace
 from runtime import active_context
+from ai.citation_rendering import order_citations_by_appearance
 from schemas import ChatRequest, SessionMessage
 from workflows.guide.state import GuideState
 
@@ -28,9 +29,11 @@ async def answer(
         history=history,
         investigation=state["investigation"],
     )
+    rendered, ordered_evidence = order_citations_by_appearance(rendered, state["evidence"])
     result = {
         **state,
         "answer": rendered,
+        "evidence": ordered_evidence,
         "timings_ms": {**state["timings_ms"], "answer": round((perf_counter() - started) * 1000)},
         "agent_trace": [*state["agent_trace"], AgentTrace(
             "guide_answer", "render", len(state["evidence"])

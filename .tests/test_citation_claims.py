@@ -1,4 +1,5 @@
 from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
+from ai.citation_rendering import order_citations_by_appearance
 from schemas import Source
 
 
@@ -31,6 +32,20 @@ def test_build_citation_claims_keeps_source_and_sentence_boundaries() -> None:
         "The chest opens after the telescope puzzle.",
     }
     assert all("merchant" not in claim.statement for claim in claims)
+
+
+def test_citations_and_sources_follow_first_appearance_order() -> None:
+    sources = [
+        Source(title="First", url="https://example.com/first"),
+        Source(title="Second", url="https://example.com/second"),
+        Source(title="Third", url="https://example.com/third"),
+        Source(title="Fourth", url="https://example.com/fourth"),
+    ]
+
+    answer, ordered = order_citations_by_appearance("结论一[4]，结论二[2]，补充[4][1]。", sources)
+
+    assert answer == "结论一[1]，结论二[2]，补充[1][3]。"
+    assert [source.title for source in ordered] == ["Fourth", "Second", "First", "Third"]
 
 
 def test_build_citation_claims_never_uses_ineligible_source() -> None:

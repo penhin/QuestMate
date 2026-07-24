@@ -153,6 +153,23 @@
   font-weight: 800;
 }
 
+.citation {
+  margin-left: 1px;
+  font-size: 0.72em;
+  line-height: 0;
+  vertical-align: super;
+}
+
+.citation a {
+  color: #0f766e;
+  font-weight: 900;
+  text-decoration: none;
+}
+
+.citation a:hover {
+  text-decoration: underline;
+}
+
 .game-candidates {
   display: grid;
   gap: 8px;
