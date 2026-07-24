@@ -138,10 +138,13 @@ async def test_router_derives_capability_probed_wiki_candidates_from_english_pla
         query="菈妮支线步骤", game="艾尔登法环", max_results=2,
         plan=SearchPlan(
             aliases=["Ranni"],
-            queries=[{"source_type": "wiki", "query": "Elden Ring Ranni questline"}],
+            queries=[{"source_type": "community", "query": "Elden Ring Ranni questline"}],
         ),
         game_resolution=GameResolution(input_name="艾尔登法环", confirmed_name="艾尔登法环", confidence=1),
     )
 
     assert "eldenring.fandom.com" in wiki.database_domains
     assert "eldenring.wiki.gg" in wiki.database_domains
+    assert SearchRouter._planned_game_aliases(
+        SearchPlan(aliases=["Ranni"], queries=[{"source_type": "web", "query": "Elden Ring Ranni questline"}])
+    ) == ["Elden Ring"]

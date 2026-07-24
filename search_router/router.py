@@ -49,14 +49,16 @@ class SearchRouter:
         intent = plan.intent if plan else "general"
         aliases = list((plan.aliases if plan else [])[:6])
         entities = list((plan.named_entity_groups if plan else [])[:4])
+        inferred_game_aliases = self._planned_game_aliases(plan)
+        game_aliases = list(dict.fromkeys([*game_resolution.aliases, *inferred_game_aliases]))
         database_domains = list(dict.fromkeys([
             *game_resolution.database_domains,
-            *self._planned_wiki_domains(plan),
+            *self._planned_wiki_domains(inferred_game_aliases),
         ]))
         direct = await self.mediawiki.search(
             game=game, question=query, aliases=aliases,
             planned_queries=[item.query for item in (plan.queries if plan else [])],
-            game_aliases=game_resolution.aliases,
+            game_aliases=game_aliases,
             database_domains=database_domains, max_results=max_results,
             named_entity_groups=entities,
         )
@@ -69,7 +71,7 @@ class SearchRouter:
                 queries = self._build_queries(
                     game=game, question=query, plan=plan,
                     database_domains=tuple(game_resolution.database_domains),
-                    game_aliases=tuple(game_resolution.aliases),
+                    game_aliases=tuple(game_aliases),
                 )
                 responses = await asyncio.gather(
                     *(
@@ -110,7 +112,7 @@ class SearchRouter:
         logger.info("search_router.decision", provider=provider, reason=reason, budget_remaining=budget_remaining)
 
     @staticmethod
-    def _planned_wiki_domains(plan: SearchPlan | None) -> list[str]:
+    def _planned_game_aliases(plan: SearchPlan | None) -> list[str]:
         """Derive capability-probed wiki candidates from a planner's English route.
 
         Localized game names are often absent from a previously learned source
@@ -122,11 +124,9 @@ class SearchRouter:
         """
         if plan is None:
             return []
-        domains: list[str] = []
+        game_aliases: list[str] = []
         aliases = [alias for alias in plan.aliases if alias.strip()]
         for planned in plan.queries:
-            if planned.source_type != "wiki":
-                continue
             query = planned.query.strip()
             for alias in aliases:
                 match = re.search(re.escape(alias), query, flags=re.IGNORECASE)
@@ -135,11 +135,18 @@ class SearchRouter:
                 prefix = query[:match.start()].strip(" -:：|/()[]")
                 if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .:'’_-]{1,72}", prefix):
                     continue
-                slug = re.sub(r"[^a-z0-9]", "", prefix.casefold())
-                if not 4 <= len(slug) <= 48:
-                    continue
-                domains.extend([f"{slug}.fandom.com", f"{slug}.wiki.gg"])
+                game_aliases.append(prefix)
                 break
+        return list(dict.fromkeys(game_aliases))[:2]
+
+    @staticmethod
+    def _planned_wiki_domains(game_aliases: list[str]) -> list[str]:
+        domains: list[str] = []
+        for alias in game_aliases:
+            slug = re.sub(r"[^a-z0-9]", "", alias.casefold())
+            if not 4 <= len(slug) <= 48:
+                continue
+            domains.extend([f"{slug}.fandom.com", f"{slug}.wiki.gg"])
         return list(dict.fromkeys(domains))[:4]
 
     @staticmethod
