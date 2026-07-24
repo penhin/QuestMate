@@ -123,10 +123,13 @@ export async function streamQuestMate(
       question: input.question,
       session_id: input.sessionId,
       stream: true,
-      ai_provider: input.aiSettings?.provider ?? "anthropic",
+      // Empty local settings deliberately defer to the server-owned default.
+      // Sending the UI's historical Anthropic default would otherwise override
+      // a server configured for DeepSeek.
+      ai_provider: input.aiSettings?.apiKey ? input.aiSettings.provider : undefined,
       ai_api_key: input.aiSettings?.apiKey || undefined,
-      ai_model: input.aiSettings?.model || undefined,
-      ai_base_url: input.aiSettings?.baseUrl || undefined,
+      ai_model: input.aiSettings?.apiKey ? input.aiSettings.model || undefined : undefined,
+      ai_base_url: input.aiSettings?.apiKey ? input.aiSettings.baseUrl || undefined : undefined,
       metadata: input.metadata ?? {},
     }),
   });

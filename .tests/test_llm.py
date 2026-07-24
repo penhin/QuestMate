@@ -1164,7 +1164,7 @@ async def test_rule_outcome_with_direct_evidence_gets_semantic_completeness_chec
 
 
 async def test_no_provider_does_not_complete_a_relation_from_endpoint_cooccurrence() -> None:
-    llm = GuideLLM(settings=Settings(anthropic_api_key=""))
+    llm = GuideLLM(settings=Settings(anthropic_api_key="", deepseek_api_key=""))
     request = ChatRequest(
         game="Example Adventure",
         question="Does the Amber Relay open the Blue Gate?",
@@ -1194,7 +1194,7 @@ async def test_no_provider_does_not_complete_a_relation_from_endpoint_cooccurren
 
 
 async def test_no_provider_can_complete_direct_single_entity_location_evidence() -> None:
-    llm = GuideLLM(settings=Settings(anthropic_api_key=""))
+    llm = GuideLLM(settings=Settings(anthropic_api_key="", deepseek_api_key=""))
     request = ChatRequest(game="Example Adventure", question="Where is the Moon Key?")
     plan = SearchPlan(intent="item_location")
     sources = [
@@ -1340,7 +1340,9 @@ def test_server_model_key_never_uses_request_controlled_endpoint_or_model(monkey
 
     provider = create_model_provider(
         request=request,
-        settings=Settings(anthropic_api_key="server-secret", anthropic_model="trusted-model"),
+        settings=Settings(
+            anthropic_api_key="server-secret", anthropic_model="trusted-model", deepseek_api_key=""
+        ),
     )
 
     assert isinstance(provider, RecordingProvider)
