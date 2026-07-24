@@ -2,7 +2,7 @@ import pytest
 
 from retrieval.artifacts import RetrievalOutcome
 from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, Source
-from workflow import WorkflowRouter
+from workflows.verification import EvidenceVerificationRouter
 from workflows.analysis import AnalysisWorkflow
 from workflows.build import BuildWorkflow
 from workflows.guide import GuideWorkflow
@@ -35,7 +35,7 @@ async def test_task_workflows_preserve_retrieval_evidence_and_cited_answer(workf
         retrieve_after_identity_check=retrieve,
         render_answer=render,
         safety_refusal_message=lambda: "refused",
-        verification_router=WorkflowRouter(),
+        verification_router=EvidenceVerificationRouter(),
     )
     state = await workflow.run(
         request=request, history=[], game_resolution=GameResolution(input_name=request.game),

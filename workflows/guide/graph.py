@@ -7,7 +7,7 @@ from langgraph.graph import END, StateGraph
 
 from retrieval.artifacts import RetrievalOutcome
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage
-from workflow import WorkflowRouter
+from workflows.verification import EvidenceVerificationRouter
 from workflows.guide.nodes.answer import answer
 from workflows.guide.nodes.retrieval import retrieve
 from workflows.guide.nodes.verification import next_after_research, verify
@@ -24,7 +24,7 @@ class GuideWorkflow:
         retrieve_after_identity_check: Callable[..., Awaitable[tuple[RetrievalOutcome, GameResolution]]],
         render_answer: Callable[..., Awaitable[str]],
         safety_refusal_message: Callable[[], str],
-        verification_router: WorkflowRouter,
+        verification_router: EvidenceVerificationRouter,
     ) -> None:
         self._retrieve_after_identity_check = retrieve_after_identity_check
         self._render_answer = render_answer

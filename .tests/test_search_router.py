@@ -51,7 +51,7 @@ def settings():
 
 @pytest.mark.asyncio
 async def test_router_prefers_searxng_before_tavily() -> None:
-    router = SearchRouter(legacy_tavily=Legacy(), searxng=Searx(), settings=settings())
+    router = SearchRouter(search_backend=Legacy(), searxng=Searx(), settings=settings())
     results = await router.search(
         query="Moon Key location", game="Example Adventure", max_results=3,
         plan=SearchPlan(intent="item_location"), game_resolution=GameResolution(input_name="Example Adventure"),
@@ -62,7 +62,7 @@ async def test_router_prefers_searxng_before_tavily() -> None:
 
 @pytest.mark.asyncio
 async def test_router_falls_back_to_tavily_and_cools_failed_searxng() -> None:
-    router = SearchRouter(legacy_tavily=Legacy(), searxng=FailingSearx(), settings=settings())
+    router = SearchRouter(search_backend=Legacy(), searxng=FailingSearx(), settings=settings())
     results = await router.search(
         query="Moon Key location", game="Example Adventure", max_results=3,
         plan=SearchPlan(intent="build"), game_resolution=GameResolution(input_name="Example Adventure"),

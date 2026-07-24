@@ -7,7 +7,7 @@ from typing import Any
 from agents import AgentTrace
 from runtime import active_context
 from schemas import ChatRequest, SessionMessage
-from workflow import WorkflowKind, WorkflowRouter
+from workflows.verification import EvidencePath, EvidenceVerificationRouter
 
 
 async def stream_workflow_answer(
@@ -20,7 +20,7 @@ async def stream_workflow_answer(
     stream_answer: Callable[..., AsyncIterator[str]],
     safety_refusal_message: Callable[[], str],
     retrieve_after_identity_check: Callable[..., Awaitable[Any]],
-    verification_router: WorkflowRouter,
+    verification_router: EvidenceVerificationRouter,
     workflow_name: str,
 ) -> AsyncIterator[tuple[str, dict[str, Any] | str]]:
     """Run shared evidence nodes, then preserve token/chunk streaming.
@@ -36,7 +36,7 @@ async def stream_workflow_answer(
         retrieve_after_identity_check=retrieve_after_identity_check,
     )
     yield "state", state
-    if verification_router.classify(state["search_plan"]) is WorkflowKind.VERIFIED_RESEARCH:
+    if verification_router.classify(state["search_plan"]) is EvidencePath.VERIFIED_RESEARCH:
         state = await verify_node(state, router=verification_router)
     if state["search_plan"].safety_refusal:
         state = {**state, "answer": safety_refusal_message()}

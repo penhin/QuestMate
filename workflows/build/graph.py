@@ -7,7 +7,7 @@ from langgraph.graph import END, StateGraph
 
 from retrieval.artifacts import RetrievalOutcome
 from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, SessionMessage
-from workflow import WorkflowRouter
+from workflows.verification import EvidenceVerificationRouter
 from workflows.build.nodes.answer import answer
 from workflows.build.nodes.retrieval import retrieve
 from workflows.build.nodes.verification import next_after_research, verify
@@ -18,7 +18,7 @@ from workflows.streaming import stream_workflow_answer
 class BuildWorkflow:
     """A build-specific graph over shared retrieval and evidence services."""
 
-    def __init__(self, *, retrieve_after_identity_check: Callable[..., Awaitable[tuple[RetrievalOutcome, GameResolution]]], render_answer: Callable[..., Awaitable[str]], safety_refusal_message: Callable[[], str], verification_router: WorkflowRouter) -> None:
+    def __init__(self, *, retrieve_after_identity_check: Callable[..., Awaitable[tuple[RetrievalOutcome, GameResolution]]], render_answer: Callable[..., Awaitable[str]], safety_refusal_message: Callable[[], str], verification_router: EvidenceVerificationRouter) -> None:
         self._retrieve_after_identity_check = retrieve_after_identity_check
         self._render_answer = render_answer
         self._safety_refusal_message = safety_refusal_message

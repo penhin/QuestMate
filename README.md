@@ -129,13 +129,13 @@ artifacts such as `GameResolution`, `SearchPlan`, `Source`, and
 `InvestigationState`; they cannot invoke one another or expand search/model
 budgets. The orchestrator records aggregate-safe hand-off counts for evaluation.
 
-在 Planning 之后，Workflow Router 只依据结构化 `SearchPlan` 生成 `RouteDecision`：任务、
+在 Planning 之后，Task Router 只依据结构化 `SearchPlan` 生成 `RouteDecision`：任务、
 地点、物品获取走 Guide Workflow；配装、装备和属性走 Build Workflow；机制、比较、版本、
 打法和叙事走 Analysis Workflow。每个 Workflow 都复用相同的检索、证据和引用回答能力；
 版本敏感、关系核验或多实体问题会在各自图中额外经过 `Verifier`。Router 不读取原始提示词
 来猜测任务，也不扩大模型或检索预算。
 
-After Planning, the Workflow Router produces a `RouteDecision` solely from the
+After Planning, the Task Router produces a `RouteDecision` solely from the
 typed `SearchPlan`: quest, location, and acquisition requests use Guide;
 build/equipment/stat requests use Build; mechanics, comparisons, versions,
 strategy, and narrative use Analysis. Every workflow shares retrieval, evidence,
@@ -235,10 +235,10 @@ evaluation instances only; production ignores client-supplied aliases and site h
 - `retrieval/pipeline.py`：段落候选融合、去重与最终证据池重排 / passage fusion, deduplication, and final evidence-pool reranking.
 - `agents/`：受控专家 agent、身份解析与兼容适配 / bounded specialists, identity resolution, and compatibility adapters.
 - `orchestration/`：LangGraph、请求状态和评测诊断 / graph construction, request state, and evaluation diagnostics.
-- `router/`：`SearchPlan` 到 `RouteDecision` 的结构化任务路由 / structured task routing from `SearchPlan` to `RouteDecision`.
+- `task_router/`：`SearchPlan` 到 `RouteDecision` 的结构化任务路由 / structured task routing from `SearchPlan` to `RouteDecision`.
 - `workflows/`：Guide、Build、Analysis 独立 LangGraph 图及其局部状态 / task-specific graphs and local workflow states.
 - `runtime/`：请求 Context、执行 trace、用量和错误生命周期 / request context, trace, usage, and error lifecycle.
-- `workflow/router.py`：Workflow 内的证据核验链路分类 / evidence-verification chain classification inside workflows.
+- `workflows/verification.py`：Workflow 内的证据核验链路分类 / evidence-verification chain classification inside workflows.
 - `retrieval/artifacts.py`：检索阶段交接模型 / typed retrieval hand-off artifacts.
 - `ai/`：证据策略、调查状态提示词压缩、计划解析/清洗与引用渲染 / evidence policy, bounded investigation context, plan parsing/sanitization, and citation rendering.
 - `identity_components/`：身份置信度、候选归一化、URL 校验与不透明选项确认 / identity confidence, candidate normalization, URL validation, and opaque selection confirmation.

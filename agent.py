@@ -30,9 +30,9 @@ from orchestration.diagnostics import evaluation_diagnostics
 from orchestration.graph import build_request_graph
 from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
-from router import IntentRouter, RouteDecision
+from task_router import IntentRouter, RouteDecision
 from runtime import QuestRuntime
-from workflow import WorkflowRouter
+from workflows.verification import EvidenceVerificationRouter
 from workflows.guide import GuideWorkflow
 from workflows.build import BuildWorkflow
 from workflows.analysis import AnalysisWorkflow
@@ -73,24 +73,24 @@ class QuestAgent:
         self.answer_agent = AnswerAgent(self.llm)
         self.intent_router = IntentRouter()
         self.runtime = QuestRuntime()
-        self.workflow_router = WorkflowRouter()
+        self.verification_router = EvidenceVerificationRouter()
         self.guide_workflow = GuideWorkflow(
             retrieve_after_identity_check=self._retrieve_after_identity_check,
             render_answer=self._render_answer,
             safety_refusal_message=self._safety_refusal_message,
-            verification_router=self.workflow_router,
+            verification_router=self.verification_router,
         )
         self.build_workflow = BuildWorkflow(
             retrieve_after_identity_check=self._retrieve_after_identity_check,
             render_answer=self._render_answer,
             safety_refusal_message=self._safety_refusal_message,
-            verification_router=self.workflow_router,
+            verification_router=self.verification_router,
         )
         self.analysis_workflow = AnalysisWorkflow(
             retrieve_after_identity_check=self._retrieve_after_identity_check,
             render_answer=self._render_answer,
             safety_refusal_message=self._safety_refusal_message,
-            verification_router=self.workflow_router,
+            verification_router=self.verification_router,
         )
         self.graph = self._build_graph()
 
@@ -104,8 +104,6 @@ class QuestAgent:
             analysis_workflow_node=self._run_analysis_workflow,
             task_workflow_router=self._select_task_workflow,
             retrieval_node=self._search,
-            verification_node=self._verify,
-            workflow_router=self.workflow_router.next_after_research,
             answer_node=self._answer,
         )
 
@@ -804,20 +802,6 @@ class QuestAgent:
         async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
             yield chunk
 
-    async def _verify(self, state: QuestAgentState) -> QuestAgentState:
-        """Checkpoint required by verification-oriented workflows.
-
-        Evidence policies remain deterministic and answer-side enforcement
-        stays in ``GuideLLM``; this node makes that verification boundary an
-        explicit, inspectable execution step.
-        """
-        workflow = self.workflow_router.classify(state["search_plan"])
-        return {
-            **state,
-            "agent_trace": [*state["agent_trace"], AgentTrace(
-                "verification", workflow.value, len(state["sources"])
-            )],
-        }
 
     @staticmethod
     def _safety_refusal_message() -> str:

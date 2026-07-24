@@ -3,11 +3,11 @@
 from agents import AgentTrace
 from time import perf_counter
 from runtime import active_context
-from workflow import WorkflowKind, WorkflowRouter
+from workflows.verification import EvidencePath, EvidenceVerificationRouter
 from workflows.guide.state import GuideState
 
 
-async def verify(state: GuideState, *, router: WorkflowRouter) -> GuideState:
+async def verify(state: GuideState, *, router: EvidenceVerificationRouter) -> GuideState:
     started = perf_counter()
     workflow = router.classify(state["search_plan"])
     result = {
@@ -21,9 +21,9 @@ async def verify(state: GuideState, *, router: WorkflowRouter) -> GuideState:
     return result
 
 
-def next_after_research(state: GuideState, *, router: WorkflowRouter) -> str:
+def next_after_research(state: GuideState, *, router: EvidenceVerificationRouter) -> str:
     return (
         "verification"
-        if router.classify(state["search_plan"]) is WorkflowKind.VERIFIED_RESEARCH
+        if router.classify(state["search_plan"]) is EvidencePath.VERIFIED_RESEARCH
         else "writer"
     )

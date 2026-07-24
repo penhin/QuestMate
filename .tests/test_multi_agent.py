@@ -1,8 +1,8 @@
 from agent import QuestAgent
-from multi_agent import AnswerAgent, EvidenceAgent
+from agents import AnswerAgent, EvidenceAgent
 from schemas import ChatRequest, GameResolution, SearchPlan
-from router import IntentRouter
-from workflow import WorkflowKind, WorkflowRouter
+from task_router import IntentRouter
+from workflows.verification import EvidencePath, EvidenceVerificationRouter
 
 
 def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
@@ -25,18 +25,18 @@ def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
     assert {
         "identity_agent", "planning_agent", "retrieval_evidence_agents",
         "workflow_router", "guide_workflow", "build_workflow", "analysis_workflow",
-        "verification_agent", "answer_agent",
+        "answer_agent",
     } <= set(graph.nodes)
 
 
-def test_workflow_router_adds_verification_only_for_complex_evidence_paths() -> None:
-    router = WorkflowRouter()
+def test_evidence_verification_router_adds_checkpoint_only_for_complex_paths() -> None:
+    router = EvidenceVerificationRouter()
 
-    assert router.classify(SearchPlan(intent="item_location")) is WorkflowKind.EVIDENCE_RESEARCH
-    assert router.classify(SearchPlan(intent="patch", version_sensitive=True)) is WorkflowKind.VERIFIED_RESEARCH
+    assert router.classify(SearchPlan(intent="item_location")) is EvidencePath.RESEARCH
+    assert router.classify(SearchPlan(intent="patch", version_sensitive=True)) is EvidencePath.VERIFIED_RESEARCH
     assert router.classify(SearchPlan(
         intent="general", named_entity_groups=[["A"], ["B"]],
-    )) is WorkflowKind.VERIFIED_RESEARCH
+    )) is EvidencePath.VERIFIED_RESEARCH
 
 
 def test_intent_router_emits_typed_task_workflow_decision() -> None:

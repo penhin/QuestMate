@@ -3,7 +3,7 @@
 from typing import TypedDict
 
 from agents import AgentTrace
-from router import RouteDecision
+from task_router import RouteDecision
 from schemas import ChatRequest, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 
 

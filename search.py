@@ -124,7 +124,7 @@ class TavilySearchProvider:
             extract_version=self._extract_game_version,
         )
         self._router = SearchRouter(
-            legacy_tavily=self,
+            search_backend=self,
             searxng=SearxngProvider(
                 base_url=self.settings.searxng_base_url,
                 timeout_seconds=self.settings.searxng_timeout_seconds,

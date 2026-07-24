@@ -26,11 +26,11 @@ class SearchRouter:
     """Route open-web recall without changing SearchProvider's public API."""
 
     def __init__(
-        self, *, legacy_tavily: Any, searxng: SearxngProvider, settings: Any,
+        self, *, search_backend: Any, searxng: SearxngProvider, settings: Any,
         tavily: TavilyProvider | None = None,
     ) -> None:
-        self.legacy_tavily = legacy_tavily
-        self.tavily = tavily or TavilyProvider(legacy_tavily)
+        self.search_backend = search_backend
+        self.tavily = tavily or TavilyProvider(search_backend)
         self.searxng = searxng
         self.settings = settings
         self.health = ProviderHealth(cooldown_seconds=settings.search_provider_cooldown_seconds)
@@ -45,7 +45,7 @@ class SearchRouter:
         intent = plan.intent if plan else "general"
         aliases = list((plan.aliases if plan else [])[:6])
         entities = list((plan.named_entity_groups if plan else [])[:4])
-        direct = await self.legacy_tavily._search_mediawiki_sources(
+        direct = await self.search_backend._search_mediawiki_sources(
             game=game, question=query, aliases=aliases,
             planned_queries=[item.query for item in (plan.queries if plan else [])],
             game_aliases=game_resolution.aliases,
@@ -59,7 +59,7 @@ class SearchRouter:
             return direct[:max_results]
         if self.searxng.configured and self.health.available("searxng"):
             try:
-                queries = self.legacy_tavily._build_search_queries(
+                queries = self.search_backend._build_search_queries(
                     game=game, question=query, plan=plan,
                     database_domains=tuple(game_resolution.database_domains),
                     game_aliases=tuple(game_resolution.aliases),
