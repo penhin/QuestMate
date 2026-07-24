@@ -8,7 +8,7 @@ import structlog
 from quality_policy import PROGRESSIVE_STRICT_SOURCE_TARGET, STABLE_FACT_INTENTS
 from schemas import GameResolution, SearchPlan, Source
 from search_router.health import ProviderHealth
-from search_router.providers import SearxngProvider
+from search_router.providers import SearxngProvider, TavilyProvider
 
 logger = structlog.get_logger()
 
@@ -25,15 +25,19 @@ class SearchRouteDecision:
 class SearchRouter:
     """Route open-web recall without changing SearchProvider's public API."""
 
-    def __init__(self, *, legacy_tavily: Any, searxng: SearxngProvider, settings: Any) -> None:
+    def __init__(
+        self, *, legacy_tavily: Any, searxng: SearxngProvider, settings: Any,
+        tavily: TavilyProvider | None = None,
+    ) -> None:
         self.legacy_tavily = legacy_tavily
+        self.tavily = tavily or TavilyProvider(legacy_tavily)
         self.searxng = searxng
         self.settings = settings
         self.health = ProviderHealth(cooldown_seconds=settings.search_provider_cooldown_seconds)
         self.last_decision: SearchRouteDecision | None = None
 
     def usage_snapshot(self) -> dict[str, int]:
-        usage = dict(self.legacy_tavily._tavily_usage_snapshot())
+        usage = dict(self.tavily.usage_snapshot())
         usage["searxng_calls"] = self.searxng.calls
         return usage
 
@@ -73,9 +77,9 @@ class SearchRouter:
                 logger.warning("search_router.provider_failed", provider="searxng", error_type=type(exc).__name__)
         if self.health.available("tavily") and self.settings.tavily_fallback_max_calls > 0:
             try:
-                tavily = await self.legacy_tavily._search_with_tavily(
-                    query, game, max_results=max_results, plan=plan, game_resolution=game_resolution,
-                    skip_mediawiki=True,
+                tavily = await self.tavily.search(
+                    query=query, game=game, max_results=max_results,
+                    plan=plan, game_resolution=game_resolution,
                 )
                 self.health.succeeded("tavily")
                 self._decision("tavily", "searxng_insufficient_or_unavailable", 0)

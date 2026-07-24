@@ -4,6 +4,7 @@ import pytest
 
 from schemas import GameResolution, SearchPlan, Source
 from search_router.router import SearchRouter
+from search_router.providers import TavilyProvider
 
 
 def source(url: str) -> Source:
@@ -69,3 +70,13 @@ async def test_router_falls_back_to_tavily_and_cools_failed_searxng() -> None:
     assert str(results[0].url) == "https://tavily.example/moon-key"
     assert router.last_decision and router.last_decision.provider == "tavily"
     assert router.health.available("searxng") is False
+
+
+@pytest.mark.asyncio
+async def test_tavily_adapter_hides_legacy_backend_details() -> None:
+    backend = Legacy()
+    results = await TavilyProvider(backend).search(
+        query="Moon Key", game="Example Adventure", max_results=2,
+        plan=SearchPlan(), game_resolution=GameResolution(input_name="Example Adventure"),
+    )
+    assert str(results[0].url) == "https://tavily.example/moon-key"

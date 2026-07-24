@@ -40,7 +40,7 @@ from search_components.policy import (
     resolution_authority_domains,
 )
 from search_router import SearchRouter
-from search_router.providers import SearxngProvider
+from search_router.providers import SearxngProvider, TavilyProvider
 
 
 logger = structlog.get_logger()
@@ -130,6 +130,7 @@ class TavilySearchProvider:
                 timeout_seconds=self.settings.searxng_timeout_seconds,
                 max_results=self.settings.search_max_results,
             ),
+            tavily=TavilyProvider(self),
             settings=self.settings,
         )
 
