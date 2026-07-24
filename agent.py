@@ -792,15 +792,18 @@ class QuestAgent:
         history: list[SessionMessage],
         investigation: InvestigationState,
     ) -> AsyncIterator[str]:
-        stream_kwargs = dict(
-            request=request, sources=sources, plan=plan,
-            game_resolution=game_resolution, history=history,
+        # The model contract is structured Claim JSON. Emitting its raw tokens
+        # would expose ``blocks``/``claim_ids`` to the player before the
+        # citation renderer can validate and format them. Keep the streaming
+        # transport, but emit one fully rendered answer chunk.
+        yield await self._render_answer(
+            request=request,
+            sources=sources,
+            plan=plan,
+            game_resolution=game_resolution,
+            history=history,
+            investigation=investigation,
         )
-        self._add_optional_argument(
-            self.answer_agent.stream_answer, stream_kwargs, "investigation", investigation
-        )
-        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
-            yield chunk
 
 
     @staticmethod
