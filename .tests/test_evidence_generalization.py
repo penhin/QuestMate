@@ -3,7 +3,7 @@ import json
 import pytest
 
 from ai.investigation import ensure_investigation_query, parse_investigation_state
-from agent import QuestAgent
+from agents.identity_resolution import IdentityResolver
 from config import Settings
 from game_resolution import (
     GameResolver,
@@ -341,7 +341,7 @@ def test_result_source_type_is_classified_from_actual_domain() -> None:
 
 
 def test_confirmed_game_request_does_not_trust_client_supplied_retrieval_hosts() -> None:
-    resolution = QuestAgent._confirmed_resolution_from_request(ChatRequest(
+    resolution = IdentityResolver.confirmed_resolution_from_request(ChatRequest(
         game="Chosen Game",
         question="Where is the item?",
         metadata={
@@ -552,7 +552,7 @@ async def test_refinement_wiki_result_does_not_block_open_web_search() -> None:
             )
         ]
 
-    provider._search_mediawiki_sources = direct_wiki
+    provider._router.mediawiki.search = direct_wiki
     sources = await provider.search(
         "How is Artifact ZX-17 first acquired?",
         "Niche Game",

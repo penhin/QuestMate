@@ -94,17 +94,17 @@ async def test_investigation_records_stages_and_reuses_pipeline_for_refinement()
                 evidence="Quartz Relay opens the Azure Gate after the signal puzzle.",
             )]
 
-    class Refiner:
-        async def refine_search_plan(self, **kwargs):
-            return SearchPlan(
-                intent="game_mechanic",
-                aliases=["Quartz Relay", "Azure Gate"],
-                queries=[PlannedSearchQuery(source_type="wiki", query="Quartz Relay Azure Gate signal puzzle")],
-                refinement=True,
+    class InvestigationUpdater:
+        async def update_investigation(self, *, investigation, **_kwargs):
+            return investigation.model_copy(
+                update={
+                    "aliases": ["Quartz Relay", "Azure Gate"],
+                    "next_queries": [PlannedSearchQuery(source_type="wiki", query="Quartz Relay Azure Gate signal puzzle")],
+                }
             )
 
     coordinator = RetrievalCoordinator(
-        knowledge=EmptyKnowledge(), search_provider=Search(), llm=Refiner(), max_results=4, max_hops=1
+        knowledge=EmptyKnowledge(), search_provider=Search(), llm=InvestigationUpdater(), max_results=4, max_hops=1
     )
     request = ChatRequest(
         game="Example Adventure",

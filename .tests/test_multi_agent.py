@@ -1,7 +1,6 @@
 from agent import QuestAgent
-from agents import AnswerAgent, EvidenceAgent
 from schemas import ChatRequest, GameResolution, SearchPlan
-from task_router import IntentRouter
+from task_router import TaskWorkflowRouter
 from workflows.verification import EvidencePath, EvidenceVerificationRouter
 
 
@@ -24,7 +23,7 @@ def test_orchestrator_graph_has_bounded_specialist_handoffs() -> None:
 
     assert {
         "identity_agent", "planning_agent", "retrieval_evidence_agents",
-        "workflow_router", "guide_workflow", "build_workflow", "analysis_workflow",
+        "task_router", "guide_workflow", "build_workflow", "analysis_workflow",
         "answer_agent",
     } <= set(graph.nodes)
 
@@ -39,8 +38,8 @@ def test_evidence_verification_router_adds_checkpoint_only_for_complex_paths() -
     )) is EvidencePath.VERIFIED_RESEARCH
 
 
-def test_intent_router_emits_typed_task_workflow_decision() -> None:
-    decision = IntentRouter().route(
+def test_task_router_emits_typed_task_workflow_decision() -> None:
+    decision = TaskWorkflowRouter().route(
         plan=SearchPlan(
             intent="build",
             version_sensitive=True,
@@ -53,7 +52,7 @@ def test_intent_router_emits_typed_task_workflow_decision() -> None:
     )
 
     assert decision.model_dump() == {
-        "intent": "build",
+        "workflow": "build",
         "confidence": 0.9,
         "game": "Example Adventure",
         "entities": ["Moonblade", "月刃"],
@@ -68,44 +67,9 @@ def test_intent_router_emits_typed_task_workflow_decision() -> None:
     }
 
 
-def test_intent_router_maps_guide_and_analysis_intents_without_raw_question_rules() -> None:
-    router = IntentRouter()
+def test_task_router_maps_guide_and_analysis_intents_without_raw_question_rules() -> None:
+    router = TaskWorkflowRouter()
     game = GameResolution(input_name="Example Adventure")
 
-    assert router.route(plan=SearchPlan(intent="quest_step"), game_resolution=game).intent == "guide"
-    assert router.route(plan=SearchPlan(intent="game_mechanic"), game_resolution=game).intent == "analysis"
-
-
-async def test_evidence_agent_falls_back_to_legacy_refinement_contract() -> None:
-    class LegacyLLM:
-        async def refine_search_plan(self, *, request, plan, sources, history, game_resolution=None):
-            return plan.model_copy(update={"refinement": True})
-
-    evidence = EvidenceAgent(LegacyLLM())
-    request = ChatRequest(game="Example Adventure", question="Where is the relay?")
-    refined = await evidence.refine_search_plan(
-        request=request,
-        plan=SearchPlan(),
-        sources=[],
-        history=[],
-        game_resolution=None,
-        investigation="artifact not accepted by legacy contract",
-    )
-
-    assert evidence.supports_update_investigation is False
-    assert refined is not None and refined.refinement is True
-
-
-async def test_answer_agent_filters_optional_artifacts_for_legacy_signature() -> None:
-    class LegacyLLM:
-        async def answer(self, *, request, sources, plan=None):
-            return f"{request.game}:{len(sources)}:{plan.intent if plan else 'none'}"
-
-    answer = await AnswerAgent(LegacyLLM()).answer(
-        request=ChatRequest(game="Example Adventure", question="Where is the relay?"),
-        sources=[],
-        plan=SearchPlan(intent="item_location"),
-        investigation="new cross-agent artifact",
-    )
-
-    assert answer == "Example Adventure:0:item_location"
+    assert router.route(plan=SearchPlan(intent="quest_step"), game_resolution=game).workflow == "guide"
+    assert router.route(plan=SearchPlan(intent="game_mechanic"), game_resolution=game).workflow == "analysis"

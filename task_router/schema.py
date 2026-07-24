@@ -9,7 +9,7 @@ from schemas import SearchIntent
 WorkflowName = Literal["guide", "build", "analysis"]
 
 
-class RouteConstraints(BaseModel):
+class TaskRouteConstraints(BaseModel):
     version_sensitive: bool = False
     requires_relation_verification: bool = False
     safety_refusal: bool = False
@@ -17,10 +17,10 @@ class RouteConstraints(BaseModel):
     missing_info: list[str] = Field(default_factory=list, max_length=4)
 
 
-class RouteDecision(BaseModel):
-    intent: WorkflowName = "analysis"
+class TaskRouteDecision(BaseModel):
+    workflow: WorkflowName = "analysis"
     confidence: float = Field(default=0, ge=0, le=1)
     game: str = Field(default="", max_length=120)
     entities: list[str] = Field(default_factory=list, max_length=16)
-    constraints: RouteConstraints = Field(default_factory=RouteConstraints)
+    constraints: TaskRouteConstraints = Field(default_factory=TaskRouteConstraints)
     search_intent: SearchIntent = "general"

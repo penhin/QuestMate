@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent import QuestAgent
+from agents.identity_resolution import IdentityResolver
 from config import Settings
 from evals.dataset import load_cases
 from schemas import ChatRequest, GameCandidate, GameResolution, SearchPlan, Source
@@ -32,6 +33,7 @@ async def test_candidate_confirmation_uses_server_validated_identity_url() -> No
     provider = Provider()
     agent = object.__new__(QuestAgent)
     agent.search_provider = provider
+    agent.identity_resolver = IdentityResolver(provider)
 
     resolution = await agent._resolve_request_game(ChatRequest(
         game="Shared Name",
@@ -62,6 +64,7 @@ async def test_candidate_confirmation_never_substitutes_a_different_fresh_result
 
     agent = object.__new__(QuestAgent)
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
 
     resolution = await agent._resolve_request_game(ChatRequest(
         game="Shared Name",
@@ -92,6 +95,7 @@ async def test_identity_recovery_uses_only_a_verified_registry_resolution() -> N
 
     agent = object.__new__(QuestAgent)
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
 
     recovered = await agent._recover_game_identity_if_needed(
         request=ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?"),
@@ -346,6 +350,7 @@ async def test_mismatched_retrieval_evidence_triggers_identity_confirmation() ->
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
     _outcome, resolved = await agent._retrieve_after_identity_check(
         request=ChatRequest(game="Shared Title", question="Where is the artifact?"),
         history=[],
@@ -382,6 +387,7 @@ async def test_unverified_source_is_not_used_when_identity_search_has_no_candida
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
     initial = GameResolution(input_name="Unindexed Title", confirmed_name="Unindexed Title", confidence=1)
     outcome, resolved = await agent._retrieve_after_identity_check(
         request=ChatRequest(game="Unindexed Title", question="Where is the artifact?"),
@@ -521,6 +527,7 @@ async def test_empty_initial_retrieval_recovers_ambiguous_identity() -> None:
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
     agent.search_provider = provider
+    agent.identity_resolver = IdentityResolver(provider)
 
     _outcome, resolved = await agent._retrieve_after_identity_check(
         request=ChatRequest(game="Shared Name", question="Where is the item?"),
@@ -554,6 +561,7 @@ async def test_direct_initial_evidence_does_not_pay_for_identity_resolution() ->
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
     initial = GameResolution(input_name="Example Game", confirmed_name="Example Game", confidence=1)
 
     outcome, resolved = await agent._retrieve_after_identity_check(
@@ -586,6 +594,7 @@ async def test_empty_retrieval_and_empty_identity_discovery_do_not_create_false_
     agent = object.__new__(QuestAgent)
     agent.retrieval = Retrieval()
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
 
     outcome, resolved = await agent._retrieve_after_identity_check(
         request=request,
@@ -685,6 +694,7 @@ async def test_confirmed_game_retries_empty_initial_retrieval_with_local_plan() 
         confidence=0.9,
     )
     agent.search_provider = Provider()
+    agent.identity_resolver = IdentityResolver(agent.search_provider)
 
     outcome, resolved = await agent._retrieve_after_identity_check(
         request=request,

@@ -15,7 +15,6 @@ from quality_policy import (
     PROGRESSIVE_STRICT_SOURCE_TARGET,
     SOURCE_POLICIES,
     SourcePolicy,
-    STABLE_FACT_INTENTS,
     is_version_sensitive_question,
 )
 from retrieval import (
@@ -40,7 +39,7 @@ from search_components.policy import (
     resolution_authority_domains,
 )
 from search_router import SearchRouter
-from search_router.providers import SearxngProvider, TavilyProvider
+from search_router.providers import MediaWikiProvider, SearxngProvider, TavilyProvider
 
 
 logger = structlog.get_logger()
@@ -124,13 +123,17 @@ class TavilySearchProvider:
             extract_version=self._extract_game_version,
         )
         self._router = SearchRouter(
-            search_backend=self,
+            mediawiki=MediaWikiProvider(self._wiki_retriever),
             searxng=SearxngProvider(
                 base_url=self.settings.searxng_base_url,
                 timeout_seconds=self.settings.searxng_timeout_seconds,
                 max_results=self.settings.search_max_results,
             ),
-            tavily=TavilyProvider(self),
+            tavily=TavilyProvider(
+                search=self.search_tavily_open_web,
+                usage_snapshot=self._tavily_usage_snapshot,
+            ),
+            build_queries=self._build_search_queries,
             settings=self.settings,
         )
 
@@ -162,14 +165,13 @@ class TavilySearchProvider:
             plan=plan, game_resolution=game_resolution,
         )
 
-    async def _search_with_tavily(
+    async def search_tavily_open_web(
         self,
         query: str,
         game: str,
         max_results: int | None = None,
         plan: SearchPlan | None = None,
         game_resolution: GameResolution | None = None,
-        skip_mediawiki: bool = False,
     ) -> list[Source]:
         if self._client is None:
             return []
@@ -203,51 +205,14 @@ class TavilySearchProvider:
         game_aliases = confirmed_aliases
         min_strict_results = min(PROGRESSIVE_STRICT_SOURCE_TARGET, total_results)
 
-        direct_wiki_sources = [] if skip_mediawiki else await self._search_mediawiki_sources(
-            game=game, question=query, aliases=aliases,
-            planned_queries=[item.query for item in (plan.queries if plan else [])],
-            game_aliases=game_aliases, database_domains=list(game_resolution.database_domains),
-            intent=intent, version_sensitive=version_sensitive, max_results=total_results,
-            named_entity_groups=named_entity_groups,
-        )
-        # Stable fact lookups can finish on a sufficiently populated direct
-        # database result. Version-sensitive, strategic, mechanical, general,
-        # and refinement requests keep the independent open-web portfolio.
-        can_finish_on_database = (
-            intent in STABLE_FACT_INTENTS
-            and not version_sensitive
-            and len(direct_wiki_sources) >= min_strict_results
-            and not (plan and plan.refinement)
-        )
-        if can_finish_on_database:
-            self._log_search_usage(
-                game=game,
-                usage_before=usage_before,
-                source_count=len(direct_wiki_sources),
-                route="mediawiki",
-            )
-            return direct_wiki_sources[:total_results]
-        for source in direct_wiki_sources:
-            source_key = self._canonical_source_key(str(source.url))
-            current = relaxed_sources_by_url.get(source_key)
-            if current is None or (source.score or 0) > (current.score or 0):
-                relaxed_sources_by_url[source_key] = source
-                strict_sources_by_url[source_key] = source
-
         if not search_queries:
-            selected = self._balanced_sources(
-                strict_sources=list(strict_sources_by_url.values()),
-                relaxed_sources=list(relaxed_sources_by_url.values()),
-                total_results=total_results,
-                min_strict_results=min_strict_results,
-            )
             self._log_search_usage(
                 game=game,
                 usage_before=usage_before,
-                source_count=len(selected),
-                route="mediawiki",
+                source_count=0,
+                route="tavily",
             )
-            return selected
+            return []
 
         max_query_count = min(self.settings.tavily_max_queries_per_request, len(search_queries))
         if not game_resolution.is_confirmed:
@@ -330,7 +295,7 @@ class TavilySearchProvider:
             game=game,
             usage_before=usage_before,
             source_count=len(selected_sources),
-            route="mediawiki+tavily" if direct_wiki_sources else "tavily",
+            route="tavily",
         )
         return selected_sources
 
@@ -352,31 +317,6 @@ class TavilySearchProvider:
             tavily_paid_calls=max(0, self._client.upstream_calls - paid_before),
             tavily_cache_hits=max(0, self._client.cache_hits - hits_before),
             source_count=source_count,
-        )
-
-    async def _search_mediawiki_sources(
-        self,
-        *,
-        game: str,
-        question: str,
-        aliases: list[str],
-        planned_queries: list[str],
-        game_aliases: list[str],
-        database_domains: list[str],
-        intent: str,
-        version_sensitive: bool,
-        max_results: int,
-        named_entity_groups: list[list[str]],
-    ) -> list[Source]:
-        return await self._wiki_retriever.search(
-            game=game,
-            question=question,
-            aliases=aliases,
-            planned_queries=planned_queries,
-            game_aliases=game_aliases,
-            database_domains=database_domains,
-            max_results=max_results,
-            named_entity_groups=named_entity_groups,
         )
 
     async def wait_for_background_tasks(self) -> None:

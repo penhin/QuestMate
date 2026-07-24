@@ -30,7 +30,7 @@ from orchestration.diagnostics import evaluation_diagnostics
 from orchestration.graph import build_request_graph
 from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
-from task_router import IntentRouter, RouteDecision
+from task_router import TaskRouteDecision, TaskWorkflowRouter
 from runtime import QuestRuntime
 from workflows.verification import EvidenceVerificationRouter
 from workflows.guide import GuideWorkflow
@@ -71,7 +71,7 @@ class QuestAgent:
         self.planning_agent = PlanningAgent(self.llm)
         self.retrieval_agent = RetrievalAgent(self._retrieve_after_identity_check)
         self.answer_agent = AnswerAgent(self.llm)
-        self.intent_router = IntentRouter()
+        self.task_router = TaskWorkflowRouter()
         self.runtime = QuestRuntime()
         self.verification_router = EvidenceVerificationRouter()
         self.guide_workflow = GuideWorkflow(
@@ -102,7 +102,7 @@ class QuestAgent:
             guide_workflow_node=self._run_guide_workflow,
             build_workflow_node=self._run_build_workflow,
             analysis_workflow_node=self._run_analysis_workflow,
-            task_workflow_router=self._select_task_workflow,
+            task_router=self._select_task_workflow,
             retrieval_node=self._search,
             answer_node=self._answer,
         )
@@ -167,7 +167,7 @@ class QuestAgent:
                 "history": history,
                 "game_resolution": GameResolution(input_name=request.game),
                 "search_plan": SearchPlan(),
-                "route": RouteDecision(),
+                "route": TaskRouteDecision(),
                 "sources": [],
                 "investigation": InvestigationState(goal=request.question),
                 "answer": "",
@@ -290,7 +290,7 @@ class QuestAgent:
             request=request, history=history, game_resolution=game_resolution
         )
         timings_ms["planning"] = self._elapsed_ms(planning_started)
-        route = self.intent_router.route(plan=search_plan, game_resolution=game_resolution)
+        route = self.task_router.route(plan=search_plan, game_resolution=game_resolution)
 
         if search_plan.safety_refusal:
             response = ChatResponse(
@@ -325,7 +325,7 @@ class QuestAgent:
         history: list[SessionMessage],
         game_resolution: GameResolution,
         search_plan: SearchPlan,
-        route: RouteDecision,
+        route: TaskRouteDecision,
         timings_ms: dict[str, int],
         is_new_session: bool,
     ) -> AsyncIterator[AgentStreamEvent]:
@@ -335,7 +335,7 @@ class QuestAgent:
             "analysis": self.analysis_workflow.stream,
         }
         workflow_state = None
-        async for event_type, payload in runners[route.intent](
+        async for event_type, payload in runners[route.workflow](
             request=request,
             history=history,
             game_resolution=game_resolution,
@@ -407,18 +407,18 @@ class QuestAgent:
         Phase 1 keeps the existing retrieval graph intact.  Subsequent phases
         replace its common tail with the selected task graph.
         """
-        route = self.intent_router.route(
+        route = self.task_router.route(
             plan=state["search_plan"], game_resolution=state["game_resolution"]
         )
         return {
             **state,
             "route": route,
-            "agent_trace": [*state["agent_trace"], AgentTrace("workflow_router", route.intent)],
+            "agent_trace": [*state["agent_trace"], AgentTrace("task_router", route.workflow)],
         }
 
     @staticmethod
     def _select_task_workflow(state: QuestAgentState) -> str:
-        return state["route"].intent
+        return state["route"].workflow
 
     async def _run_guide_workflow(self, state: QuestAgentState) -> QuestAgentState:
         guide_state = await self.guide_workflow.run(
@@ -902,13 +902,13 @@ class QuestAgent:
         return orchestration_status.search(search_plan)
 
     @staticmethod
-    def _status_for_route(route: RouteDecision) -> str:
+    def _status_for_route(route: TaskRouteDecision) -> str:
         labels = {
             "guide": "任务工作流：攻略与路线",
             "build": "任务工作流：配装与属性",
             "analysis": "任务工作流：机制与分析",
         }
-        return labels[route.intent]
+        return labels[route.workflow]
 
     @staticmethod
     def _status_for_game_resolution(game_resolution: GameResolution) -> str:
@@ -943,10 +943,10 @@ class QuestAgent:
         )
 
     async def _resolve_request_game(self, request: ChatRequest) -> GameResolution:
-        return await self._identity_resolver().resolve_request_game(request)
+        return await self.identity_resolver.resolve_request_game(request)
 
     async def _initial_game_context(self, request: ChatRequest) -> GameResolution:
-        return await self._identity_resolver().initial_context(request)
+        return await self.identity_resolver.initial_context(request)
 
     async def _recover_game_identity_if_needed(
         self,
@@ -955,23 +955,9 @@ class QuestAgent:
         sources: list[Source],
         current: GameResolution,
     ) -> GameResolution:
-        return await self._identity_resolver().recover_if_needed(
+        return await self.identity_resolver.recover_if_needed(
             request=request, sources=sources, current=current
         )
-
-    def _identity_resolver(self) -> IdentityResolver:
-        """Lazily construct the specialist for legacy lightweight instances."""
-        resolver = getattr(self, "identity_resolver", None)
-        if resolver is None:
-            resolver = IdentityResolver(self.search_provider)
-            self.identity_resolver = resolver
-        elif resolver.search_provider is not self.search_provider:
-            resolver.search_provider = self.search_provider
-        return resolver
-
-    @staticmethod
-    def _confirmed_resolution_from_request(request: ChatRequest) -> GameResolution | None:
-        return IdentityResolver.confirmed_resolution_from_request(request)
 
     @staticmethod
     def _status_for_sources(sources: list[Source]) -> str:

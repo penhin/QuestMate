@@ -1,20 +1,21 @@
 """Map validated planning artifacts onto QuestMate task workflows."""
 
 from schemas import GameResolution, SearchPlan
-from task_router.schema import RouteConstraints, RouteDecision, WorkflowName
+from task_router.schema import TaskRouteConstraints, TaskRouteDecision, WorkflowName
 
 
-class IntentRouter:
+class TaskWorkflowRouter:
     _GUIDE_INTENTS = frozenset({"quest_step", "item_location", "item_usage"})
 
-    def route(self, *, plan: SearchPlan, game_resolution: GameResolution) -> RouteDecision:
+    def route(self, *, plan: SearchPlan, game_resolution: GameResolution) -> TaskRouteDecision:
         workflow = self.workflow_for(plan)
         entities = list(dict.fromkeys(alias.strip() for group in plan.named_entity_groups for alias in group if alias.strip()))[:16]
-        return RouteDecision(
-            intent=workflow, confidence=self._confidence(plan),
+        return TaskRouteDecision(
+            workflow=workflow,
+            confidence=self._confidence(plan),
             game=game_resolution.confirmed_name or game_resolution.input_name,
             entities=entities,
-            constraints=RouteConstraints(
+            constraints=TaskRouteConstraints(
                 version_sensitive=plan.version_sensitive,
                 requires_relation_verification=plan.requires_relation_verification,
                 safety_refusal=plan.safety_refusal,

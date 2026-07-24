@@ -14,8 +14,7 @@ from ai.search_plan_sanitization import (
     sanitize_search_text,
 )
 from quality_policy import is_version_sensitive_question
-from query_tokens import exact_identifiers
-from schemas import PlannedSearchQuery, SearchIntent, SearchPlan
+from schemas import PlannedSearchQuery, SearchPlan
 
 
 logger = structlog.get_logger()
@@ -65,39 +64,4 @@ def parse_search_plan(
         queries=sanitized_queries,
         answer_requirements=sanitize_answer_requirements(plan.answer_requirements),
         missing_info=[value.strip() for value in plan.missing_info if value.strip()][:4],
-    )
-
-
-def parse_refinement_plan(
-    content: str, *, question: str, intent: SearchIntent, attempted_queries: list[str],
-    version_sensitive: bool = False,
-) -> SearchPlan | None:
-    try:
-        start, end = content.find("{"), content.rfind("}") + 1
-        if start < 0 or end <= start:
-            return None
-        plan = SearchPlan.model_validate(json.loads(content[start:end]))
-    except (json.JSONDecodeError, ValidationError, ValueError, TypeError):
-        return None
-    if not plan.queries or not (query := sanitize_search_text(plan.queries[0].query)):
-        return None
-    missing = [identifier for identifier in exact_identifiers(question) if identifier.casefold() not in query.casefold()]
-    if missing:
-        query = f"{query} {' '.join(missing)}"[:240].strip()
-    normalized_attempts = {" ".join(value.casefold().split()) for value in attempted_queries}
-    if " ".join(query.casefold().split()) in normalized_attempts:
-        return None
-    aliases = sanitize_aliases(plan.aliases)
-    return SearchPlan(
-        intent=intent,
-        version_sensitive=version_sensitive or plan.version_sensitive or is_version_sensitive_question(question),
-        requires_relation_verification=plan.requires_relation_verification,
-        named_entity_groups=sanitize_named_entity_groups(
-            plan.named_entity_groups, question=question, aliases=aliases, queries=[query],
-        ),
-        aliases=aliases,
-        queries=[PlannedSearchQuery(source_type=plan.queries[0].source_type, query=query)],
-        answer_requirements=sanitize_answer_requirements(plan.answer_requirements),
-        missing_info=plan.missing_info[:4],
-        refinement=True,
     )

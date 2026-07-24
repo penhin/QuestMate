@@ -68,7 +68,7 @@ async def test_versioned_stable_fact_does_not_stop_after_direct_wiki(monkeypatch
     async def direct_wiki(**_kwargs):
         return direct_sources
 
-    monkeypatch.setattr(provider, "_search_mediawiki_sources", direct_wiki)
+    monkeypatch.setattr(provider._router.mediawiki, "search", direct_wiki)
 
     await provider.search(
         "当前版本月光钥匙在哪？",

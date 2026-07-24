@@ -22,7 +22,7 @@ from knowledge import KnowledgeStore, chunk_text, keyword_terms, parse_published
 from agent import QuestAgent
 from game_resolution import GameResolver, identity_matches_game
 from llm import GuideLLM
-from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, SearchPlan, Source
+from schemas import ChatRequest, ChatResponse, FeedbackRating, FeedbackRequest, GameResolution, InvestigationState, PlannedSearchQuery, SearchPlan, Source
 from search import MediaWikiClient, TavilySearchProvider
 from retrieval.relevance import result_relevance_score
 from retrieval.source_builder import build_source
@@ -794,15 +794,13 @@ async def test_agent_runs_one_model_driven_refinement_pass() -> None:
         def __init__(self):
             self.calls = 0
 
-        async def refine_search_plan(self, *, request, plan, sources, history, game_resolution=None):
+        async def update_investigation(self, *, investigation, **_kwargs):
             self.calls += 1
-            if self.calls > 1:
-                return None
-            return SearchPlan(
-                intent=plan.intent,
-                aliases=["Translated Entity 35"],
-                queries=[{"source_type": "wiki", "query": "Translated Entity 35 exact instructions"}],
-                refinement=True,
+            return investigation.model_copy(
+                update={
+                    "aliases": ["Translated Entity 35"],
+                    "next_queries": [PlannedSearchQuery(source_type="wiki", query="Translated Entity 35 exact instructions")],
+                }
             )
 
     search_provider = StagedSearchProvider()
@@ -858,23 +856,16 @@ async def test_agent_bounds_dependency_refinement_to_one_hop_before_answering() 
         def __init__(self):
             self.calls = 0
 
-        async def refine_search_plan(self, *, request, plan, sources, history, game_resolution=None):
+        async def update_investigation(self, *, investigation, **_kwargs):
             self.calls += 1
             if self.calls == 1:
-                return SearchPlan(
-                    intent=plan.intent,
-                    aliases=["relay token"],
-                    queries=[{"source_type": "wiki", "query": "relay token acquisition route"}],
-                    refinement=True,
+                return investigation.model_copy(
+                    update={
+                        "aliases": ["relay token"],
+                        "next_queries": [PlannedSearchQuery(source_type="wiki", query="relay token acquisition route")],
+                    }
                 )
-            if self.calls == 2:
-                return SearchPlan(
-                    intent=plan.intent,
-                    aliases=["maintenance passage"],
-                    queries=[{"source_type": "wiki", "query": "maintenance passage access prerequisite"}],
-                    refinement=True,
-                )
-            return None
+            return InvestigationState(goal="complete", complete=True)
 
     search_provider = DependencySearchProvider()
     llm = DependencyLLM()

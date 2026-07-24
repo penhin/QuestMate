@@ -24,8 +24,8 @@ class LiveRetriever(Protocol):
     async def search(self, query: str, game: str, **kwargs: Any) -> list[Source]: ...
 
 
-class PlanRefiner(Protocol):
-    async def refine_search_plan(self, **kwargs: Any) -> SearchPlan | None: ...
+class InvestigationUpdater(Protocol):
+    async def update_investigation(self, **kwargs: Any) -> InvestigationState: ...
 
 
 class RetrievalCoordinator:
@@ -34,7 +34,7 @@ class RetrievalCoordinator:
         *,
         knowledge: KnowledgeRetriever,
         search_provider: LiveRetriever,
-        llm: PlanRefiner,
+        llm: InvestigationUpdater,
         max_results: int,
         max_hops: int = MAX_INVESTIGATION_HOPS,
         max_investigation_model_calls: int | None = None,
@@ -44,8 +44,6 @@ class RetrievalCoordinator:
         self.llm = llm
         self.max_results = max_results
         self.max_hops = max_hops
-        # Keep custom/offline coordinators backwards-compatible while letting
-        # the production agent impose its stricter request cost contract.
         self.max_investigation_model_calls = (
             max_hops + 1
             if max_investigation_model_calls is None
@@ -150,9 +148,8 @@ class RetrievalCoordinator:
             ))
             return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
 
-        update_investigation = getattr(self.llm, "update_investigation", None)
-        supports_investigation = getattr(self.llm, "supports_update_investigation", True)
-        if callable(update_investigation) and supports_investigation:
+        update_investigation = self.llm.update_investigation
+        if callable(update_investigation):
             terminal_decision: str | None = None
             for hop in range(self.max_investigation_model_calls):
                 investigation = await update_investigation(
@@ -263,80 +260,7 @@ class RetrievalCoordinator:
             ))
             return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
 
-        # Compatibility path for lightweight/custom LLM implementations.
-        terminal_decision = None
-        for hop in range(1, self.max_hops + 1):
-            refined_plan = await self.llm.refine_search_plan(
-                request=request,
-                plan=merged_plan,
-                sources=merged_sources,
-                history=history,
-                game_resolution=active_game_resolution,
-            )
-            if refined_plan is None:
-                break
-            refined_batch = await self.retrieve_batch(
-                request.question,
-                request.game,
-                plan=refined_plan,
-                game_resolution=active_game_resolution,
-                include_knowledge=False,
-            )
-            refined_sources = refined_batch.sources
-            stages.extend(refined_batch.stages)
-            if not self._has_novel_evidence(existing=merged_sources, candidates=refined_sources):
-                terminal_decision = "no_novel_evidence"
-                logger.info(
-                    "retrieval.investigation_stopped",
-                    game=request.game,
-                    reason="no_novel_evidence",
-                    hop=hop,
-                )
-                break
-            merged_plan = merge_search_plans(merged_plan, refined_plan)
-            merged_pool = fuse_and_rank_evidence(
-                groups={"accumulated": merged_sources, "refinement": refined_sources},
-                query=f"{request.question} {' '.join(merged_plan.aliases)}".strip(),
-                intent=merged_plan.intent,
-                max_results=self.max_results,
-                version_sensitive=merged_plan.version_sensitive,
-                entity_groups=merged_plan.named_entity_groups,
-            )
-            merged_sources = merged_pool.sources
-            stages.extend(merged_pool.stages)
-            refined = True
-            stages.append(RetrievalStage(
-                name="adaptive_refinement",
-                input_count=len(refined_sources),
-                output_count=len(merged_sources),
-                details={"hop": hop},
-            ))
-            active_game_resolution = self._with_discovered_wiki_domains(
-                active_game_resolution, merged_sources
-            )
-            logger.info(
-                "retrieval.investigation_hop",
-                game=request.game,
-                hop=hop,
-                new_source_count=len(refined_sources),
-                merged_source_count=len(merged_sources),
-            )
-        investigation = investigation.model_copy(
-            update={
-                "attempted_queries": [query.query for query in merged_plan.queries][:16],
-                "aliases": merged_plan.aliases,
-                "unresolved_questions": merged_plan.missing_info,
-                "hop_count": self.max_hops if refined else 0,
-                "stop_reason": "insufficient_evidence" if merged_plan.missing_info else None,
-            }
-        )
-        stages.append(RetrievalStage(
-            name="adaptive_decision",
-            input_count=len(merged_sources),
-            output_count=len(merged_sources),
-            details={"decision": terminal_decision or ("refinement_complete" if refined else "no_refinement")},
-        ))
-        return self._outcome(merged_sources, merged_plan, investigation, refined, stages)
+        raise RuntimeError("Investigation updater must implement update_investigation")
 
     @staticmethod
     def _outcome(

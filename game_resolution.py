@@ -1,4 +1,3 @@
-import re
 from difflib import SequenceMatcher
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -37,10 +36,6 @@ from schemas import GameCandidate, GameResolution
 class SearchClient(Protocol):
     def search(self, **kwargs: Any) -> dict[str, Any]:
         ...
-
-
-def split_title(value: str) -> list[str]:
-    return re.split(r"\s[-|:：]\s|[（）()【】\[\]]", value)
 
 
 class GameResolver:
@@ -557,23 +552,6 @@ def resolution_matches_selected_url(
 ) -> bool:
     """Verify that a returned resolution represents the user's opaque choice."""
     return _selection_resolution_matches_selected_url(resolution, selected_url=selected_url)
-
-
-def choose_canonical_candidate_name(
-    *,
-    game: str,
-    candidates: list[str] | tuple[str, ...],
-    fallback: str,
-) -> str:
-    return normalized_candidate_name(game=game, candidates=candidates, fallback=fallback)
-
-
-def useful_candidate_aliases(
-    *,
-    name: str,
-    candidates: list[str] | tuple[str, ...],
-) -> list[str]:
-    return normalized_candidate_aliases(name=name, candidates=candidates)
 
 
 def is_generic_official_identity_result(*, item: dict[str, Any], game: str) -> bool:

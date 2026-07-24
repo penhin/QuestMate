@@ -1,6 +1,7 @@
 """Deterministic SearXNG-first routing over existing evidence contracts."""
 
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -8,7 +9,7 @@ import structlog
 from quality_policy import PROGRESSIVE_STRICT_SOURCE_TARGET, STABLE_FACT_INTENTS
 from schemas import GameResolution, SearchPlan, Source
 from search_router.health import ProviderHealth
-from search_router.providers import SearxngProvider, TavilyProvider
+from search_router.providers import MediaWikiProvider, SearxngProvider, TavilyProvider
 
 logger = structlog.get_logger()
 
@@ -26,11 +27,12 @@ class SearchRouter:
     """Route open-web recall without changing SearchProvider's public API."""
 
     def __init__(
-        self, *, search_backend: Any, searxng: SearxngProvider, settings: Any,
-        tavily: TavilyProvider | None = None,
+        self, *, mediawiki: MediaWikiProvider, searxng: SearxngProvider,
+        tavily: TavilyProvider, build_queries: Callable[..., list[tuple[str, Any]]], settings: Any,
     ) -> None:
-        self.search_backend = search_backend
-        self.tavily = tavily or TavilyProvider(search_backend)
+        self.mediawiki = mediawiki
+        self.tavily = tavily
+        self._build_queries = build_queries
         self.searxng = searxng
         self.settings = settings
         self.health = ProviderHealth(cooldown_seconds=settings.search_provider_cooldown_seconds)
@@ -45,12 +47,11 @@ class SearchRouter:
         intent = plan.intent if plan else "general"
         aliases = list((plan.aliases if plan else [])[:6])
         entities = list((plan.named_entity_groups if plan else [])[:4])
-        direct = await self.search_backend._search_mediawiki_sources(
+        direct = await self.mediawiki.search(
             game=game, question=query, aliases=aliases,
             planned_queries=[item.query for item in (plan.queries if plan else [])],
             game_aliases=game_resolution.aliases,
-            database_domains=list(game_resolution.database_domains), intent=intent,
-            version_sensitive=bool(plan and plan.version_sensitive), max_results=max_results,
+            database_domains=list(game_resolution.database_domains), max_results=max_results,
             named_entity_groups=entities,
         )
         enough = len(direct) >= min(PROGRESSIVE_STRICT_SOURCE_TARGET, max_results)
@@ -59,7 +60,7 @@ class SearchRouter:
             return direct[:max_results]
         if self.searxng.configured and self.health.available("searxng"):
             try:
-                queries = self.search_backend._build_search_queries(
+                queries = self._build_queries(
                     game=game, question=query, plan=plan,
                     database_domains=tuple(game_resolution.database_domains),
                     game_aliases=tuple(game_resolution.aliases),

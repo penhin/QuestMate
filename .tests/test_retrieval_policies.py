@@ -132,11 +132,11 @@ def test_mediawiki_client_keeps_late_page_sections_for_passage_selection(monkeyp
 
 
 def test_mediawiki_refinement_query_takes_priority_over_accumulated_aliases() -> None:
-    query = MediaWikiRetriever._select_search_query(
+    query = MediaWikiRetriever._select_search_queries(
         question="How do I open the final door?",
         aliases=["Final Door", "Required Key"],
         planned_queries=["hidden passage access prerequisite"],
-    )
+    )[0]
 
     assert query == "hidden passage access prerequisite"
 

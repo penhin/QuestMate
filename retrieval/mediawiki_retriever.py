@@ -235,14 +235,6 @@ class MediaWikiRetriever:
             break
 
     @staticmethod
-    def _select_search_query(*, question: str, aliases: list[str], planned_queries: list[str]) -> str:
-        return MediaWikiRetriever._select_search_queries(
-            question=question,
-            aliases=aliases,
-            planned_queries=planned_queries,
-        )[0]
-
-    @staticmethod
     def _rank_database_domains(domains: list[str], *, game: str) -> list[str]:
         """Prefer a game-specific host over broad encyclopedias without knowing providers in advance."""
         game_key = re.sub(r"[^a-z0-9]", "", game.casefold())

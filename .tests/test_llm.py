@@ -1033,96 +1033,6 @@ def test_chinese_fallback_keeps_full_question_instead_of_guessing_entity() -> No
     assert any(question in query.query for query in plan.queries)
 
 
-def test_refinement_plan_preserves_identifiers_and_changes_query() -> None:
-    content = json.dumps(
-        {
-            "intent": "general",
-            "aliases": ["translated entity"],
-            "queries": [{"source_type": "wiki", "query": "translated entity walkthrough"}],
-            "missing_info": [],
-        }
-    )
-
-    plan = GuideLLM._parse_refinement_plan(
-        content,
-        question="如何打开区域 B2 的 35 号门？",
-        intent="general",
-        attempted_queries=["如何打开区域 B2 的 35 号门"],
-    )
-
-    assert plan is not None
-    assert plan.aliases == ["translated entity"]
-    assert plan.refinement is True
-    assert "b2" in plan.queries[0].query.lower()
-    assert "35" in plan.queries[0].query
-
-
-def test_refinement_prompt_has_no_case_specific_vocabulary() -> None:
-    from guide_prompts import search_refinement_system_prompt
-
-    prompt = search_refinement_system_prompt().lower()
-
-    assert "exact identifiers" in prompt
-    assert "materially different" in prompt
-    assert "apartment 35" not in prompt
-    assert "pigeon" not in prompt
-
-
-async def test_refinement_is_skipped_when_first_pass_has_direct_evidence() -> None:
-    class UnexpectedProvider:
-        async def complete(self, **kwargs):
-            raise AssertionError("model refinement should not run")
-
-    llm = GuideLLM(provider=UnexpectedProvider())
-    request = ChatRequest(game="Niche Game", question="Artifact ZX-17 的背景是什么？")
-    plan = SearchPlan(intent="lore", aliases=["Artifact ZX-17"])
-    sources = [
-        Source(
-            title="Artifact ZX-17",
-            url="https://example.com/zx-17",
-            evidence="Artifact ZX-17 changes the gate state.",
-        )
-    ]
-
-    refined = await llm.refine_search_plan(request=request, plan=plan, sources=sources)
-
-    assert refined is None
-
-
-async def test_actionable_direct_evidence_is_checked_for_dependency_gaps() -> None:
-    class CompletenessProvider:
-        def __init__(self):
-            self.calls = 0
-
-        async def complete(self, **kwargs):
-            self.calls += 1
-            return json.dumps(
-                {
-                    "intent": "item_usage",
-                    "aliases": [],
-                    "queries": [],
-                    "missing_info": [],
-                }
-            )
-
-    provider = CompletenessProvider()
-    llm = GuideLLM(provider=provider)
-    request = ChatRequest(game="Niche Game", question="Artifact ZX-17 有什么用？")
-    plan = SearchPlan(intent="item_usage", aliases=["Artifact ZX-17"])
-    sources = [
-        Source(
-            title="Artifact ZX-17",
-            url="https://example.com/zx-17",
-            evidence="Artifact ZX-17 opens the gate after activation. The page provides the complete activation route.",
-        )
-    ]
-
-    refined = await llm.refine_search_plan(request=request, plan=plan, sources=sources)
-
-    assert provider.calls == 1
-    assert refined is None
-
-
 async def test_rule_outcome_with_direct_evidence_gets_semantic_completeness_check() -> None:
     class CompletenessProvider:
         def __init__(self):
@@ -1215,38 +1125,6 @@ async def test_no_provider_can_complete_direct_single_entity_location_evidence()
 
     assert state.complete is True
     assert state.stop_reason == "complete"
-
-
-async def test_refinement_uses_first_pass_gap_and_returns_one_query() -> None:
-    class RefinementProvider:
-        def __init__(self):
-            self.calls = []
-
-        async def complete(self, **kwargs):
-            self.calls.append(kwargs)
-            return json.dumps(
-                {
-                    "intent": "general",
-                    "aliases": ["Translated Gate"],
-                    "queries": [{"source_type": "wiki", "query": "Translated Gate access requirements"}],
-                    "missing_info": [],
-                }
-            )
-
-    provider = RefinementProvider()
-    llm = GuideLLM(provider=provider)
-    request = ChatRequest(game="Niche Game", question="如何打开 B2 区域的35号门？")
-    initial = SearchPlan(queries=[{"source_type": "web", "query": request.question}])
-    sources = [Source(title="Niche Game guide", url="https://example.com/guide", evidence="General overview")]
-
-    refined = await llm.refine_search_plan(request=request, plan=initial, sources=sources)
-
-    assert len(provider.calls) == 1
-    assert refined is not None
-    assert len(refined.queries) == 1
-    assert "b2" in refined.queries[0].query.lower()
-    assert "35" in refined.queries[0].query
-    assert request.question in provider.calls[0]["user"]
 
 
 def test_contextual_search_question_does_not_guess_followup_semantics() -> None:

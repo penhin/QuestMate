@@ -128,7 +128,7 @@ def render_structured_answer(
             raise ValueError("missing blocks")
     except (json.JSONDecodeError, ValueError, TypeError):
         claims = _claims(request=request, sources=sources, plan=plan)
-        logger.info("llm.answer_render", format="legacy", claim_count=len(claims))
+        logger.info("llm.answer_render", format="fallback", claim_count=len(claims))
         return claim_ledger_fallback(claims) if claims else render_claim_bound_answer(
             answer=answer, request=request, sources=sources, plan=plan,
         )

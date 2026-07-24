@@ -289,10 +289,7 @@ def _evidence_question_metadata(question: str) -> tuple[str, list[str], list[lis
         ] if isinstance(raw_groups, list) else []
         return primary_question, aliases[:6], [group[:4] for group in groups if group][:4]
 
-    # Compatibility for stored/test contexts created before structured groups.
-    primary_question, legacy_separator, alias_text = question.partition("\nALIASES:")
-    aliases = alias_text.split("|") if legacy_separator else []
-    return primary_question, aliases[:6], []
+    return question, [], []
 
 
 def has_unsupported_specifics(*, answer: str, sources: list[Source], question: str) -> bool:
