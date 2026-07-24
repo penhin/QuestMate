@@ -159,7 +159,9 @@ class ChatRequest(BaseModel):
     game: str = Field(min_length=1, max_length=120)
     session_id: UUID | None = None
     stream: bool = False
-    ai_provider: Literal["anthropic", "deepseek"] = "anthropic"
+    # Omitted means use the server-owned default provider.  An explicit value
+    # is only needed for a caller-owned key or a deliberate provider choice.
+    ai_provider: Literal["anthropic", "deepseek"] | None = None
     ai_api_key: str | None = Field(default=None, max_length=400)
     ai_model: str | None = Field(default=None, max_length=120)
     ai_base_url: str | None = Field(default=None, max_length=300)

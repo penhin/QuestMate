@@ -192,7 +192,10 @@ class OpenAICompatibleProvider:
 
 
 def create_model_provider(*, request: ChatRequest, settings: Settings) -> ModelProvider | None:
-    if request.ai_provider == "deepseek":
+    provider = request.ai_provider
+    if provider is None:
+        provider = "deepseek" if settings.deepseek_api_key else "anthropic"
+    if provider == "deepseek":
         # A request-owned key may select the built-in DeepSeek endpoint. When
         # using a server-owned key, keep model and endpoint server-owned too.
         if request.ai_api_key:

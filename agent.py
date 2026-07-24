@@ -30,6 +30,12 @@ from orchestration.diagnostics import evaluation_diagnostics
 from orchestration.graph import build_request_graph
 from orchestration.state import QuestAgentState
 from orchestration import status as orchestration_status
+from router import IntentRouter, RouteDecision
+from runtime import QuestRuntime
+from workflow import WorkflowRouter
+from workflows.guide import GuideWorkflow
+from workflows.build import BuildWorkflow
+from workflows.analysis import AnalysisWorkflow
 from schemas import ChatRequest, ChatResponse, GameResolution, InvestigationState, SearchPlan, SessionMessage, Source
 from search import SearchProvider, TavilySearchProvider
 from storage import conversation_store
@@ -65,13 +71,41 @@ class QuestAgent:
         self.planning_agent = PlanningAgent(self.llm)
         self.retrieval_agent = RetrievalAgent(self._retrieve_after_identity_check)
         self.answer_agent = AnswerAgent(self.llm)
+        self.intent_router = IntentRouter()
+        self.runtime = QuestRuntime()
+        self.workflow_router = WorkflowRouter()
+        self.guide_workflow = GuideWorkflow(
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            render_answer=self._render_answer,
+            safety_refusal_message=self._safety_refusal_message,
+            verification_router=self.workflow_router,
+        )
+        self.build_workflow = BuildWorkflow(
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            render_answer=self._render_answer,
+            safety_refusal_message=self._safety_refusal_message,
+            verification_router=self.workflow_router,
+        )
+        self.analysis_workflow = AnalysisWorkflow(
+            retrieve_after_identity_check=self._retrieve_after_identity_check,
+            render_answer=self._render_answer,
+            safety_refusal_message=self._safety_refusal_message,
+            verification_router=self.workflow_router,
+        )
         self.graph = self._build_graph()
 
     def _build_graph(self):
         return build_request_graph(
             identity_node=self._resolve_game,
             planning_node=self._plan,
+            routing_node=self._route,
+            guide_workflow_node=self._run_guide_workflow,
+            build_workflow_node=self._run_build_workflow,
+            analysis_workflow_node=self._run_analysis_workflow,
+            task_workflow_router=self._select_task_workflow,
             retrieval_node=self._search,
+            verification_node=self._verify,
+            workflow_router=self.workflow_router.next_after_research,
             answer_node=self._answer,
         )
 
@@ -80,8 +114,16 @@ class QuestAgent:
             provider_scope = getattr(self.llm, "provider_scope", None)
             if callable(provider_scope):
                 async with provider_scope(request):
-                    return await self._run_with_timeout(request)
-            return await self._run_with_timeout(request)
+                    return await self._run_in_runtime(request)
+            return await self._run_in_runtime(request)
+
+    async def _run_in_runtime(self, request: ChatRequest) -> ChatResponse:
+        user_id = request.metadata.get("user_id")
+        return await self.runtime.execute(
+            user_id=user_id if isinstance(user_id, str) else None,
+            tools={"search": self.search_provider, "knowledge": self.knowledge},
+            operation=lambda: self._run_with_timeout(request),
+        )
 
     async def _run_with_timeout(self, request: ChatRequest) -> ChatResponse:
         """Keep a stalled upstream from consuming an unbounded user request."""
@@ -127,6 +169,7 @@ class QuestAgent:
                 "history": history,
                 "game_resolution": GameResolution(input_name=request.game),
                 "search_plan": SearchPlan(),
+                "route": RouteDecision(),
                 "sources": [],
                 "investigation": InvestigationState(goal=request.question),
                 "answer": "",
@@ -207,11 +250,20 @@ class QuestAgent:
             provider_scope = getattr(self.llm, "provider_scope", None)
             if callable(provider_scope):
                 async with provider_scope(request):
-                    async for event in self._stream(request):
+                    async for event in self._stream_in_runtime(request):
                         yield event
                 return
-            async for event in self._stream(request):
+            async for event in self._stream_in_runtime(request):
                 yield event
+
+    async def _stream_in_runtime(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
+        user_id = request.metadata.get("user_id")
+        async for event in self.runtime.stream(
+            user_id=user_id if isinstance(user_id, str) else None,
+            tools={"search": self.search_provider, "knowledge": self.knowledge},
+            operation=lambda: self._stream(request),
+        ):
+            yield event
 
     async def _stream(self, request: ChatRequest) -> AsyncIterator[AgentStreamEvent]:
         started = perf_counter()
@@ -240,6 +292,7 @@ class QuestAgent:
             request=request, history=history, game_resolution=game_resolution
         )
         timings_ms["planning"] = self._elapsed_ms(planning_started)
+        route = self.intent_router.route(plan=search_plan, game_resolution=game_resolution)
 
         if search_plan.safety_refusal:
             response = ChatResponse(
@@ -254,78 +307,86 @@ class QuestAgent:
             return
 
         yield ("status", self._status_for_search(search_plan))
-        outcome, game_resolution = await self.retrieval_agent.investigate(
+        yield ("status", self._status_for_route(route))
+        async for event in self._stream_task_workflow(
             request=request,
             history=history,
-            plan=search_plan,
             game_resolution=game_resolution,
+            search_plan=search_plan,
+            route=route,
             timings_ms=timings_ms,
-        )
-        sources, search_plan, refined = outcome.sources, outcome.plan, outcome.refined
+            is_new_session=is_new_session,
+        ):
+            yield event
+        return
 
-        game_resolution = await self.identity_agent.recover(
+    async def _stream_task_workflow(
+        self,
+        *,
+        request: ChatRequest,
+        history: list[SessionMessage],
+        game_resolution: GameResolution,
+        search_plan: SearchPlan,
+        route: RouteDecision,
+        timings_ms: dict[str, int],
+        is_new_session: bool,
+    ) -> AsyncIterator[AgentStreamEvent]:
+        runners = {
+            "guide": self.guide_workflow.stream,
+            "build": self.build_workflow.stream,
+            "analysis": self.analysis_workflow.stream,
+        }
+        workflow_state = None
+        async for event_type, payload in runners[route.intent](
             request=request,
-            sources=sources,
-            current=game_resolution,
-        )
-        if self._needs_game_confirmation(game_resolution):
-            response = ChatResponse(
-                session_id=session_id,
-                answer=self._game_confirmation_message(game_resolution),
+            history=history,
+            game_resolution=game_resolution,
+            search_plan=search_plan,
+            timings_ms=timings_ms,
+            agent_trace=[],
+            stream_answer=self._stream_answer,
+        ):
+            if event_type == "chunk":
+                yield ("chunk", payload)
+            elif event_type == "state":
+                workflow_state = payload
+                sources = workflow_state["evidence"]
+                if self._needs_game_confirmation(workflow_state["game"]):
+                    yield ("done", ChatResponse(
+                        session_id=request.session_id or uuid4(),
+                        answer=self._game_confirmation_message(workflow_state["game"]),
+                        sources=[], is_new=is_new_session, needs_game_confirmation=True,
+                        game_candidates=workflow_state["game"].candidates,
+                        timings_ms=workflow_state["timings_ms"],
+                    ))
+                    return
+                yield ("status", self._status_for_sources(sources))
+            elif event_type == "result":
+                workflow_state = payload
+        if workflow_state is None:
+            raise RuntimeError("Task workflow completed without an execution state")
+        resolved_game = workflow_state["game"]
+        sources = workflow_state["evidence"]
+        if self._needs_game_confirmation(resolved_game):
+            yield ("done", ChatResponse(
+                session_id=request.session_id or uuid4(),
+                answer=self._game_confirmation_message(resolved_game),
                 sources=[],
-                title=None,
                 is_new=is_new_session,
                 needs_game_confirmation=True,
-                game_candidates=game_resolution.candidates,
-                timings_ms=timings_ms,
-            )
-            yield ("done", response)
+                game_candidates=resolved_game.candidates,
+                timings_ms=workflow_state["timings_ms"],
+            ))
             return
-
-        if refined:
-            yield ("status", "证据扩展：已针对关键证据缺口补查")
         yield ("status", self._status_for_sources(sources))
-        yield ("status", "整理答案：保留来源，核对版本")
-        chunks: list[str] = []
-        answer_started = perf_counter()
-        stream_kwargs = dict(
-            request=request,
-            sources=sources,
-            plan=search_plan,
-            game_resolution=game_resolution,
-            history=history,
-        )
-        self._add_optional_argument(
-            self.answer_agent.stream_answer, stream_kwargs, "investigation", outcome.investigation
-        )
-        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
-            chunks.append(chunk)
-            yield ("chunk", chunk)
-
-        answer = "".join(chunks)
-        timings_ms["answer"] = self._elapsed_ms(answer_started)
-        improve_kwargs = dict(
-            request=request,
-            sources=sources,
-            answer=answer,
-            plan=search_plan,
-            game_resolution=game_resolution,
-            history=history,
-        )
-        self._add_optional_argument(self.llm.improve_answer, improve_kwargs, "investigation", outcome.investigation)
-        improvement_started = perf_counter()
-        improved_answer = await self.llm.improve_answer(**improve_kwargs)
-        timings_ms["improvement"] = self._elapsed_ms(improvement_started)
-        if improved_answer != answer:
-            answer = improved_answer
-        title = self._initial_title(request) if is_new_session else None
+        answer = workflow_state["answer"]
         response = ChatResponse(
-            session_id=session_id,
+            session_id=request.session_id or uuid4(),
             answer=answer,
             sources=sources,
-            title=title,
+            title=self._initial_title(request) if is_new_session else None,
             is_new=is_new_session,
-            timings_ms=timings_ms,
+            timings_ms=workflow_state["timings_ms"],
         )
         await conversation_store.save_chat(request, response)
         yield ("done", response)
@@ -341,6 +402,71 @@ class QuestAgent:
         return {**state, "search_plan": search_plan, "timings_ms": {
             **state["timings_ms"], "planning": self._elapsed_ms(started)
         }, "agent_trace": [*state["agent_trace"], AgentTrace("planning", "plan")]}
+
+    async def _route(self, state: QuestAgentState) -> QuestAgentState:
+        """Create the typed task-workflow hand-off after planning.
+
+        Phase 1 keeps the existing retrieval graph intact.  Subsequent phases
+        replace its common tail with the selected task graph.
+        """
+        route = self.intent_router.route(
+            plan=state["search_plan"], game_resolution=state["game_resolution"]
+        )
+        return {
+            **state,
+            "route": route,
+            "agent_trace": [*state["agent_trace"], AgentTrace("workflow_router", route.intent)],
+        }
+
+    @staticmethod
+    def _select_task_workflow(state: QuestAgentState) -> str:
+        return state["route"].intent
+
+    async def _run_guide_workflow(self, state: QuestAgentState) -> QuestAgentState:
+        guide_state = await self.guide_workflow.run(
+            request=state["request"],
+            history=state["history"],
+            game_resolution=state["game_resolution"],
+            search_plan=state["search_plan"],
+            timings_ms=state["timings_ms"],
+            agent_trace=state["agent_trace"],
+        )
+        return {
+            **state,
+            "game_resolution": guide_state["game"],
+            "search_plan": guide_state["search_plan"],
+            "sources": guide_state["evidence"],
+            "investigation": guide_state["investigation"],
+            "answer": guide_state["answer"],
+            "timings_ms": guide_state["timings_ms"],
+            "agent_trace": guide_state["agent_trace"],
+        }
+
+    async def _run_build_workflow(self, state: QuestAgentState) -> QuestAgentState:
+        build_state = await self.build_workflow.run(
+            request=state["request"], history=state["history"],
+            game_resolution=state["game_resolution"], search_plan=state["search_plan"],
+            timings_ms=state["timings_ms"], agent_trace=state["agent_trace"],
+        )
+        return {
+            **state, "game_resolution": build_state["game"],
+            "search_plan": build_state["search_plan"], "sources": build_state["evidence"],
+            "investigation": build_state["investigation"], "answer": build_state["answer"],
+            "timings_ms": build_state["timings_ms"], "agent_trace": build_state["agent_trace"],
+        }
+
+    async def _run_analysis_workflow(self, state: QuestAgentState) -> QuestAgentState:
+        analysis_state = await self.analysis_workflow.run(
+            request=state["request"], history=state["history"],
+            game_resolution=state["game_resolution"], search_plan=state["search_plan"],
+            timings_ms=state["timings_ms"], agent_trace=state["agent_trace"],
+        )
+        return {
+            **state, "game_resolution": analysis_state["game"],
+            "search_plan": analysis_state["search_plan"], "sources": analysis_state["evidence"],
+            "investigation": analysis_state["investigation"], "answer": analysis_state["answer"],
+            "timings_ms": analysis_state["timings_ms"], "agent_trace": analysis_state["agent_trace"],
+        }
 
     async def _resolve_game(self, state: QuestAgentState) -> QuestAgentState:
         request = state["request"]
@@ -623,22 +749,75 @@ class QuestAgent:
     async def _answer(self, state: QuestAgentState) -> QuestAgentState:
         if state["search_plan"].safety_refusal:
             return {**state, "answer": self._safety_refusal_message()}
-        request = state["request"]
         started = perf_counter()
-        answer_kwargs = dict(
-            request=request,
+        answer = await self._render_answer(
+            request=state["request"],
             sources=state["sources"],
             plan=state["search_plan"],
             game_resolution=state["game_resolution"],
             history=state["history"],
+            investigation=state["investigation"],
         )
-        self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", state["investigation"])
-        answer = await self.answer_agent.answer(**answer_kwargs)
         return {**state, "answer": answer, "timings_ms": {
             **state["timings_ms"], "answer": self._elapsed_ms(started)
         }, "agent_trace": [*state["agent_trace"], AgentTrace(
             "answer", "render", len(state["sources"])
         )]}
+
+    async def _render_answer(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+        history: list[SessionMessage],
+        investigation: InvestigationState,
+    ) -> str:
+        answer_kwargs = dict(
+            request=request,
+            sources=sources,
+            plan=plan,
+            game_resolution=game_resolution,
+            history=history,
+        )
+        self._add_optional_argument(self.answer_agent.answer, answer_kwargs, "investigation", investigation)
+        return await self.answer_agent.answer(**answer_kwargs)
+
+    async def _stream_answer(
+        self,
+        *,
+        request: ChatRequest,
+        sources: list[Source],
+        plan: SearchPlan,
+        game_resolution: GameResolution,
+        history: list[SessionMessage],
+        investigation: InvestigationState,
+    ) -> AsyncIterator[str]:
+        stream_kwargs = dict(
+            request=request, sources=sources, plan=plan,
+            game_resolution=game_resolution, history=history,
+        )
+        self._add_optional_argument(
+            self.answer_agent.stream_answer, stream_kwargs, "investigation", investigation
+        )
+        async for chunk in self.answer_agent.stream_answer(**stream_kwargs):
+            yield chunk
+
+    async def _verify(self, state: QuestAgentState) -> QuestAgentState:
+        """Checkpoint required by verification-oriented workflows.
+
+        Evidence policies remain deterministic and answer-side enforcement
+        stays in ``GuideLLM``; this node makes that verification boundary an
+        explicit, inspectable execution step.
+        """
+        workflow = self.workflow_router.classify(state["search_plan"])
+        return {
+            **state,
+            "agent_trace": [*state["agent_trace"], AgentTrace(
+                "verification", workflow.value, len(state["sources"])
+            )],
+        }
 
     @staticmethod
     def _safety_refusal_message() -> str:
@@ -737,6 +916,15 @@ class QuestAgent:
     @staticmethod
     def _status_for_search(search_plan: SearchPlan) -> str:
         return orchestration_status.search(search_plan)
+
+    @staticmethod
+    def _status_for_route(route: RouteDecision) -> str:
+        labels = {
+            "guide": "任务工作流：攻略与路线",
+            "build": "任务工作流：配装与属性",
+            "analysis": "任务工作流：机制与分析",
+        }
+        return labels[route.intent]
 
     @staticmethod
     def _status_for_game_resolution(game_resolution: GameResolution) -> str:
