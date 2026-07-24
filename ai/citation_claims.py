@@ -16,6 +16,11 @@ _URL_OR_LINK_FRAGMENT = re.compile(
     re.IGNORECASE,
 )
 _NAVIGATION_PREFIX = re.compile(r"^(?:首页|手机游戏|游戏攻略|综合篇|作者[：:]|来源[：:]|发布时间[：:])")
+_PAGE_META_OR_PROMOTION = re.compile(
+    r"^(?:下面请看|一起来看看|更新于\d{4}-\d{1,2}-\d{1,2}|jpg\)\s*更新于|"
+    r"有很多小伙伴问|本期流程.{0,80}(?:三连|关注|点赞)|.*(?:交流群|更多攻略).{0,80})"
+)
+_ORDERED_STEP = re.compile(r"(?:^|\s)(?:第\s*\d+\s*步|step\s*\d+)\b", re.IGNORECASE)
 
 
 def claim_ids_cover_entity_groups(
@@ -173,6 +178,8 @@ def _is_direct_evidence_passage(passage: str) -> bool:
         return False
     if _NAVIGATION_PREFIX.match(passage):
         return False
+    if "#" in passage or _PAGE_META_OR_PROMOTION.match(passage):
+        return False
     return True
 
 
@@ -190,6 +197,12 @@ def _passage_score(
     # because every term is taken from the player's question, not a maintained
     # guide vocabulary.
     relevance_matches = sum(1 for token in tokens if token_in_text(token, lowered))
+    # A numbered action is useful primary evidence for a request that itself
+    # asks for steps, while page introductions often repeat the same entity
+    # names without advancing the route.
+    ordered_step_bonus = 8 if _ORDERED_STEP.search(passage) and any(
+        token_in_text(token, "步骤 steps step questline route") for token in tokens
+    ) else 0
     if entity_groups:
         matches = sum(
             1 for group in entity_groups if any(token_in_text(value.casefold(), lowered) for value in group)
@@ -198,8 +211,8 @@ def _passage_score(
         # relation endpoints. They make translated evidence selectable without
         # weakening the distinct entity-group requirements.
         alias_match = any(token_in_text(value, lowered) for value in aliases or [])
-        return (matches + int(alias_match)) * 100 + min(relevance_matches, 99), -len(passage)
-    matches = relevance_matches
+        return (matches + int(alias_match)) * 100 + min(relevance_matches + ordered_step_bonus, 99), -len(passage)
+    matches = relevance_matches + ordered_step_bonus
     # The caller keeps the original passage position as the final tie-breaker,
     # so duplicated/translated page bodies cannot displace earlier evidence.
     return matches, -len(passage)

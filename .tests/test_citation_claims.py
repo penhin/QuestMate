@@ -248,6 +248,30 @@ def test_claims_drop_embedded_urls_and_incomplete_markdown_links() -> None:
     assert [claim.statement for claim in claims] == ["由于双指的控制，布莱泽最终发狂。"]
 
 
+def test_claims_prefer_numbered_steps_over_guide_introduction() -> None:
+    claims = build_citation_claims(
+        question="菈妮支线步骤",
+        sources=[Source(
+            title="Guide",
+            url="https://example.com/guide",
+            evidence=(
+                "下面请看《艾尔登法环》菈妮支线任务详细完成步骤，一起来看看吧。\n"
+                "第1步，前往三姊妹塔的菈妮魔法师塔与菈妮交谈。\n"
+                "第2步，前往永恒之城寻找猎杀指头刀。\n"
+                "jpg) 更新于2022-03-03 # 【游戏攻略】菈妮支线。"
+            ),
+        )],
+        eligible_source_indexes={1},
+        entity_groups=[["菈妮", "Ranni"]],
+        aliases=["菈妮", "Ranni"],
+    )
+
+    assert [claim.statement for claim in claims][:2] == [
+        "第1步，前往三姊妹塔的菈妮魔法师塔与菈妮交谈。",
+        "第2步，前往永恒之城寻找猎杀指头刀。",
+    ]
+
+
 def test_malformed_structured_answer_uses_player_safe_verified_fallback() -> None:
     request = ChatRequest(game="艾尔登法环", question="菈妮支线步骤")
     sources = [Source(
