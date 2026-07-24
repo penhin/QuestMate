@@ -137,8 +137,24 @@ def render_claim_bound_answer(
     return re.sub(r"\[(\d+)\]\{(C\d+_\d+)\}", render, answer).strip()
 
 
-def claim_ledger_fallback(claims: list[CitationClaim]) -> str:
-    return "\n".join(["已核实的资料：", *[f"- {claim.statement}[{claim.source_index}]" for claim in claims[:4]]])
+def verified_fact_fallback(claims: list[CitationClaim]) -> str:
+    """Give players a small, readable verified answer when Claim binding fails.
+
+    The Claim ledger is an internal control surface, not a response format.
+    Limiting this fallback to two direct passages avoids presenting a scraped
+    page outline as a complete walkthrough while retaining the evidence that
+    can actually be checked.
+    """
+    facts = list(dict.fromkeys(
+        f"{claim.statement}[{claim.source_index}]" for claim in claims[:2]
+    ))
+    if not facts:
+        return ""
+    return (
+        "目前只能直接核实以下信息：\n\n"
+        + "\n".join(f"- {fact}" for fact in facts)
+        + "\n\n现有资料不足以完整回答这个问题；我不会补全推测。"
+    )
 
 
 def render_structured_answer(
@@ -154,8 +170,8 @@ def render_structured_answer(
     except (json.JSONDecodeError, ValueError, TypeError):
         claims = _claims(request=request, sources=sources, plan=plan)
         logger.info("llm.answer_render", format="fallback", claim_count=len(claims))
-        return claim_ledger_fallback(claims) if claims else render_claim_bound_answer(
-            answer=answer, request=request, sources=sources, plan=plan,
+        return verified_fact_fallback(claims) or conservative_answer(
+            request=request, sources=sources, plan=plan,
         )
 
     claims = _claims(request=request, sources=sources, plan=plan)
@@ -208,6 +224,6 @@ def render_structured_answer(
         "llm.answer_render", format="structured", block_count=len(blocks),
         bound_block_count=0, unbound_block_count=unbound_blocks, claim_count=len(claims),
     )
-    return claim_ledger_fallback(claims) if claims else conservative_answer(
+    return verified_fact_fallback(claims) or conservative_answer(
         request=request, sources=sources, plan=plan,
     )

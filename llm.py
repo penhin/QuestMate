@@ -29,7 +29,6 @@ from ai.citation_rendering import (
     claim_eligible_source_indexes,
     claim_entity_groups,
     claim_evidence_queries,
-    claim_ledger_fallback,
     claim_source_has_direct_body,
     render_claim_bound_answer,
     render_structured_answer,
@@ -59,7 +58,6 @@ from query_tokens import question_relevance_tokens
 from schemas import (
     AnswerCompletenessAssessment,
     ChatRequest,
-    CitationClaim,
     GameResolution,
     InvestigationState,
     SearchIntent,
@@ -691,12 +689,6 @@ class GuideLLM:
             plan=plan,
             conservative_answer=GuideLLM._conservative_answer,
         )
-
-    @staticmethod
-    def _claim_ledger_fallback(claims: list[CitationClaim]) -> str:
-        """Return only atomic evidence when the model fails Claim selection."""
-        return claim_ledger_fallback(claims)
-
 
     @staticmethod
     def _investigation_context(investigation: InvestigationState | None) -> str:

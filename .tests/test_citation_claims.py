@@ -1,6 +1,6 @@
 from ai.citation_claims import build_citation_claims, claim_ids_cover_entity_groups
-from ai.citation_rendering import order_citations_by_appearance
-from schemas import Source
+from ai.citation_rendering import order_citations_by_appearance, render_structured_answer
+from schemas import ChatRequest, SearchPlan, Source
 
 
 def test_build_citation_claims_keeps_source_and_sentence_boundaries() -> None:
@@ -198,3 +198,52 @@ def test_claim_ranking_uses_planned_evidence_language_for_translated_question() 
 
     assert len(claims) == 1
     assert "activates the Blue Gate" in claims[0].statement
+
+
+def test_claims_drop_headings_breadcrumbs_and_truncated_search_snippets() -> None:
+    claims = build_citation_claims(
+        question="菈妮支线步骤",
+        sources=[
+            Source(
+                title="Guide",
+                url="https://example.com/guide",
+                evidence=(
+                    "# 《艾尔登法环》菈妮支线任务详细完成步骤.1\n"
+                    "手机游戏 > 艾尔登法环 > 攻略\n"
+                    "拿到猎杀指头刀后，回去找菈妮。"
+                ),
+            ),
+            Source(
+                title="Truncated result",
+                url="https://example.com/truncated",
+                evidence="你不需要做那些步骤来推进菈妮的支线任务，所以不用太 ...",
+            ),
+        ],
+        eligible_source_indexes={1, 2},
+        aliases=["菈妮"],
+    )
+
+    assert [claim.statement for claim in claims] == ["拿到猎杀指头刀后，回去找菈妮。"]
+
+
+def test_malformed_structured_answer_uses_player_safe_verified_fallback() -> None:
+    request = ChatRequest(game="艾尔登法环", question="菈妮支线步骤")
+    sources = [Source(
+        title="Guide",
+        url="https://example.com/guide",
+        evidence="拿到猎杀指头刀后，回去找菈妮。然后可获得颠倒沙漏。",
+    )]
+
+    rendered = render_structured_answer(
+        answer="模型没有按约定输出 JSON",
+        request=request,
+        sources=sources,
+        plan=SearchPlan(aliases=["菈妮"]),
+        conservative_answer=lambda **_: "保守回答",
+    )
+
+    assert rendered.startswith("目前只能直接核实以下信息：")
+    assert "已核实的资料" not in rendered
+    assert "#" not in rendered
+    assert "拿到猎杀指头刀后，回去找菈妮。[1]" in rendered
+    assert rendered.endswith("我不会补全推测。")

@@ -348,7 +348,7 @@ def test_structured_answer_extracts_json_from_model_wrapper() -> None:
     assert rendered == "在东侧档案库。[1]"
 
 
-def test_legacy_answer_with_available_claims_uses_claim_ledger() -> None:
+def test_legacy_answer_with_available_claims_uses_player_safe_verified_fallback() -> None:
     request = ChatRequest(game="Synthetic Adventure", question="Where is the Quartz Relay?")
     sources = [
         Source(
@@ -367,7 +367,8 @@ def test_legacy_answer_with_available_claims_uses_claim_ledger() -> None:
 
     assert "might be" not in rendered
     assert "The Quartz Relay is inside the eastern archive." in rendered
-    assert rendered.endswith("[1]")
+    assert "The Quartz Relay is inside the eastern archive.[1]" in rendered
+    assert rendered.endswith("我不会补全推测。")
 
 
 def test_claim_ledger_diversifies_across_eligible_sources_before_extra_passages() -> None:
@@ -441,7 +442,8 @@ def test_structured_answer_drops_unbound_fact_blocks() -> None:
     )
 
     assert "The Quartz Relay is inside the eastern archive." in rendered
-    assert rendered.endswith("[1]")
+    assert "The Quartz Relay is inside the eastern archive.[1]" in rendered
+    assert rendered.endswith("我不会补全推测。")
     assert "没有找到能直接说明" not in rendered
 
 

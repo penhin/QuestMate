@@ -8,6 +8,9 @@ from schemas import CitationClaim, Source
 
 
 _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;.])\s*|\n+(?:[-*•]\s*)?")
+_MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+")
+_BREADCRUMB = re.compile(r"^[^。！？!?]{0,180}(?:>|›|»)[^。！？!?]{0,180}$")
+_TRUNCATED_SNIPPET = re.compile(r"(?:\.\.\.|…)(?:[\]）)】\"'”’]*)$")
 
 
 def claim_ids_cover_entity_groups(
@@ -124,6 +127,11 @@ def build_citation_claims(
 
 
 def _passages(evidence: str) -> list[str]:
+    # A provider may split ``...`` into a final single-dot fragment below.
+    # Reject the whole result up front so a truncated search preview cannot
+    # accidentally become a Claim after sentence splitting.
+    if _TRUNCATED_SNIPPET.search(evidence.strip()):
+        return []
     values: list[str] = []
     for part in _SENTENCE_BOUNDARY.split(evidence):
         cleaned = " ".join(part.split()).strip(" -•")
@@ -131,13 +139,30 @@ def _passages(evidence: str) -> list[str]:
         # location, or version value). Relevance and entity coverage are
         # checked later, so do not discard them merely because a longer,
         # unrelated sentence shares the same evidence passage.
-        if 8 <= len(cleaned) <= 700:
+        if 8 <= len(cleaned) <= 700 and _is_direct_evidence_passage(cleaned):
             values.append(cleaned)
     if not values:
         cleaned = " ".join(evidence.split())[:700]
-        if cleaned:
+        if cleaned and _is_direct_evidence_passage(cleaned):
             values.append(cleaned)
     return list(dict.fromkeys(values))
+
+
+def _is_direct_evidence_passage(passage: str) -> bool:
+    """Reject page chrome and incomplete snippets before they enter the Claim ledger.
+
+    Search results frequently prepend Markdown headings or navigation paths, and
+    some providers return a sentence cut off with an ellipsis.  Neither form is
+    an auditable statement of game fact, even when it happens to contain the
+    player's entity name.
+    """
+    if _MARKDOWN_HEADING.match(passage):
+        return False
+    if _BREADCRUMB.match(passage):
+        return False
+    if _TRUNCATED_SNIPPET.search(passage):
+        return False
+    return True
 
 
 def _passage_score(
