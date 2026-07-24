@@ -378,6 +378,17 @@ class PostgresConversationStore:
                     delete(conversation_sessions).where(conversation_sessions.c.session_id == str(session_id))
                 )
 
+    async def clear_sessions(self) -> None:
+        """Clear disposable conversation data, including cascaded messages."""
+        await self.init_schema()
+        if self._using_fallback:
+            self.fallback._messages.clear()
+            self.fallback._titles.clear()
+            return
+        async with self.database.sessionmaker() as session:
+            async with session.begin():
+                await session.execute(delete(conversation_sessions))
+
     async def save_feedback(self, feedback: FeedbackRequest) -> None:
         await self.init_schema()
         if self._using_fallback:

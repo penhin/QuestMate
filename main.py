@@ -38,6 +38,9 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await conversation_store.init_schema()
+        if settings.clear_sessions_on_startup:
+            await conversation_store.clear_sessions()
+            logger.info("conversation.sessions_cleared_on_startup")
         try:
             await knowledge_store.init_schema()
         except Exception:

@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     database_max_overflow: int = Field(default=20, ge=0, le=100)
     database_pool_timeout_seconds: int = Field(default=30, ge=1, le=120)
     allow_in_memory_storage: bool = False
+    clear_sessions_on_startup: bool = False
     cors_allowed_origins: str = "http://localhost:1420,http://127.0.0.1:1420,tauri://localhost"
 
     search_max_results: int = Field(default=5, ge=1, le=20)

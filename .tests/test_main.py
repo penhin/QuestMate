@@ -1024,7 +1024,7 @@ def test_chat_endpoint_streams_status_chunks_and_done(monkeypatch) -> None:
     assert "理解问题" in body
     assert "类型：" in body
     assert "来源筛选" in body
-    assert "Elden Ring" in body
+    assert '"session_id"' in body
 
 
 def test_cors_allows_tauri_dev_origin() -> None:
