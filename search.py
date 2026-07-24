@@ -39,6 +39,8 @@ from search_components.policy import (
     parse_source_datetime,
     resolution_authority_domains,
 )
+from search_router import SearchRouter
+from search_router.providers import SearxngProvider
 
 
 logger = structlog.get_logger()
@@ -121,9 +123,21 @@ class TavilySearchProvider:
             canonical_key=self._canonical_source_key,
             extract_version=self._extract_game_version,
         )
+        self._router = SearchRouter(
+            legacy_tavily=self,
+            searxng=SearxngProvider(
+                base_url=self.settings.searxng_base_url,
+                timeout_seconds=self.settings.searxng_timeout_seconds,
+                max_results=self.settings.search_max_results,
+            ),
+            settings=self.settings,
+        )
 
     def usage_snapshot(self) -> dict[str, int]:
         """Return process counters for request-scoped delta accounting."""
+        return self._router.usage_snapshot()
+
+    def _tavily_usage_snapshot(self) -> dict[str, int]:
         if self._client is None:
             return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
         return self._client.request_usage()
@@ -140,6 +154,21 @@ class TavilySearchProvider:
         max_results: int | None = None,
         plan: SearchPlan | None = None,
         game_resolution: GameResolution | None = None,
+    ) -> list[Source]:
+        game_resolution = game_resolution or await self.resolve_game(game=game, question=query)
+        return await self._router.search(
+            query=query, game=game, max_results=max_results or self.settings.search_max_results,
+            plan=plan, game_resolution=game_resolution,
+        )
+
+    async def _search_with_tavily(
+        self,
+        query: str,
+        game: str,
+        max_results: int | None = None,
+        plan: SearchPlan | None = None,
+        game_resolution: GameResolution | None = None,
+        skip_mediawiki: bool = False,
     ) -> list[Source]:
         if self._client is None:
             return []
@@ -173,16 +202,11 @@ class TavilySearchProvider:
         game_aliases = confirmed_aliases
         min_strict_results = min(PROGRESSIVE_STRICT_SOURCE_TARGET, total_results)
 
-        direct_wiki_sources = await self._search_mediawiki_sources(
-            game=game,
-            question=query,
-            aliases=aliases,
+        direct_wiki_sources = [] if skip_mediawiki else await self._search_mediawiki_sources(
+            game=game, question=query, aliases=aliases,
             planned_queries=[item.query for item in (plan.queries if plan else [])],
-            game_aliases=game_aliases,
-            database_domains=list(game_resolution.database_domains),
-            intent=intent,
-            version_sensitive=version_sensitive,
-            max_results=total_results,
+            game_aliases=game_aliases, database_domains=list(game_resolution.database_domains),
+            intent=intent, version_sensitive=version_sensitive, max_results=total_results,
             named_entity_groups=named_entity_groups,
         )
         # Stable fact lookups can finish on a sufficiently populated direct

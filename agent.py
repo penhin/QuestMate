@@ -852,13 +852,13 @@ class QuestAgent:
     def _search_usage_snapshot(self) -> dict[str, int]:
         snapshot = getattr(self.search_provider, "usage_snapshot", None)
         if not callable(snapshot):
-            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0, "searxng_calls": 0}
         values = snapshot()
         if not isinstance(values, dict):
-            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0}
+            return {"tavily_paid_calls": 0, "tavily_cache_hits": 0, "searxng_calls": 0}
         return {
             key: max(0, int(values.get(key, 0)))
-            for key in ("tavily_paid_calls", "tavily_cache_hits")
+            for key in ("tavily_paid_calls", "tavily_cache_hits", "searxng_calls")
         }
 
     def _search_usage_scope(self):
@@ -874,7 +874,7 @@ class QuestAgent:
         after = self._search_usage_snapshot()
         usage = {
             key: max(0, after.get(key, 0) - before.get(key, 0))
-            for key in ("tavily_paid_calls", "tavily_cache_hits")
+            for key in ("tavily_paid_calls", "tavily_cache_hits", "searxng_calls")
         }
         model_usage = getattr(self.llm, "request_usage", None)
         values = model_usage() if callable(model_usage) else {}
