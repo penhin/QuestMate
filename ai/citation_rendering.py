@@ -15,6 +15,7 @@ from schemas import ChatRequest, CitationClaim, SearchPlan, Source
 
 logger = structlog.get_logger()
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
+_CLAIM_ID_MARKER = re.compile(r"\s*[（(]\s*C\d+_\d+\s*[)）]")
 
 
 def order_citations_by_appearance(answer: str, sources: list[Source]) -> tuple[str, list[Source]]:
@@ -210,7 +211,11 @@ def render_structured_answer(
         ):
             unbound_blocks += 1
             continue
-        rendered.append(f"{text}{''.join(f'[{index}]' for index in dict.fromkeys(indexes))}")
+        # Claim IDs are an internal model-control protocol.  A model can
+        # occasionally echo one inside ``text`` despite the prompt; citations
+        # below are the only player-facing reference format.
+        player_text = _CLAIM_ID_MARKER.sub("", text).strip()
+        rendered.append(f"{player_text}{''.join(f'[{index}]' for index in dict.fromkeys(indexes))}")
         covered_requirements.update(valid_requirements)
     if requirements and set(range(len(requirements))) - covered_requirements:
         rendered = []

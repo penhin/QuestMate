@@ -247,3 +247,19 @@ def test_malformed_structured_answer_uses_player_safe_verified_fallback() -> Non
     assert "#" not in rendered
     assert "拿到猎杀指头刀后，回去找菈妮。[1]" in rendered
     assert rendered.endswith("我不会补全推测。")
+
+
+def test_structured_answer_strips_internal_claim_ids_from_player_text() -> None:
+    rendered = render_structured_answer(
+        answer='{"blocks":[{"text":"菈妮在魔法师塔（C1_1）。","claim_ids":["C1_1"]}]}',
+        request=ChatRequest(game="艾尔登法环", question="菈妮在哪里？"),
+        sources=[Source(
+            title="Guide",
+            url="https://example.com/guide",
+            evidence="菈妮在魔法师塔。",
+        )],
+        plan=SearchPlan(aliases=["菈妮"]),
+        conservative_answer=lambda **_: "保守回答",
+    )
+
+    assert rendered == "菈妮在魔法师塔。[1]"
