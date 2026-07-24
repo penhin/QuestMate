@@ -8,12 +8,13 @@ A game-guide question-answering service with a FastAPI backend and a Tauri deskt
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres redis
+docker compose up -d
 uv sync
 uv run uvicorn main:app --reload
 ```
 
-服务地址为 `http://127.0.0.1:8000`。常用命令：
+这会启动 PostgreSQL、Redis 和 SearXNG；后端地址为 `http://127.0.0.1:8000`。
+常用命令：
 
 The service is available at `http://127.0.0.1:8000`. Common commands:
 
@@ -50,12 +51,11 @@ The overlay targets `http://127.0.0.1:8000` by default; override it with
 
 ## 索引资料 / Index knowledge sources
 
-先启动 Postgres、Redis 和 Celery worker：
+启动后端后，如需异步索引资料，只需另开一个终端运行 Celery worker：
 
-Start Postgres, Redis, and the Celery worker first:
+After the backend is running, start the Celery worker in another terminal for asynchronous indexing:
 
 ```bash
-docker compose up -d postgres redis
 uv run celery -A tasks.celery_app worker --loglevel=info
 ```
 
