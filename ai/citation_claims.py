@@ -11,6 +11,11 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？!?；;.])\s*|\n+(?:[-*•]\s*)?"
 _MARKDOWN_HEADING = re.compile(r"^#{1,6}\s+")
 _BREADCRUMB = re.compile(r"^[^。！？!?]{0,180}(?:>|›|»)[^。！？!?]{0,180}$")
 _TRUNCATED_SNIPPET = re.compile(r"(?:\.\.\.|…)(?:[\]）)】\"'”’]*)$")
+_URL_OR_LINK_FRAGMENT = re.compile(
+    r"(?:https?://|www\.|\]\(|\)\s*>|(?:[a-z0-9-]+\.)+(?:com|cn|net|org|io|gg)/)",
+    re.IGNORECASE,
+)
+_NAVIGATION_PREFIX = re.compile(r"^(?:首页|手机游戏|游戏攻略|综合篇|作者[：:]|来源[：:]|发布时间[：:])")
 
 
 def claim_ids_cover_entity_groups(
@@ -161,6 +166,12 @@ def _is_direct_evidence_passage(passage: str) -> bool:
     if _BREADCRUMB.match(passage):
         return False
     if _TRUNCATED_SNIPPET.search(passage):
+        return False
+    if _URL_OR_LINK_FRAGMENT.search(passage):
+        return False
+    if passage.startswith(("[", "]", "(", ")", ">", "|")):
+        return False
+    if _NAVIGATION_PREFIX.match(passage):
         return False
     return True
 

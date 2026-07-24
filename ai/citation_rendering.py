@@ -16,6 +16,8 @@ from schemas import ChatRequest, CitationClaim, SearchPlan, Source
 logger = structlog.get_logger()
 _CITATION_PATTERN = re.compile(r"\[(\d+)\]")
 _CLAIM_ID_MARKER = re.compile(r"\s*[（(]\s*C\d+_\d+\s*[)）]")
+_CAUSAL_QUESTION = re.compile(r"(?:为什么|为何|原因|为啥|how come|why)\s*\??$", re.IGNORECASE)
+_CAUSAL_EVIDENCE = re.compile(r"(?:因为|由于|原因是|因此|所以|导致|以致|because|due to|caused by)", re.IGNORECASE)
 
 
 def order_citations_by_appearance(answer: str, sources: list[Source]) -> tuple[str, list[Source]]:
@@ -34,11 +36,10 @@ def order_citations_by_appearance(answer: str, sources: list[Source]) -> tuple[s
         source_index = int(match.group(1))
         return f"[{remap[source_index]}]" if source_index in remap else match.group(0)
 
+    # Sources are part of the citation UI, not a search-debug payload.  Do not
+    # expose unreferenced candidates (often broad search snippets) beneath an
+    # otherwise well-supported answer.
     ordered_sources = [sources[index - 1] for index in ordered_indexes]
-    ordered_sources.extend(
-        source for index, source in enumerate(sources, start=1)
-        if index not in remap
-    )
     return _CITATION_PATTERN.sub(replace, answer), ordered_sources
 
 
@@ -138,7 +139,7 @@ def render_claim_bound_answer(
     return re.sub(r"\[(\d+)\]\{(C\d+_\d+)\}", render, answer).strip()
 
 
-def verified_fact_fallback(claims: list[CitationClaim]) -> str:
+def verified_fact_fallback(*, claims: list[CitationClaim], question: str) -> str:
     """Give players a small, readable verified answer when Claim binding fails.
 
     The Claim ledger is an internal control surface, not a response format.
@@ -146,6 +147,13 @@ def verified_fact_fallback(claims: list[CitationClaim]) -> str:
     page outline as a complete walkthrough while retaining the evidence that
     can actually be checked.
     """
+    # A quotation or page title that merely names the subject is not an
+    # explanation.  For causal questions, decline unless the available
+    # evidence actually states a causal link.
+    if _CAUSAL_QUESTION.search(question.strip()) and not any(
+        _CAUSAL_EVIDENCE.search(claim.statement) for claim in claims
+    ):
+        return ""
     facts = list(dict.fromkeys(
         f"{claim.statement}[{claim.source_index}]" for claim in claims[:2]
     ))
@@ -171,7 +179,7 @@ def render_structured_answer(
     except (json.JSONDecodeError, ValueError, TypeError):
         claims = _claims(request=request, sources=sources, plan=plan)
         logger.info("llm.answer_render", format="fallback", claim_count=len(claims))
-        return verified_fact_fallback(claims) or conservative_answer(
+        return verified_fact_fallback(claims=claims, question=request.question) or conservative_answer(
             request=request, sources=sources, plan=plan,
         )
 
@@ -229,6 +237,6 @@ def render_structured_answer(
         "llm.answer_render", format="structured", block_count=len(blocks),
         bound_block_count=0, unbound_block_count=unbound_blocks, claim_count=len(claims),
     )
-    return verified_fact_fallback(claims) or conservative_answer(
+    return verified_fact_fallback(claims=claims, question=request.question) or conservative_answer(
         request=request, sources=sources, plan=plan,
     )

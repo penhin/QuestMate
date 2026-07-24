@@ -54,7 +54,10 @@ class Settings(BaseSettings):
     # End-to-end circuit breaker. It must leave a small margin below the
     # evaluator's 30-second p95 contract and client deadline.
     agent_request_timeout_seconds: int = Field(default=28, ge=10, le=55)
-    planner_model_max_tokens: int = Field(default=700, ge=128, le=1800)
+    # The planner returns several query objects plus aliases and coverage
+    # requirements.  700 can truncate valid JSON mid-query on the configured
+    # OpenAI-compatible model, silently forcing a generic fallback plan.
+    planner_model_max_tokens: int = Field(default=1100, ge=128, le=1800)
     investigation_model_max_tokens: int = Field(default=600, ge=128, le=1200)
     answer_model_max_tokens: int = Field(default=900, ge=128, le=1800)
     tavily_max_concurrency: int = Field(default=3, ge=1, le=8)

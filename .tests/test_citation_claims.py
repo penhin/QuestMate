@@ -45,7 +45,7 @@ def test_citations_and_sources_follow_first_appearance_order() -> None:
     answer, ordered = order_citations_by_appearance("结论一[4]，结论二[2]，补充[4][1]。", sources)
 
     assert answer == "结论一[1]，结论二[2]，补充[1][3]。"
-    assert [source.title for source in ordered] == ["Fourth", "Second", "First", "Third"]
+    assert [source.title for source in ordered] == ["Fourth", "Second", "First"]
 
 
 def test_build_citation_claims_never_uses_ineligible_source() -> None:
@@ -226,6 +226,28 @@ def test_claims_drop_headings_breadcrumbs_and_truncated_search_snippets() -> Non
     assert [claim.statement for claim in claims] == ["拿到猎杀指头刀后，回去找菈妮。"]
 
 
+def test_claims_drop_embedded_urls_and_incomplete_markdown_links() -> None:
+    claims = build_citation_claims(
+        question="狼哥为什么死了？",
+        sources=[
+            Source(
+                title="Noisy",
+                url="https://example.com/noisy",
+                evidence=(
+                    "cn/aedfh/remen-381-1/)> 《艾尔登法环》狼哥疯掉原因揭晓。\n"
+                    "- [艾尔登法环狼人布莱泽为什么会疯?1\n"
+                    "由于双指的控制，布莱泽最终发狂。"
+                ),
+            ),
+        ],
+        eligible_source_indexes={1},
+        entity_groups=[["狼哥", "布莱泽"]],
+        aliases=["狼哥", "布莱泽"],
+    )
+
+    assert [claim.statement for claim in claims] == ["由于双指的控制，布莱泽最终发狂。"]
+
+
 def test_malformed_structured_answer_uses_player_safe_verified_fallback() -> None:
     request = ChatRequest(game="艾尔登法环", question="菈妮支线步骤")
     sources = [Source(
@@ -263,3 +285,19 @@ def test_structured_answer_strips_internal_claim_ids_from_player_text() -> None:
     )
 
     assert rendered == "菈妮在魔法师塔。[1]"
+
+
+def test_causal_fallback_requires_causal_evidence() -> None:
+    rendered = render_structured_answer(
+        answer="not JSON",
+        request=ChatRequest(game="艾尔登法环", question="为什么狼哥死了？"),
+        sources=[Source(
+            title="Quote",
+            url="https://example.com/quote",
+            evidence="终究还是无法成为她的英雄。",
+        )],
+        plan=SearchPlan(aliases=["狼哥"]),
+        conservative_answer=lambda **_: "保守回答",
+    )
+
+    assert rendered == "保守回答"
